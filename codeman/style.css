@@ -23,7 +23,7 @@ body {
 .app { display: flex; height: 100vh; }
 
 .sidebar {
-  width: var(--sidebar-width, 320px);
+  width: var(--sidebar-width, 390px);   /* default fits two comfortable Miller columns */
   background: var(--panel);
   border-right: 1px solid var(--border);
   overflow-y: auto;
@@ -49,10 +49,6 @@ body.sidebar-hidden .sidebar,
 body.sidebar-hidden .sidebar-resizer { display: none; }
 #showSidebarBtn {
   display: none;
-  position: fixed;
-  top: 8px;
-  left: 8px;
-  z-index: 200;
   width: 32px;
   height: 32px;
   font-size: 16px;
@@ -63,36 +59,54 @@ body.sidebar-hidden .sidebar-resizer { display: none; }
   cursor: pointer;
 }
 #showSidebarBtn:hover { background: #3a3a3d; }
-body.sidebar-hidden #showSidebarBtn { display: block; }
-/* keep header content clear of the floating show button */
-body.sidebar-hidden .main-tabs { padding-left: 48px; }
-body.sidebar-hidden .page-header { padding-left: 52px; }
+/* When hidden on desktop, the sidebar collapses to a slim rail that occupies real
+   layout width (content flows beside it) — no floating button / padding hacks.
+   On mobile the rail collapses (display:contents) so the button floats as a
+   hamburger over the drawer (see the @media block). */
+.sidebar-rail { display: none; }
+body.sidebar-hidden:not(.is-mobile) .sidebar-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 40px;
+  flex-shrink: 0;
+  padding-top: 8px;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+}
+body.sidebar-hidden:not(.is-mobile) #showSidebarBtn { display: block; }
 
 .sidebar-header {
   padding: 12px;
-  font-weight: bold;
-  font-size: 16px;
   border-bottom: 1px solid var(--border);
   display: flex;
-  justify-content: space-between;
-  align-items: center;
+  flex-direction: column;
+  gap: 10px;
 }
-.brand { display: flex; align-items: center; gap: 7px; }
+.brand-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.brand { display: flex; align-items: center; gap: 7px; font-weight: bold; font-size: 16px; }
 .brand-icon { width: 20px; height: 20px; display: block; flex-shrink: 0; }
-.sidebar-actions button {
-  font-size: 11px;
-  margin-left: 4px;
-  padding: 3px 6px;
-}
-.sidebar-actions button.spinning { animation: spin 0.6s linear infinite; }
+.brand-tools { display: flex; gap: 4px; flex-shrink: 0; }
+.brand-tools button { font-size: 14px; line-height: 1; padding: 3px 8px; }
+.spinning { animation: spin 0.6s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-/* header create buttons mirror their card accent colors */
-.sidebar-actions button.btn-project { background: #6d4ec7; }
-.sidebar-actions button.btn-project:hover { background: #8b6ae0; }
-.sidebar-actions button.btn-folder { background: #2f9e8f; }
-.sidebar-actions button.btn-folder:hover { background: #46c2b0; }
-.sidebar-actions button.btn-page { background: var(--accent); }
-.sidebar-actions button.btn-page:hover { background: #1177bb; }
+/* full-width segmented create group — equal widths, shrink together, never overflow */
+.sidebar-create { display: flex; gap: 4px; }
+.sidebar-create button {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 4px;
+  white-space: nowrap;
+}
+/* create buttons mirror their card accent colors */
+.sidebar-create button.btn-project { background: #6d4ec7; }
+.sidebar-create button.btn-project:hover { background: #8b6ae0; }
+.sidebar-create button.btn-folder { background: #2f9e8f; }
+.sidebar-create button.btn-folder:hover { background: #46c2b0; }
+.sidebar-create button.btn-page { background: var(--accent); }
+.sidebar-create button.btn-page:hover { background: #1177bb; }
 .sidebar-search {
   display: flex;
   align-items: center;
@@ -160,16 +174,21 @@ body.sidebar-hidden .page-header { padding-left: 52px; }
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 3px;
-  padding: 6px 10px;
-  font-size: 11px;
+  gap: 4px;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 500;
   color: var(--text-dim);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
 .crumb-seg { cursor: pointer; color: #aaa; }
 .crumb-seg:hover { color: #fff; text-decoration: underline; }
-.crumb-seg:last-child { color: #fff; }
+/* type-coded segments (match the card/page-path palette) */
+.crumb-seg.crumb-root { color: var(--text-dim); }
+.crumb-seg.crumb-folder { color: #46c2b0; }
+.crumb-seg.crumb-project { color: #b794ff; font-weight: 600; }
+.crumb-seg:last-child { text-decoration: underline; text-underline-offset: 3px; }
 .crumb-sep { color: #555; }
 /* Fixed window of equal-width columns — no horizontal scrolling. The body row
    holds optional left/right paging rails plus the column strip. */
@@ -205,29 +224,30 @@ body.sidebar-hidden .page-header { padding-left: 52px; }
 /* drag-to-sort insertion indicators (top/bottom edge while dragging) */
 .reorder-before { box-shadow: inset 0 3px 0 0 #4aa3ff !important; }
 .reorder-after { box-shadow: inset 0 -3px 0 0 #4aa3ff !important; }
-/* banner shown above the columns when inside a project whose column is hidden */
+/* banner shown above the columns whenever you're inside one or more projects —
+   the full project chain (outermost → nearest), each segment clickable */
 .project-banner {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex-shrink: 0;
   padding: 7px 12px;
   background: linear-gradient(90deg, #2c2444, #241f33);
   border-bottom: 1px solid #463a6b;
   border-left: 4px solid #9b6dff;
-  cursor: pointer;
   user-select: none;
+  font-size: 13px;
 }
-.project-banner:hover { background: linear-gradient(90deg, #342a52, #2a2440); }
-.project-banner .pb-icon { font-size: 15px; }
-.project-banner .pb-name { font-size: 13px; font-weight: 700; color: #e9e2ff; letter-spacing: 0.2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.project-banner::after {
-  content: '‹ back';
-  margin-left: auto;
-  font-size: 10px;
-  color: #b794ff;
-  flex-shrink: 0;
+.project-banner .pb-icon { font-size: 15px; flex-shrink: 0; }
+.project-banner .pb-seg {
+  font-weight: 600;
+  color: #cdbcff;
+  cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.project-banner .pb-seg:hover { color: #fff; text-decoration: underline; }
+.project-banner .pb-seg:last-child { color: #e9e2ff; }
+.project-banner .pb-sep { color: #6b5b9b; flex-shrink: 0; }
 /* teal folder card (a bit taller than before) */
 .subfolder-card {
   position: relative; /* anchor for the absolutely-positioned hover actions */
@@ -299,6 +319,13 @@ body.sidebar-hidden .page-header { padding-left: 52px; }
 .subfolder-card.project-card .sf-arrow { color: #9b6dff; }
 .subfolder-card.project-card.selected { border-color: #9b6dff; border-left-color: #9b6dff; box-shadow: inset 3px 0 0 #6d4ec7; }
 .subfolder-card.project-card .sf-actions button { color: #b794ff; }
+
+/* Drag affordance: while dragging a project, valid targets (projects + the root
+   drop zone) stay lit and plain folders dim — projects can't nest in a folder. */
+body.dragging-project .subfolder-card:not(.project-card),
+body.dragging-project .tree-row.is-folder:not(.is-project) { opacity: 0.35; }
+body.dragging-project .subfolder-card.project-card { outline: 2px dashed #9b6dff; outline-offset: -2px; }
+body.dragging-project .tree-row.is-folder.is-project { box-shadow: inset 0 0 0 1px #9b6dff; }
 
 .miller-row {
   display: flex;
@@ -423,39 +450,6 @@ body.mode-double #collapseAllBtn { display: none; }
 }
 .layout-switch:not(.on) .ls-opt[data-mode="single"],
 .layout-switch.on .ls-opt[data-mode="double"] { color: #fff; }
-
-/* column-count picker (double mode): how many columns to show at once */
-.col-count {
-  flex-basis: 100%;
-  display: none; /* shown via JS only in double mode */
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 2px;
-}
-.col-count .cc-label { font-size: 11px; color: var(--text-dim); flex-shrink: 0; }
-.cc-opts {
-  flex: 1;
-  display: flex;
-  background: var(--bg);
-  border: 1px solid #3a3d41;
-  border-radius: 6px;
-  padding: 2px;
-  gap: 2px;
-}
-.cc-opt {
-  flex: 1;
-  text-align: center;
-  font-size: 11px;
-  font-weight: 600;
-  color: #aaa;
-  padding: 3px 0;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-.cc-opt:hover:not(.disabled):not(.active) { background: var(--panel-2); color: #fff; }
-.cc-opt.active { background: var(--accent); color: #fff; }
-.cc-opt.disabled { opacity: 0.3; cursor: not-allowed; }
 
 .tree { padding: 8px; }
 .tree-area:not(.double) #tree { flex: 1; overflow-y: auto; overscroll-behavior-x: contain; }
@@ -1733,8 +1727,12 @@ pre.md-code {
     background: rgba(0, 0, 0, 0.5);
   }
 
-  /* floating ☰ open button — bigger, clear of the notch */
-  #showSidebarBtn {
+  /* floating ☰ open button — the rail collapses on mobile (display:contents) so
+     the button floats as a hamburger over the off-canvas drawer, clear of the notch */
+  body.is-mobile .sidebar-rail { display: contents; }
+  body.is-mobile.sidebar-hidden #showSidebarBtn {
+    display: block;
+    position: fixed; z-index: 200;
     top: calc(8px + env(safe-area-inset-top));
     left: calc(8px + env(safe-area-inset-left));
     width: 40px; height: 40px; font-size: 20px;
@@ -1743,9 +1741,8 @@ pre.md-code {
   body.is-mobile .main-tabs { padding-left: 56px; }
   body.is-mobile .page-header { padding-left: 56px; padding-right: 12px; }
 
-  /* --- single-column tree only: hide the double/column controls --- */
-  body.is-mobile .layout-switch,
-  body.is-mobile #colCount { display: none !important; }
+  /* --- single-column tree only: hide the double-layout toggle --- */
+  body.is-mobile .layout-switch { display: none !important; }
 
   /* --- always-visible row actions (touch has no hover) --- */
   .tree-row .tree-actions,
@@ -1754,24 +1751,45 @@ pre.md-code {
   .tree-row .tree-del { display: inline !important; opacity: 0.85; }
   .todo-item .todo-remove { opacity: 1 !important; }
 
-  /* --- bigger tap targets --- */
+  /* --- bigger tap targets for icon-only row actions --- */
   .tree-actions button, .miller-actions button, .sf-actions button,
-  .section-actions button, .block-toolbar button {
+  .section-actions button {
     min-width: 32px; min-height: 32px;
   }
   .tree-row, .miller-row { padding-top: 9px; padding-bottom: 9px; }
+
+  /* --- block toolbar: WRAP instead of overflowing off the right edge; compact
+     buttons (no min-width widener), drop the flex spacer so no row is wasted --- */
+  .block-toolbar { flex-wrap: wrap; gap: 4px; padding: 6px 8px; }
+  .block-toolbar .spacer { display: none; }
+  .block-toolbar button { min-height: 32px; padding: 5px 8px; font-size: 12px; }
+
+  /* --- section header: keep [toggle · title · actions] on row 1, push the tags
+     onto their own full-width row below (no more cramming/cut-off) --- */
+  .section-header { flex-wrap: wrap; }
+  .section-header .section-title { min-width: 0; }
+  .section-header .section-actions { order: 4; }
+  .section-header .tags { order: 5; flex-basis: 100%; margin: 4px 0 0; }
+
+  /* --- nothing forces the page wider than the viewport: only the code area
+     scrolls horizontally, inside its own block --- */
+  .page, .section, .block, .section-body { min-width: 0; max-width: 100%; }
 
   /* --- 16px inputs so iOS Safari doesn't zoom on focus --- */
   .sidebar-search input, .page-search input, .modal-input, .cmdk-input,
   .todo-text, .section-title, .block-label, .pending-input { font-size: 16px; }
 
-  /* --- header create/util buttons: let them wrap with breathing room --- */
-  .sidebar-actions { flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
-  .sidebar-actions button { font-size: 13px; padding: 6px 9px; margin-left: 0; }
+  /* --- header create group + tools: bigger tap targets --- */
+  .sidebar-create button { font-size: 13px; padding: 8px 4px; }
+  .brand-tools button { font-size: 16px; padding: 6px 10px; }
 
   /* --- tighter page padding, smaller title --- */
   .page { padding: 12px 14px; }
   .page-header h1 { font-size: 19px; }
+
+  /* --- page-header action row: wrap tidily with compact buttons --- */
+  .page-header-actions { flex-wrap: wrap; gap: 6px; }
+  .page-header-actions button { padding: 6px 8px; font-size: 12px; }
 
   /* --- in-page outline as an overlay rail, not a fixed side column --- */
   .page-area.outline-open .page-outline {

@@ -192,6 +192,29 @@
     treeData = saved;
   })();
 
+  // Nestable-projects helpers: pathPrefixes / projectChain / isValidProjectParent
+  (function () {
+    const saved = treeData;
+    // Valid nesting: project P → project Q → plain folder F; plus a plain folder PF.
+    treeData = [
+      { type: 'folder', name: 'P', path: 'P', project: true, children: [
+        { type: 'folder', name: 'Q', path: 'P/Q', project: true, children: [
+          { type: 'folder', name: 'F', path: 'P/Q/F', children: [] },
+        ] },
+      ] },
+      { type: 'folder', name: 'PF', path: 'PF', children: [] },
+    ];
+    t('pathPrefixes splits cumulative', pathPrefixes('a/b/c'), ['a', 'a/b', 'a/b/c']);
+    t('pathPrefixes empty → []', pathPrefixes(''), []);
+    t('projectChain nested → outermost..nearest', projectChain('P/Q/F').map(n => n.name), ['P', 'Q']);
+    t('projectChain on a project itself', projectChain('P/Q').map(n => n.name), ['P', 'Q']);
+    t('projectChain under plain folder → none', projectChain('PF'), []);
+    t('isValidProjectParent root', isValidProjectParent(''), true);
+    t('isValidProjectParent project', isValidProjectParent('P/Q'), true);
+    t('isValidProjectParent plain folder', isValidProjectParent('PF'), false);
+    treeData = saved;
+  })();
+
   // collectBlocksFromPage (offline quick-paste search walker)
   (function () {
     const out = [];

@@ -115,6 +115,8 @@ function promptAuth() {
 // Network call to the PHP backend. Throws on network failure (used to detect
 // that the backend is unreachable so we can fall back to local persistence).
 // A 401 means the optional password gate is on: prompt once and retry.
+const API_TIMEOUT_MS = 9000; // abort a hung request so the retry/offline path can run
+
 async function apiFetch(action, body, query) {
   const doFetch = () => {
     // Normally relative (UI is served by the NAS). The desktop wrapper bundles the
@@ -125,7 +127,11 @@ async function apiFetch(action, body, query) {
     const opts = { method: body !== undefined ? 'POST' : 'GET', headers: {} };
     if (authToken) opts.headers['X-CodeMan-Auth'] = authToken;
     if (body !== undefined) opts.body = JSON.stringify(body);
-    return fetch(url, opts);
+    // Time-box the request: a hung fetch (flaky mobile link, slow TLS) aborts and
+    // throws so we fail fast instead of spinning. AbortError is a network failure.
+    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    if (ctrl) { opts.signal = ctrl.signal; var timer = setTimeout(() => ctrl.abort(), API_TIMEOUT_MS); }
+    return fetch(url, opts).finally(() => { if (ctrl) clearTimeout(timer); });
   };
   let res = await doFetch();
   if (res.status === 401) {
@@ -134,7 +140,15 @@ async function apiFetch(action, body, query) {
   }
   if (res.status === 401) throw new Error('authentication required');
   if (res.status >= 500) throw new Error('backend error ' + res.status);
-  return res.json();
+  // A reachable server that returns a 4xx (or a malformed body) is a *server
+  // response*, not "offline" — surface it as an app error so we don't false-trip
+  // the offline mirror on, e.g., a 400 with a non-JSON body.
+  try {
+    return await res.json();
+  } catch (e) {
+    if (!res.ok) return { error: 'request failed (' + res.status + ')' };
+    throw e;
+  }
 }
 
 // Storage layer: try the backend; if it's unreachable, serve reads from the

@@ -28,20 +28,21 @@ codeman-desktop/  optional macOS desktop wrapper (Electron)
 
 | File | Role |
 |------|------|
-| `index.html` | Markup; loads **vendored** Prism (offline) and the 7 ordered `src/*.js` scripts. Cache-busts CSS/JS with a `?v=` query over http(s); on `file://` the query is skipped (Chromium won't resolve `foo.js?v=…` off disk). The stylesheet is a plain `<link>` whose href gets `?v=` appended by JS — **never** `document.write` (that wipes the document under a `file://` load). |
+| `index.html` | Markup; loads **vendored** Prism (offline), then `version.js`, then the 7 ordered `src/*.js` scripts (via the dynamic loader array — `version.js` is first so `CODEMAN_VERSION` exists before the modules run). Cache-busts CSS/JS with a `?v=` query over http(s); on `file://` the query is skipped (Chromium won't resolve `foo.js?v=…` off disk). The stylesheet is a plain `<link>` whose href gets `?v=` appended by JS — **never** `document.write` (that wipes the document under a `file://` load). |
+| `version.js` | **Single version source of truth.** `self.CODEMAN_VERSION = 'X.Y.Z'` — read by the footer (`init.js`) and `importScripts`-ed by `sw.js` for the cache name. Bump this one file per release (CI also syncs it from the git tag for the packaged desktop build). |
 | `src/core.js` | Languages, global state, the `api()` wrapper (offline-aware) + `apiFetch`, toast, themed modals. `apiFetch` builds a relative `api.php?...` URL, or prefixes `window.CODEMAN_API_BASE` if set (the desktop wrapper sets it; in a browser it's unset → relative). |
-| `src/tree.js` | Sidebar tree (single column) + Miller columns (double) + drag-to-sort. `effectiveMode()` forces single-column when `body.is-mobile`, without changing the persisted `sidebarMode`. |
+| `src/tree.js` | Sidebar tree (single column) + Miller columns (double, **always exactly 2** — `MILLER_COLS`) + drag-to-sort. `effectiveMode()` forces single-column when `body.is-mobile`, without changing the persisted `sidebarMode` (which **defaults to `double`** on desktop). Project helpers: `pathPrefixes`, `projectChain` (the project-ancestor chain), `isValidProjectParent`; the project-chain banner + color-coded breadcrumb live here. |
 | `src/editor.js` | Page tabs, page/section/block editor, language picker, blocks (code/note/rich/checklist), merge/split/reorder, variables, save (conflict-aware). |
-| `src/features.js` | Trash & history UI, history diff, favorites + recently-copied, tag manager, command palette, quick-paste block palette, find & replace, export/import, `primeOfflineCache`. |
-| `src/ui.js` | Search, layout toggle, column-count slider, expand/collapse, hide/resize sidebar, and `initMobile()` (the `body.is-mobile` flag + off-canvas drawer + backdrop). |
+| `src/features.js` | Trash & history UI, history diff, favorites + recently-copied, tag manager, command palette, quick-paste block palette, find & replace, export/import, `primeOfflineCache`, `rebuildIndex`, and `openMoreMenu` (the sidebar `⋯` overflow menu, reusing the `.mini-menu` pattern). |
+| `src/ui.js` | Search, layout toggle (single/double), expand/collapse, hide/resize sidebar, and `initMobile()` (the `body.is-mobile` flag + off-canvas drawer + backdrop). |
 | `src/offline.js` | Local-persistence fallback: IndexedDB mirror + write-queue + sync; offline trash/history. |
-| `src/init.js` | Bootstrap IIFE + Service Worker registration (skipped on `file://`/insecure contexts). |
-| `sw.js` | **PWA Service Worker** — precaches the app shell so CodeMan boots when the server is unreachable (network-first + cache fallback, `ignoreSearch` so `?v=` URLs hit cache, stable cache keys). `api.php` is deliberately **not** intercepted. Bump `CACHE_VERSION` per release. |
+| `src/init.js` | Bootstrap IIFE + Service Worker registration (skipped on `file://`/insecure contexts) + sets the footer version label from `CODEMAN_VERSION`. |
+| `sw.js` | **PWA Service Worker** — precaches the app shell so CodeMan boots when the server is unreachable (network-first + cache fallback, `ignoreSearch` so `?v=` URLs hit cache, stable cache keys). `api.php` is deliberately **not** intercepted. `CACHE_VERSION` is derived from `version.js` (`importScripts('version.js')`) — bump `version.js`, not this. |
 | `manifest.webmanifest` + `icon-maskable.svg` + `favicon.svg` | PWA manifest (installable) + icons. |
-| `style.css` | All styling. Palette lives in `:root` **design tokens** (dark-only — light theme was intentionally dropped; don't add a theme toggle). One `@media (max-width:768px)` block at the end makes the UI mobile-responsive (drawer sidebar, always-visible row actions on touch, 16px inputs to stop iOS zoom). |
+| `style.css` | All styling. Palette lives in `:root` **design tokens** (dark-only — light theme was intentionally dropped; don't add a theme toggle). Hidden-sidebar desktop **rail** (`.sidebar-rail`). One `@media (max-width:768px)` block at the end makes the UI mobile-responsive (drawer sidebar, always-visible row actions on touch, 16px inputs to stop iOS zoom, **block toolbar wraps** instead of overflowing, section tags drop to their own row). |
 | `api.php` | Filesystem API: tree, page CRUD, move, reorder, content/block search, metadata index, projects, trash, history, save-conflict detection, find & replace, tag rename, optional password gate. |
 | `vendor/prism/` | Vendored Prism (core + autoloader + grammars + theme) — **no CDN**, works offline. Grammars autoload on demand; an unviewed language won't highlight offline until first rendered. |
-| `tests.html` | Standalone browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + offline trash/history reducers (snapshots/restores the real IndexedDB cache, safe to run). Open it in a browser; ~74 assertions. |
+| `tests.html` | Standalone browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + offline trash/history reducers (snapshots/restores the real IndexedDB cache, safe to run). Open it in a browser; ~82 assertions. |
 
 **No build step.** The `src/*.js` files are plain classic scripts sharing one global scope;
 the load order in `index.html` *is* the dependency order. Edit a file, reload the browser.
@@ -80,8 +81,12 @@ the load order in `index.html` *is* the dependency order. Edit a file, reload th
 - **Legacy shape:** older sections wrapped content in `tabs:[{name,blocks,subsections}]`.
   The tabs feature was removed, but `sectionContent(section)` transparently reads both
   shapes. **New sections are written flat — don't reintroduce `.tabs`.**
-- **Projects** = a root-only folder with a hidden `.project` marker; rendered prominently;
-  pinned to the root (can't be nested — guarded client- and server-side).
+- **Projects** = a folder with a hidden `.project` marker; rendered prominently. **Nestable**:
+  a project may live at the root or inside **another project**, but **never inside a plain
+  folder** — guarded client- and server-side (`isValidProjectParent`, the `move`/`create_project`
+  checks). `buildTree` detects the marker at any depth, so nested projects render for free. The
+  sidebar shows a clickable **project-chain banner** + a color-coded breadcrumb (project=purple,
+  folder=teal).
 - **Manual child order** per folder in `.order.json` (array of child names in display
   order); `buildTree` sorts folders-before-pages then by this order. New folders/projects
   are prepended. Drag-to-sort writes it via the `reorder` action.
@@ -95,7 +100,8 @@ the load order in `index.html` *is* the dependency order. Edit a file, reload th
   raw `.json` is never served and never git-tracked.
 - **Metadata index** (`<root>/.index.json`): caches each page's `tags`+`langs`, validated by
   mtime (self-heals on external edits, prunes deleted pages). Powers sidebar badges + name/
-  tag/lang search without parsing every file. "⟳" button = `rebuild_index`.
+  tag/lang search without parsing every file. "Rebuild index" (in the sidebar `⋯`
+  menu) = `rebuild_index`.
 - **PHP-FPM gotcha (deployment):** PHP-FPM often runs with `clear_env` on, which strips
   container/process env vars — so `getenv('CODEMAN_DATA')` can come back empty even when the
   var is set in the container's environment. Deliver it via the web server instead (nginx
@@ -107,9 +113,12 @@ the load order in `index.html` *is* the dependency order. Edit a file, reload th
 
 **Sidebar / navigation** — folder tree with inline create/rename/delete (editable rows, not
 dialogs), drag-and-drop, expand/collapse-all. **Single column** = classic tree; **Double
-column** = windowed Finder/Miller columns (footer slider picks 2–4 visible columns, left/
-right rails page the window, folder cards show aggregated code-types + top tags + recursive
-counts). New folder/page targets the selected folder. Search by name/tags/code-type, with a
+column** (the desktop default) = windowed Finder/Miller columns showing **exactly 2 columns**
+at a time (left/right rails page the window; folder cards show aggregated code-types + top tags
++ recursive counts). New folder/page targets the selected folder. The header is three bands:
+brand row (+ `⋯` overflow menu for the utility actions + `⟨` hide), a full-width create group
+(`+ Project`/`+ Folder`/`+ Page`), and the search row. Hiding the sidebar collapses it to a slim
+**rail** on desktop (a floating hamburger on mobile). Search by name/tags/code-type, with a
 **deep-search toggle (⊃)** that also scans page content. Open pages are tabs. Full nav state
 persists across reloads.
 
@@ -139,10 +148,14 @@ self-contained HTML via `pageToHtml`) / import.
 **Offline** — `api()` tries the backend; if unreachable, reads serve from an IndexedDB mirror
 and writes queue to replay on reconnect (structural writes also mutate the cached tree so the
 UI updates live). A bottom-right badge shows offline state + queued count. **Service worker**
-precaches the shell for full offline boot. **`primeOfflineCache`** (☁ button) walks the whole
-tree to cache every page for offline use. Reconnect is **conflict-aware** (stale-mtime saves
-re-sent forced after the server snapshots the concurrent version to history) — never silently
-dropped.
+precaches the shell for full offline boot. **`primeOfflineCache`** (in the `⋯` menu) walks the
+whole tree to cache every page for offline use. Reconnect is **conflict-aware** (stale-mtime
+saves re-sent forced after the server snapshots the concurrent version to history) — never
+silently dropped. Offline state is **self-healing and never latches**: `apiFetch` has a request
+timeout (`AbortController`) and treats a 4xx as a real server response (not "offline"); when
+offline, a backoff `probeBackend()` loop (plus tab-focus and the `online` event) re-probes and
+clears the badge once the server is reachable again — important on mobile/self-signed-HTTPS where
+a single failed request used to stick the app offline.
 
 ### Collisions / concurrency
 No live collaboration or auto-merge; conflicts are caught **at save time**, server-side, and
@@ -189,10 +202,13 @@ HTTPS/Gatekeeper/PWA install are blocked.
 
 ### CI (`.github/workflows/codeman-desktop.yml`)
 Triggers **only** on a version tag (`v*`), on `macos-14` (arm64): `npm ci` → set the app version
-from the tag (`v3.2.0` → `3.2.0`) → `npm run dist` → publish the `.dmg` to a GitHub Release.
-Unsigned (`CSC_IDENTITY_AUTO_DISCOVERY=false`). Release flow: bump `codeman-desktop/package.json`,
-commit, `git tag vX.Y.Z && git push origin vX.Y.Z`. (Heads-up: a repo's very first workflow,
-added in the same push as a tag, won't fire for that tag — re-push the tag once.)
+from the tag (`v3.2.0` → `3.2.0`, and `sed` the same version into `codeman/version.js` for the
+bundled shell) → `npm run dist` → publish the `.dmg` to a GitHub Release.
+Unsigned (`CSC_IDENTITY_AUTO_DISCOVERY=false`). Release flow: bump **both** `codeman/version.js`
+(drives the web footer + SW cache for the git-synced web/NAS deployment) and
+`codeman-desktop/package.json`, commit, `git tag vX.Y.Z && git push origin vX.Y.Z`. (Heads-up: a
+repo's very first workflow, added in the same push as a tag, won't fire for that tag — re-push the
+tag once.)
 
 ---
 
@@ -227,12 +243,26 @@ added in the same push as a tag, won't fire for that tag — re-push the tag onc
   assume `section.blocks` exists directly.
 - **Persisted nav must survive an empty initial tree:** `sanitizeColumnPath` returns early when
   `!treeData.length`, or setup-time `renderTree()` calls would wipe saved navigation.
+- **Version is single-sourced in `version.js`.** It's a classic script (`self.CODEMAN_VERSION`)
+  loaded first in `index.html` AND `importScripts`-ed by `sw.js` — so it works in both the window
+  and the worker scope. Don't hardcode the version in the footer or `sw.js`; bump `version.js`.
+- **Hidden-sidebar rail vs. mobile hamburger:** desktop hides → a real `.sidebar-rail` flex child
+  (occupies width, content flows beside it). On mobile the rail is `display:contents` so the same
+  `#showSidebarBtn` floats as a hamburger over the drawer. Don't reintroduce the old
+  `position:fixed` button + `padding-left` banner hacks.
+- **Project nesting is a contiguous prefix:** because a project can only sit in a project/root,
+  the project ancestors of any path form a prefix from the root — `projectChain()` relies on this.
+  Guard all create/move/reorder paths with `isValidProjectParent` (server mirrors it in
+  `create_project`/`move`); don't add a new path that bypasses it.
+- **Block toolbar declutter is CSS-only (mobile wrap), not a JS overflow menu.** The toolbar's
+  secondary buttons are non-contiguous, so a true `⋯` menu would require reordering it and risk a
+  desktop regression. Mobile just sets `flex-wrap:wrap` + hides the spacer. Keep desktop untouched.
 
 ---
 
 ## Persisted client state
 
-**localStorage:** `codeman.sidebarMode`, `columnPath`, `selectedFolder`, `millerCols`,
+**localStorage:** `codeman.sidebarMode` (defaults to `double`), `columnPath`, `selectedFolder`,
 `millerColScroll`, `expandedFolders`, `openTabs`, `sidebarWidth`, `sidebarHidden`, `deepSearch`,
 `favorites`, `recentCopies`, `authToken` (only when the password gate is on).
 **IndexedDB `codeman`:** store `kv` holds `tree`, `queue` (pending writes), `trash` (local
@@ -247,8 +277,9 @@ content. **Desktop wrapper:** `settings.json` in the OS user-data dir holds the 
 - `safeName()` rejects path separators, `..`, and leading `.` for all create/rename names;
   `safePath` confines file access to the data root. `requireFields()` returns clean `{error}`
   JSON instead of leaking PHP warnings.
-- **Projects pinned to root:** `move` rejects dropping a `.project` folder into any non-root
-  target (also guarded client-side).
+- **Projects nest only in projects:** `create_project` and `move` reject placing a `.project`
+  folder anywhere except the root or inside another project (a parent with its own `.project`
+  marker) — also guarded client-side via `isValidProjectParent`.
 - **Optional password gate:** set `CODEMAN_PASSWORD` (env or web-server param) and `api.php`
   requires it on every request via `hash_equals` (`X-CodeMan-Auth` header or `?token=`). **Off by
   default** (open, trusted-LAN assumption). The client prompts once on a 401, stores the token,

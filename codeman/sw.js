@@ -15,7 +15,10 @@
    request fails and the app's own offline layer takes over (cache reads + queued
    writes). Bump CACHE_VERSION on each release to evict the old shell. */
 
-const CACHE_VERSION = 'codeman-v3.1.0';
+// Single version source of truth (see codeman/version.js). importScripts is
+// synchronous, so CODEMAN_VERSION is set before the cache name is computed.
+importScripts('version.js');
+const CACHE_VERSION = 'codeman-v' + self.CODEMAN_VERSION;
 
 // Precached on install so the very first offline boot works even if a given
 // asset was never re-requested online. Grammars autoloaded by Prism on demand
@@ -26,6 +29,7 @@ const SHELL = [
   'style.css',
   'favicon.svg',
   'manifest.webmanifest',
+  'version.js',
   'src/core.js',
   'src/tree.js',
   'src/editor.js',

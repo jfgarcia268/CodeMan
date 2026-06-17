@@ -683,6 +683,54 @@ function exportMenu(anchor) {
   setTimeout(() => document.addEventListener('mousedown', off), 0);
 }
 
+// Sidebar "⋯ More" overflow menu — the utility actions that used to be cryptic
+// header icons, now labeled rows (all also reachable from the ⌘K palette).
+function openMoreMenu(anchor) {
+  const existing = document.querySelector('.mini-menu');
+  if (existing) { existing.remove(); return; }
+  const menu = document.createElement('div'); menu.className = 'mini-menu';
+  const r = anchor.getBoundingClientRect();
+  menu.style.top = Math.round(r.bottom + 4) + 'px';
+  // right-align under the ⋯ button so the menu stays tucked under the sidebar
+  menu.style.left = Math.round(r.right) + 'px';
+  menu.style.transform = 'translateX(-100%)';
+  const opt = (icon, label, fn) => {
+    const o = document.createElement('div'); o.className = 'mini-menu-opt';
+    const ic = document.createElement('span'); ic.className = 'mm-ic'; ic.textContent = icon;
+    const tx = document.createElement('span'); tx.textContent = label;
+    o.append(ic, tx);
+    o.onclick = () => { menu.remove(); fn(); };
+    return o;
+  };
+  menu.append(
+    opt('★', 'Favorites & recently copied', () => openFavorites()),
+    opt('🏷', 'Manage tags', () => openTagManager()),
+    opt('⧉', 'Quick-paste block', () => openBlockPalette()),
+    opt('🗑', 'Trash', () => openTrash()),
+    opt('⟳', 'Rebuild index', () => rebuildIndex(anchor)),
+    opt('☁', 'Download for offline', () => primeOfflineCache())
+  );
+  document.body.appendChild(menu);
+  const off = (e) => { if (!menu.contains(e.target) && e.target !== anchor) { menu.remove(); document.removeEventListener('mousedown', off); } };
+  setTimeout(() => document.addEventListener('mousedown', off), 0);
+}
+
+// Rebuild the server-side metadata index (powers sidebar badges + name/tag/lang
+// search). Optional btn spins while it runs (the ⋯ anchor when called from the menu).
+async function rebuildIndex(btn) {
+  if (btn) btn.classList.add('spinning');
+  try {
+    const res = await api('rebuild_index');
+    if (res && res.offline) { toast('Offline — index will rebuild when you reconnect'); return; }
+    await loadTree();
+    toast('Index rebuilt' + (res && res.pages != null ? ' · ' + res.pages + ' pages' : ''));
+  } catch (e) {
+    toast('Rebuild failed');
+  } finally {
+    if (btn) btn.classList.remove('spinning');
+  }
+}
+
 function exportCurrentPage(fmt) {
   if (!currentPagePath) { toast('Open a page first'); return; }
   const base = nameFromPath(currentPagePath);
