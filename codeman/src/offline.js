@@ -40,7 +40,37 @@ function setOffline(on) {
   if (offlineState === on) return;
   offlineState = on;
   updateOfflineBadge();
-  if (!on) flushQueue();
+  if (on) { reconnectDelay = 0; scheduleReconnect(); } // start self-healing probe loop
+  else { if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; } flushQueue(); }
+}
+
+// --- Self-healing reconnect ---------------------------------------------------
+// A reachable server must clear a false "offline" WITHOUT user action. We probe
+// with a lightweight tree fetch on a capped backoff, and immediately on tab-focus
+// and the browser 'online' event. Only a real success clears the state — so this
+// never lies about being online (the old 'online'-event handler did).
+let reconnectTimer = null;
+let reconnectDelay = 0;
+const RECONNECT_MIN = 3000, RECONNECT_MAX = 30000;
+
+async function probeBackend() {
+  if (!offlineState) return true;
+  try {
+    const fresh = await apiFetch('tree');         // reachable? (throws/aborts if not)
+    await idbSet('kv', 'tree', fresh);
+    treeData = fresh; renderTree();
+    setOffline(false);                            // clears state + flushes the queue
+    return true;
+  } catch (e) {
+    scheduleReconnect();                          // still down — back off and retry
+    return false;
+  }
+}
+
+function scheduleReconnect() {
+  if (!offlineState || reconnectTimer) return;
+  reconnectDelay = Math.min(reconnectDelay ? reconnectDelay * 2 : RECONNECT_MIN, RECONNECT_MAX);
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; probeBackend(); }, reconnectDelay);
 }
 
 // Replay queued writes to the backend in FIFO order. Stops on the first network
@@ -422,7 +452,8 @@ function updateOfflineBadge() {
   let b = document.getElementById('offlineBadge');
   if (!b) {
     b = document.createElement('div'); b.id = 'offlineBadge'; b.className = 'offline-badge';
-    b.addEventListener('click', () => { if (syncQueue.length) flushQueue(); });
+    // Tap to force a recheck: probe the server when offline, else flush any queue.
+    b.addEventListener('click', () => { if (offlineState) probeBackend(); else if (syncQueue.length) flushQueue(); });
     document.body.appendChild(b);
   }
   const pending = syncQueue.length;
@@ -434,4 +465,6 @@ function updateOfflineBadge() {
   b.classList.toggle('warn', offlineState);
 }
 
-window.addEventListener('online', () => flushQueue());
+// Recover on reconnection signals — but only a real probe success clears offline.
+window.addEventListener('online', () => { if (offlineState) probeBackend(); else if (syncQueue.length) flushQueue(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden && offlineState) probeBackend(); });

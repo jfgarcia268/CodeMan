@@ -102,6 +102,15 @@ HTTPS with a trusted certificate, or `localhost`. Over plain HTTP on a LAN addre
 service worker can't register, so use the **desktop app** below if you want reliable
 offline away from the server.
 
+> **Mobile shows "⚠ Offline" even though the server is up?** This usually means the
+> page is loaded over a **self-signed HTTPS** origin (e.g. a `.local` name): mobile
+> browsers often don't carry the manually-accepted certificate exception over to
+> `fetch`/`XHR`, so API calls fail. The app now **self-heals** (it re-probes the server
+> and clears the badge once it's reachable — you can also tap the badge to force a
+> recheck), but the reliable fix is to open it over **plain HTTP by IP**
+> (`http://<lan-ip>:<port>/codeman/`) or use the desktop app, which avoids the
+> certificate path entirely.
+
 ---
 
 ## 4. Desktop app (macOS, optional)

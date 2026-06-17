@@ -61,18 +61,7 @@ document.getElementById('layoutToggle').addEventListener('click', (e) => {
   else setSidebarMode(sidebarMode === 'single' ? 'double' : 'single');
 });
 
-/* ---------- COLUMN COUNT (Miller window size) ---------- */
-
-document.getElementById('colCountOpts').addEventListener('click', (e) => {
-  const opt = e.target.closest('.cc-opt');
-  if (!opt || opt.classList.contains('disabled')) return;
-  millerVisibleCount = parseInt(opt.dataset.n, 10);
-  saveMillerCols();
-  millerSnapRight = true; // keep the deepest column visible after resizing the window
-  renderTree();
-});
-
-// Re-render the Miller window when the viewport changes how many columns fit.
+// Re-render the Miller window on viewport changes (e.g. sidebar resize/orientation).
 window.addEventListener('resize', () => { if (sidebarMode === 'double') renderTree(); });
 
 /* ---------- EXPAND / COLLAPSE ALL ---------- */

@@ -36,6 +36,11 @@ jobs:
           V="${GITHUB_REF_NAME#v}"        # v3.2.0 → 3.2.0
           echo "Setting app version to $V"
           npm version "$V" --no-git-tag-version --allow-same-version
+          # Keep the bundled web shell's footer + SW cache in sync (single source
+          # of truth: codeman/version.js, read by the footer and sw.js).
+          sed -i.bak "s/CODEMAN_VERSION = '[^']*'/CODEMAN_VERSION = '$V'/" ../codeman/version.js
+          rm -f ../codeman/version.js.bak
+          cat ../codeman/version.js
 
       - name: Build .dmg
         env:

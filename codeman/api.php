@@ -507,14 +507,21 @@ switch ($action) {
         break;
 
     case 'create_project':
-        // Projects live only at the root; mark with a hidden .project file.
+        // A project is a folder with a hidden .project marker. Projects may live
+        // anywhere, but only inside another project or at the root — never inside
+        // a plain folder.
         requireFields($input, ['name']);
         $name = safeName($input['name']);
         if ($name === null) jsonError('invalid name');
-        $path = safePath($base, $name);
+        $parent = $input['parent'] ?? '';
+        $parentDir = safePath($base, $parent);
+        if ($parent !== '' && !file_exists($parentDir . '/.project')) {
+            jsonError('projects can only be created at the top level or inside another project');
+        }
+        $path = safePath($base, $parent . '/' . $name);
         if (!is_dir($path)) mkdir($path, 0777, true);
         @file_put_contents($path . '/.project', '');
-        prependOrder($base, $name); // new project at top of root
+        prependOrder($parentDir, $name); // new project at top of its parent
         echo json_encode(['ok' => true]);
         break;
 
@@ -601,9 +608,11 @@ switch ($action) {
         if (is_dir($src) && strpos($realDestDir, $realSrc) === 0) {
             jsonError('cannot move a folder into itself');
         }
-        // Projects are pinned to the top level — never let one become nested.
-        if (is_dir($src) && file_exists($src . '/.project') && $realDestDir !== realpath($base)) {
-            jsonError('projects must stay at the top level');
+        // Projects may only sit at the root or nest inside another project —
+        // never inside a plain folder.
+        if (is_dir($src) && file_exists($src . '/.project')
+            && $realDestDir !== realpath($base) && !file_exists($realDestDir . '/.project')) {
+            jsonError('projects can only be moved into another project or the top level');
         }
         if (dirname($src) === $destDir) { echo json_encode(['ok' => true]); break; }
         if (file_exists($dest)) { jsonError('name already exists in target'); }

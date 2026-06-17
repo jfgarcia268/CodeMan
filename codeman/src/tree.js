@@ -16,7 +16,7 @@ let selectedFolder = localStorage.getItem('codeman.selectedFolder') || '';
 // In-progress inline creation: { kind: 'folder'|'page', parent: '<folderPath>' }.
 let pendingNew = null;
 let searchQuery = '';
-let sidebarMode = localStorage.getItem('codeman.sidebarMode') || 'single'; // 'single' | 'double'
+let sidebarMode = localStorage.getItem('codeman.sidebarMode') || 'double'; // 'single' | 'double'; double is the desktop default
 // On phones the Miller (double) layout can't fit, so the *effective* mode is
 // forced to single while body.is-mobile is set — without clobbering the user's
 // persisted desktop preference. All render/navigation logic reads effectiveMode().
@@ -28,10 +28,9 @@ try { columnPath = JSON.parse(localStorage.getItem('codeman.columnPath')) || [];
 function saveColumnPath() {
   try { localStorage.setItem('codeman.columnPath', JSON.stringify(columnPath)); } catch (e) {}
 }
-// Miller layout shows a fixed window of equal-width columns (no scrolling). The
-// user picks up to 2–4 via the footer slider; we clamp to what fits the sidebar.
-let millerVisibleCount = parseInt(localStorage.getItem('codeman.millerCols'), 10);
-if (!(millerVisibleCount >= 2 && millerVisibleCount <= 4)) millerVisibleCount = 3;
+// Miller layout shows a fixed window of exactly 2 equal-width columns (the current
+// folder + its parent). Deeper paths page through via the left/right window rails.
+const MILLER_COLS = 2;
 let millerWindowStart = 0;        // index of the leftmost visible column
 let millerSnapRight = true;       // on navigation, snap the window to the deepest column
 const MILLER_MIN_COL = 160;       // smallest usable column width (px)
@@ -46,16 +45,7 @@ function saveMillerColScroll() {
     try { localStorage.setItem('codeman.millerColScroll', JSON.stringify(millerColScroll)); } catch (e) {}
   }, 250);
 }
-function saveMillerCols() {
-  try { localStorage.setItem('codeman.millerCols', String(millerVisibleCount)); } catch (e) {}
-}
-// How many columns actually fit the current sidebar width (2..4).
-function millerFitMax() {
-  const sb = document.querySelector('.sidebar');
-  const avail = (sb ? sb.clientWidth : 320) - 16 /* back rail */;
-  return Math.max(2, Math.min(4, Math.floor(avail / MILLER_MIN_COL)));
-}
-function millerEffCount() { return Math.min(millerVisibleCount, millerFitMax()); }
+function millerEffCount() { return MILLER_COLS; }
 let deepSearch = localStorage.getItem('codeman.deepSearch') === '1'; // search inside page content
 let deepMatches = new Set();  // page paths whose content matched (deep search)
 
@@ -105,9 +95,12 @@ async function moveItem(srcPath, targetFolder) {
   // Ignore drop onto the folder it already lives in.
   const srcParent = srcPath.includes('/') ? srcPath.slice(0, srcPath.lastIndexOf('/')) : '';
   if (srcParent === targetFolder) return;
-  // Projects are pinned to the top level; don't let one be dropped into a folder.
+  // A project may only nest inside another project or sit at the root — never in
+  // a plain folder.
   const srcNode = nodeAtPath(srcPath);
-  if (srcNode && srcNode.project && targetFolder) { toast('Projects stay at the top level'); return; }
+  if (srcNode && srcNode.project && !isValidProjectParent(targetFolder)) {
+    toast('Projects can only go in another project or the top level'); return;
+  }
   const res = await api('move', { path: srcPath, target: targetFolder });
   if (res.error) { toast(res.error); return; }
   // Track the moved page's new path so it stays selected/visible.
@@ -156,6 +149,23 @@ function nodeAtPath(path) {
   const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
   return folderChildren(parent).find(n => n.path === path) || null;
 }
+
+// Cumulative path prefixes for a path, e.g. "a/b/c" → ["a","a/b","a/b/c"].
+function pathPrefixes(path) {
+  if (!path) return [];
+  const parts = path.split('/');
+  return parts.map((_, i) => parts.slice(0, i + 1).join('/'));
+}
+
+// The project ancestors of a path, outermost → nearest (a path's own node counts
+// if it's a project). Projects nest only in projects/root, so this is a prefix.
+function projectChain(path) {
+  return pathPrefixes(path).map(nodeAtPath).filter(n => n && n.project);
+}
+
+// A project may be created/moved/reordered only at the root ('') or inside another
+// project — never inside a plain folder.
+function isValidProjectParent(path) { return !path || !!nodeAtPath(path)?.project; }
 
 // Mark a folder as the create target (highlight + toolbar +Folder/+Page target).
 function setSelectedFolder(path) {
@@ -256,10 +266,13 @@ function renderMiller(host, q) {
 
   sanitizeColumnPath();
 
-  // breadcrumb (full path — context even when left columns are windowed out)
+  // breadcrumb (full path — context even when left columns are windowed out).
+  // Each segment is color-coded by type: project (purple), folder (teal), root.
   const mkSeg = (label, depth) => {
     const s = document.createElement('span');
     s.className = 'crumb-seg';
+    if (depth === 0) s.classList.add('crumb-root');
+    else { const n = nodeAtPath(columnPath[depth - 1]); s.classList.add(n && n.project ? 'crumb-project' : 'crumb-folder'); }
     s.textContent = label;
     s.addEventListener('click', () => { columnPath = columnPath.slice(0, depth); saveColumnPath(); setSelectedFolder(depth ? columnPath[depth - 1] : ''); millerSnapRight = true; renderTree(); });
     return s;
@@ -278,23 +291,27 @@ function renderMiller(host, q) {
   millerWindowStart = Math.max(0, Math.min(millerWindowStart, total - xEff));
   millerSnapRight = false;
 
-  // When inside a project but its root column is windowed out of view, show a
-  // banner naming the project (click it to jump back to the project root).
-  const rootDrilled = columnPath[0];
-  const rootNode = rootDrilled ? nodeAtPath(rootDrilled) : null;
-  if (rootNode && rootNode.project && millerWindowStart > 0) {
+  // Whenever the current location is inside one or more projects, show the full
+  // project chain (outermost → nearest); each segment jumps to that project.
+  const ctxPath = selectedFolder || (columnPath.length ? columnPath[columnPath.length - 1] : '');
+  const chain = projectChain(ctxPath);
+  if (chain.length) {
     const banner = document.createElement('div');
     banner.className = 'project-banner';
-    banner.title = 'Back to project';
-    banner.innerHTML = '<span class="pb-icon">\u{1F4E6}</span>';
-    const nm = document.createElement('span'); nm.className = 'pb-name'; nm.textContent = rootNode.name;
-    banner.appendChild(nm);
-    banner.addEventListener('click', () => {
-      columnPath = [rootDrilled];
-      setSelectedFolder(rootDrilled);
-      millerSnapRight = true;
-      saveColumnPath();
-      renderTree();
+    banner.title = 'Project';
+    const ic = document.createElement('span'); ic.className = 'pb-icon'; ic.textContent = '\u{1F4E6}';
+    banner.appendChild(ic);
+    chain.forEach((pn, i) => {
+      if (i) { const sep = document.createElement('span'); sep.className = 'pb-sep'; sep.textContent = '›'; banner.appendChild(sep); }
+      const seg = document.createElement('span'); seg.className = 'pb-seg'; seg.textContent = pn.name;
+      seg.addEventListener('click', () => {
+        columnPath = pathPrefixes(pn.path);
+        setSelectedFolder(pn.path);
+        millerSnapRight = true;
+        saveColumnPath();
+        renderTree();
+      });
+      banner.appendChild(seg);
     });
     host.insertBefore(banner, body);
   }
@@ -428,9 +445,12 @@ async function dropReorder(srcPath, parentPath, refNode, pos) {
   const refName = refNode.path.split('/').pop();
   const srcParent = srcPath.includes('/') ? srcPath.slice(0, srcPath.lastIndexOf('/')) : '';
   if (srcName === refName && srcParent === parentPath) return;
-  // A project can only be reordered among root-level items, never nested.
+  // A project can be reordered among root items or among items inside another
+  // project — never inside a plain folder.
   const srcNode = nodeAtPath(srcPath);
-  if (srcNode && srcNode.project && parentPath) { toast('Projects stay at the top level'); return; }
+  if (srcNode && srcNode.project && !isValidProjectParent(parentPath)) {
+    toast('Projects can only go in another project or the top level'); return;
+  }
   if (srcParent !== parentPath) {
     const res = await api('move', { path: srcPath, target: parentPath });
     if (res && res.error) { toast(res.error); return; }
@@ -454,8 +474,8 @@ function renderMillerFolderCard(node, depth, selected) {
   const el = document.createElement('div');
   el.className = 'subfolder-card' + (selected ? ' selected' : '') + (node.project ? ' project-card' : '');
   el.draggable = true;
-  el.addEventListener('dragstart', e => { e.dataTransfer.setData('text/plain', node.path); e.dataTransfer.effectAllowed = 'move'; el.classList.add('dragging'); });
-  el.addEventListener('dragend', () => el.classList.remove('dragging'));
+  el.addEventListener('dragstart', e => { e.dataTransfer.setData('text/plain', node.path); e.dataTransfer.effectAllowed = 'move'; el.classList.add('dragging'); document.body.classList.toggle('dragging-project', !!node.project); });
+  el.addEventListener('dragend', () => { el.classList.remove('dragging'); document.body.classList.remove('dragging-project'); });
   // drop handling (reorder edges + "move into" middle) is wired by attachColumnReorder
 
   const icon = document.createElement('span'); icon.className = 'sf-icon'; icon.textContent = node.project ? '\u{1F4E6}' : '\u{1F4C1}';
@@ -555,6 +575,7 @@ function renderTree() {
   // footer can hide them in double (Miller) layout where they do nothing.
   document.body.classList.toggle('mode-double', effectiveMode() === 'double');
   updateLayoutToggle();
+  renderSingleProjectBanner();
   const q = searchQuery.trim().toLowerCase();
 
   if (effectiveMode() === 'double') {
@@ -582,23 +603,32 @@ function renderTree() {
 function updateLayoutToggle() {
   const sw = document.getElementById('layoutToggle');
   if (sw) sw.classList.toggle('on', effectiveMode() === 'double');
-  updateColCountSlider();
 }
 
-// Reflect the column-count slider: visible only in double mode, current value
-// highlighted, options that don't fit the sidebar width disabled.
-function updateColCountSlider() {
-  const wrap = document.getElementById('colCount');
-  if (!wrap) return;
-  wrap.style.display = effectiveMode() === 'double' ? 'flex' : 'none';
-  if (effectiveMode() !== 'double') return;
-  const fit = millerFitMax();
-  const eff = millerEffCount(); // what's actually shown (preference clamped to fit)
-  wrap.querySelectorAll('.cc-opt').forEach(opt => {
-    const n = parseInt(opt.dataset.n, 10);
-    opt.classList.toggle('active', n === eff);
-    opt.classList.toggle('disabled', n > fit);
+// Single-column project context: a compact project-chain banner pinned above the
+// tree (the Miller banner is double-mode only — single & mobile users need this).
+function renderSingleProjectBanner() {
+  const area = document.getElementById('treeArea');
+  const existing = document.getElementById('singleProjectBanner');
+  if (existing) existing.remove();
+  if (effectiveMode() !== 'single') return;
+  const ctx = selectedFolder
+    || (currentPagePath && currentPagePath.includes('/') ? currentPagePath.slice(0, currentPagePath.lastIndexOf('/')) : '');
+  const chain = projectChain(ctx);
+  if (!chain.length) return;
+  const banner = document.createElement('div');
+  banner.className = 'project-banner';
+  banner.id = 'singleProjectBanner';
+  banner.title = 'Project';
+  const ic = document.createElement('span'); ic.className = 'pb-icon'; ic.textContent = '\u{1F4E6}';
+  banner.appendChild(ic);
+  chain.forEach((pn, i) => {
+    if (i) { const sep = document.createElement('span'); sep.className = 'pb-sep'; sep.textContent = '›'; banner.appendChild(sep); }
+    const seg = document.createElement('span'); seg.className = 'pb-seg'; seg.textContent = pn.name;
+    seg.addEventListener('click', () => { setSelectedFolder(pn.path); expandedFolders.add(pn.path); saveExpanded(); renderTree(); });
+    banner.appendChild(seg);
   });
+  area.insertBefore(banner, document.getElementById('tree'));
 }
 
 function setSidebarMode(mode) {
@@ -730,8 +760,9 @@ function renderTreeNode(node, opts) {
     e.dataTransfer.setData('text/plain', node.path);
     e.dataTransfer.effectAllowed = 'move';
     row.classList.add('dragging');
+    document.body.classList.toggle('dragging-project', !!node.project);
   });
-  row.addEventListener('dragend', () => row.classList.remove('dragging'));
+  row.addEventListener('dragend', () => { row.classList.remove('dragging'); document.body.classList.remove('dragging-project'); });
 
   // --- drop target: reorder on the row's edges, "move into" in the middle
   // (folders) or just reorder (pages). Shared with the Miller-column layout. ---
@@ -816,7 +847,16 @@ function selectedTargetFolder() {
 }
 function createFolderHere() { createFolder(selectedTargetFolder()); }
 function createPageHere() { createPage(selectedTargetFolder()); }
-function createProjectHere() { startInlineCreate('project', ''); } // projects live at root
+// Projects may only be created at the root or inside another project — never in a
+// plain folder. Block invalid spots rather than silently relocating.
+function createProjectHere() {
+  const t = selectedTargetFolder();
+  if (!isValidProjectParent(t)) {
+    toast('Projects can only be created at the top level or inside another project');
+    return;
+  }
+  startInlineCreate('project', t);
+}
 
 function createFolder(parent) { startInlineCreate('folder', parent || ''); }
 function createPage(parent) { startInlineCreate('page', parent || ''); }

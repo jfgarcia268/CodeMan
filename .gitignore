@@ -1,6 +1,9 @@
 # macOS
 .DS_Store
 
+# Claude Code local tooling (preview launch config, local settings) — not project code
+.claude/
+
 # Local-only private context (deployment specifics, data provenance) — auto-loaded
 # by Claude Code, never committed. Keep private notes here, not in CLAUDE.md.
 CLAUDE.local.md
