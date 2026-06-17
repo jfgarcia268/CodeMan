@@ -114,11 +114,22 @@ reachable. No certificate, no PWA setup required.
 
 1. Download the latest `CodeMan-*.dmg` from the repo's **[Releases](../../releases)**
    page (built by CI), or build it yourself (below).
-2. Open the `.dmg` and drag **CodeMan** into **Applications**.
-3. It's **unsigned**, so first launch: **right-click the app → Open → Open** (this
-   clears Gatekeeper; you only do it once).
+2. Open the `.dmg` and drag **CodeMan** into **Applications**. Eject the disk image.
+3. **Clear the download quarantine** (required — see note). In Terminal:
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/CodeMan.app
+   ```
+   Then open CodeMan normally.
 4. macOS will ask to **allow Local Network access** — click **Allow** (required to reach
    a server on your LAN).
+
+> **Why step 3?** The app is **unsigned and not notarized** (no paid Apple Developer
+> account). macOS flags anything downloaded from a browser with a `com.apple.quarantine`
+> attribute, and Gatekeeper then refuses unsigned apps — on Apple Silicon it reports them
+> as **“CodeMan is damaged and can’t be opened.”** The app is *not* damaged; the `xattr`
+> command above removes that flag and it opens fine. (The usual “right-click → Open” trick
+> does **not** clear the *damaged* error — use the command.) If you'd rather avoid this
+> step entirely, the app would need proper Developer ID signing + notarization.
 
 ### First launch — connect a server or go offline-only
 
