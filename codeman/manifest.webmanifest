@@ -1,0 +1,14 @@
+{
+  "name": "CodeMan — Snippet Manager",
+  "short_name": "CodeMan",
+  "description": "Self-hosted code-snippet manager. Works offline; syncs to the NAS when reconnected.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#1e2228",
+  "theme_color": "#0e639c",
+  "icons": [
+    { "src": "favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icon-maskable.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}

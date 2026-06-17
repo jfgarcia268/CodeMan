@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>CodeMan - Snippet Manager</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<meta name="theme-color" content="#0e639c">
+<!-- PWA: installable + offline-bootable (see sw.js). -->
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="favicon.svg">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="CodeMan">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="stylesheet" href="vendor/prism/themes/prism-tomorrow.min.css">
+<!-- cache-bust style.css the same way as the app JS, so style edits never go stale -->
+<!-- Plain link (works on http(s) AND the file:// desktop wrapper). Over http(s)
+     we add a ?v= cache-bust so style edits never serve stale; on file:// we leave
+     it alone (Chromium won't resolve "style.css?v=…" off the filesystem, and a
+     local file can't go stale anyway). Avoid document.write — under Electron's
+     file:// load it runs post-parse and wipes the document. -->
+<link rel="stylesheet" href="style.css" id="mainCss">
+<script>
+  if (location.protocol !== 'file:') {
+    document.getElementById('mainCss').href = 'style.css?v=' + Date.now();
+  }
+</script>
+</head>
+<body>
+<div class="app">
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <span class="brand"><img src="favicon.svg" class="brand-icon" alt="">CodeMan</span>
+      <div class="sidebar-actions">
+        <button onclick="createProjectHere()" title="New project (top level)" class="btn-project">+Project</button>
+        <button onclick="createFolderHere()" title="New folder (in selected folder)" class="btn-folder">+Folder</button>
+        <button onclick="createPageHere()" title="New page (in selected folder)" class="btn-page">+Page</button>
+        <button onclick="openFavorites()" title="Favorites & recently copied" class="secondary">★</button>
+        <button onclick="openTagManager()" title="Manage tags (rename, merge, delete)" class="secondary">🏷</button>
+        <button onclick="openBlockPalette()" title="Quick-paste: find a block & copy it (⌘⇧K)" class="secondary">⧉</button>
+        <button onclick="openTrash()" title="Trash (restore deleted items)" class="secondary">🗑</button>
+        <button onclick="rebuildIndex(this)" title="Rebuild metadata index" class="secondary">⟳</button>
+        <button onclick="primeOfflineCache(this)" title="Download all pages for offline use" class="secondary">☁</button>
+        <button id="hideSidebarBtn" class="secondary" title="Hide sidebar">⟨</button>
+      </div>
+    </div>
+    <div class="sidebar-search">
+      <div class="search-field">
+        <input id="searchInput" type="text" placeholder="Search name, tags, code type…" autocomplete="off">
+        <span id="searchClear" class="search-clear" title="Clear">✕</span>
+      </div>
+      <button id="deepSearchToggle" class="deep-toggle" title="Also search inside page content">⊃</button>
+    </div>
+    <div id="treeArea" class="tree-area">
+      <div id="tree" class="tree"></div>
+      <div id="pageCol" class="page-col"></div>
+    </div>
+    <div class="sidebar-footer">
+      <div id="colCount" class="col-count" title="How many columns to show at once">
+        <span class="cc-label">Columns</span>
+        <div id="colCountOpts" class="cc-opts">
+          <span class="cc-opt" data-n="2">2</span>
+          <span class="cc-opt" data-n="3">3</span>
+          <span class="cc-opt" data-n="4">4</span>
+        </div>
+      </div>
+      <button id="expandAllBtn" class="secondary" title="Expand all folders">⊞ Expand</button>
+      <button id="collapseAllBtn" class="secondary" title="Collapse all folders">⊟ Collapse</button>
+      <div id="layoutToggle" class="layout-switch" title="Toggle single / double column">
+        <span class="ls-knob"></span>
+        <span class="ls-opt" data-mode="single">Single</span>
+        <span class="ls-opt" data-mode="double">Double</span>
+      </div>
+      <div class="app-version">V3.1</div>
+    </div>
+  </div>
+  <div id="sidebarResizer" class="sidebar-resizer"></div>
+  <button id="showSidebarBtn" title="Show sidebar">☰</button>
+  <div class="main">
+    <div id="mainTabs" class="main-tabs"></div>
+    <div id="pageHeader" class="page-header"></div>
+    <div id="pageArea" class="page-area">
+      <div id="pageOutline" class="page-outline"></div>
+      <div id="page" class="page"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Vendored Prism (offline-first: no CDN dependency on the NAS) -->
+<script src="vendor/prism/components/prism-core.min.js" data-manual></script>
+<script src="vendor/prism/plugins/autoloader/prism-autoloader.min.js"></script>
+<script>
+  if (window.Prism && Prism.plugins && Prism.plugins.autoloader) {
+    Prism.plugins.autoloader.languages_path = 'vendor/prism/components/';
+  }
+</script>
+<!-- App, split into ordered modules. Classic scripts share one global scope, so
+     load order is the dependency order (concatenation = the old single app.js).
+     Loaded dynamically with a cache-busting query so edits NEVER serve stale JS
+     (the recurring "hard-reload to fix" trap). Dynamically-inserted scripts with
+     async=false execute in insertion order, preserving the dependency order. -->
+<script>
+  (function () {
+    // cache-bust over http(s) so edits never serve stale; on file:// (desktop
+    // wrapper) omit the query — Chromium won't load "core.js?v=…" off the disk.
+    var v = location.protocol === 'file:' ? '' : '?v=' + Date.now();
+    ['src/core.js', 'src/tree.js', 'src/editor.js', 'src/features.js',
+     'src/ui.js', 'src/offline.js', 'src/init.js'].forEach(function (f) {
+      var s = document.createElement('script');
+      s.src = f + v;
+      s.async = false; // keep execution order = dependency order
+      document.head.appendChild(s);
+    });
+  })();
+</script>
+</body>
+</html>

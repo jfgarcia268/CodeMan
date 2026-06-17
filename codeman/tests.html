@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>CodeMan — tests</title>
+<style>
+  body { font-family: -apple-system, monospace; background: #1e1e1e; color: #ddd; padding: 20px; }
+  .pass { color: #5dd35d; } .fail { color: #ff6b6b; font-weight: bold; }
+  h1 { font-size: 18px; } .row { padding: 2px 0; font-size: 13px; }
+  #summary { margin: 14px 0; font-size: 15px; }
+</style>
+</head>
+<body>
+<h1>CodeMan unit tests</h1>
+<div id="summary">running…</div>
+<div id="out"></div>
+
+<!-- DOM skeleton app.js touches at parse time (so it loads without errors) -->
+<div style="display:none">
+  <div class="app"><div class="sidebar">
+    <div class="sidebar-search"></div>
+    <input id="searchInput"><span id="searchClear"></span><button id="deepSearchToggle"></button>
+    <div id="treeArea"><div id="tree"></div><div id="pageCol"></div></div>
+    <div id="colCount"><div id="colCountOpts"></div></div>
+    <button id="expandAllBtn"></button><button id="collapseAllBtn"></button>
+    <div id="layoutToggle"></div><button id="hideSidebarBtn"></button>
+  </div>
+  <div id="sidebarResizer"></div><button id="showSidebarBtn"></button>
+  <div class="main"><div id="mainTabs"></div><div id="pageHeader"></div><div id="page"></div></div></div>
+</div>
+
+<!-- Stub the backend + Prism so app.js init has no real side effects -->
+<script>
+  window.Prism = { highlightElement(){}, plugins:{} };
+  window.fetch = (url) => Promise.resolve({ status:200, ok:true, json: async () => {
+    const u = String(url);
+    if (u.includes('action=tree')) return [];
+    if (u.includes('action=get_page')) return { title:'', sections:[] };
+    return { ok:true };
+  }});
+</script>
+<script src="src/core.js"></script>
+<script src="src/tree.js"></script>
+<script src="src/editor.js"></script>
+<script src="src/features.js"></script>
+<script src="src/ui.js"></script>
+<script src="src/offline.js"></script>
+<script src="src/init.js"></script>
+<script>
+  const out = document.getElementById('out');
+  let pass = 0, fail = 0;
+  function eq(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+  function t(name, got, want) {
+    const ok = eq(got, want);
+    ok ? pass++ : fail++;
+    const d = document.createElement('div');
+    d.className = 'row ' + (ok ? 'pass' : 'fail');
+    d.textContent = (ok ? '✓ ' : '✗ ') + name + (ok ? '' : `  →  got ${JSON.stringify(got)} want ${JSON.stringify(want)}`);
+    out.appendChild(d);
+  }
+
+  // nameFromPath
+  t('nameFromPath strips dir + .json', nameFromPath('a/b/c.json'), 'c');
+  t('nameFromPath root file', nameFromPath('x.json'), 'x');
+
+  // qparam
+  t('qparam reads key', qparam('a=1&b=two', 'b'), 'two');
+  t('qparam decodes', qparam('path=a%2Fb.json', 'path'), 'a/b.json');
+  t('qparam missing → empty', qparam('a=1', 'z'), '');
+
+  // sectionContent: legacy single-tab is flattened
+  const legacy = { tabs: [{ blocks: [{code:'x'}], subsections: [] }] };
+  t('sectionContent reads legacy tabs.blocks', sectionContent(legacy).blocks.length, 1);
+  const legacyMulti = { tabs: [{ blocks:[{code:'a'}], subsections:[] }, { blocks:[{code:'b'}], subsections:[] }] };
+  t('sectionContent folds extra tabs', sectionContent(legacyMulti).blocks.length, 2);
+  const flat = { blocks: [{code:'y'}], subsections: [] };
+  t('sectionContent passes flat through', sectionContent(flat).blocks.length, 1);
+
+  // blockMatches
+  t('blockMatches by code', blockMatches({code:'SELECT Id', type:'sql'}, 'select'), true);
+  t('blockMatches by lang label', blockMatches({code:'', type:'javascript'}, 'javascript'), true);
+  t('blockMatches negative', blockMatches({code:'abc', type:'sql'}, 'zzz'), false);
+
+  // tree helpers (offline cache mutation primitives)
+  const tree = [
+    { type:'folder', name:'f', path:'f', children:[
+      { type:'page', name:'p', path:'f/p.json', tags:[], langs:[] }
+    ]},
+    { type:'page', name:'root', path:'root.json', tags:[], langs:[] }
+  ];
+  t('findInTree nested', !!findInTree(tree, 'f/p.json'), true);
+  t('findInTree miss', findInTree(tree, 'nope'), null);
+  const tree2 = JSON.parse(JSON.stringify(tree));
+  removeFromTree(tree2, 'f/p.json');
+  t('removeFromTree removes nested', findInTree(tree2, 'f/p.json'), null);
+  const folder = JSON.parse(JSON.stringify(tree))[0];
+  rePath(folder, 'renamed');
+  t('rePath updates self', folder.path, 'renamed');
+  t('rePath updates descendants', folder.children[0].path, 'renamed/p.json');
+
+  // collectMatchingPages
+  t('collectMatchingPages finds by name', collectMatchingPages(tree, 'root', []).map(p=>p.path), ['root.json']);
+
+  // pageToMarkdown
+  const md = pageToMarkdown({ title:'T', sections:[{ title:'S', tags:['a'], blocks:[{type:'sql',label:'L',code:'SELECT 1'}], subsections:[] }] });
+  t('pageToMarkdown has title', md.includes('# T'), true);
+  t('pageToMarkdown has fenced block', md.includes('```sql') && md.includes('SELECT 1'), true);
+
+  // langLabel / langColor
+  t('langLabel known', langLabel('javascript'), 'JavaScript');
+  t('langColor stable', langColor('soql'), langColor('soql'));
+
+  // buildMergeBar (shared section/block merge control)
+  (function () {
+    const target = document.createElement('div');
+    const checks = [];
+    let merged = null;
+    const { bar, syncSelectAll } = buildMergeBar({
+      label: '⛶ X', mergingClass: 'merging', target, checks, noun: 'blocks',
+      onMerge: (c) => { merged = c; },
+    });
+    t('buildMergeBar returns a .merge-bar', bar.classList.contains('merge-bar'), true);
+    t('buildMergeBar start label', bar.querySelector('button').textContent, '⛶ X');
+    t('buildMergeBar exposes syncSelectAll', typeof syncSelectAll, 'function');
+    bar.querySelector('button').click(); // start selecting
+    t('buildMergeBar start adds mergingClass', target.classList.contains('merging'), true);
+    checks.push({ cb: { checked: true }, idx: 0 }, { cb: { checked: true }, idx: 2 });
+    bar.querySelector('.merge-do').click();
+    t('buildMergeBar passes sorted chosen indices', merged, [0, 2]);
+  })();
+
+  // mergeBlocksAndSubs (unified block + subsection merge)
+  (function () {
+    const _rp = window.renderPage, _ss = window.scheduleSave, _ts = window.toast;
+    window.renderPage = () => {}; window.scheduleSave = () => {}; window.toast = () => {};
+    try {
+      // blocks-only → join code into the topmost selected block
+      const blocks = [{ code: 'A' }, { code: 'B' }, { code: 'C' }];
+      mergeBlocksAndSubs([0, 2], [], blocks, []);
+      t('merge blocks-only joins code into topmost', blocks.map(b => b.code), ['A\n\nC', 'B']);
+
+      // mixed → selected block moves into the topmost selected subsection
+      const b2 = [{ code: 'A', label: 'A' }, { code: 'B', label: 'B' }];
+      const subX = { title: 'X', blocks: [{ label: 'SX' }], subsections: [] };
+      const s2 = [subX, { title: 'Y', blocks: [], subsections: [] }];
+      mergeBlocksAndSubs([0], [0], b2, s2);
+      t('merge mixed removes block from parent', b2.map(b => b.label), ['B']);
+      t('merge mixed prepends block into target sub', subX.blocks.map(b => b.label), ['A', 'SX']);
+      t('merge mixed keeps subsection count', s2.length, 2);
+
+      // subs-only → fold others into the topmost selected subsection
+      const subA = { title: 'A', blocks: [{ label: 'SA' }], subsections: [] };
+      const subB = { title: 'B', blocks: [{ label: 'SB' }], subsections: [{ title: 'BB' }] };
+      const s3 = [subA, subB];
+      mergeBlocksAndSubs([], [0, 1], [], s3);
+      t('merge subs-only reduces to one subsection', s3.map(s => s.title), ['A']);
+      t('merge subs-only folds blocks in', subA.blocks.map(b => b.label), ['SA', 'SB']);
+      t('merge subs-only folds subsections in', subA.subsections.map(s => s.title), ['BB']);
+    } finally {
+      window.renderPage = _rp; window.scheduleSave = _ss; window.toast = _ts;
+    }
+  })();
+
+  // lineDiff (history diff viewer engine)
+  t('lineDiff equal → all same', lineDiff('a\nb', 'a\nb').every(r => r.type === 'same'), true);
+  (function () {
+    const d = lineDiff('a\nb\nc', 'a\nB\nc\nd');
+    t('lineDiff finds the deletion', d.some(r => r.type === 'del' && r.text === 'b'), true);
+    t('lineDiff finds the change-add', d.some(r => r.type === 'add' && r.text === 'B'), true);
+    t('lineDiff appends trailing add', d[d.length - 1].text, 'd');
+  })();
+
+  // renderMarkdown / renderInlineMd (note blocks)
+  t('md renders heading', renderMarkdown('# Hi').includes('<h1'), true);
+  t('md renders bold', renderInlineMd('a **b** c').includes('<strong>b</strong>'), true);
+  t('md renders inline code', renderInlineMd('x `y` z').includes('<code>y</code>'), true);
+  t('md renders list item', renderMarkdown('- one').includes('<li>one</li>'), true);
+  t('md fenced code carries lang class', renderMarkdown('```sql\nSELECT 1\n```').includes('language-sql'), true);
+  t('md escapes raw html', renderMarkdown('<b>x</b>').includes('&lt;b&gt;'), true);
+  t('md broken wikilink → dim span', renderInlineMd('see [[NoSuchPage]]').includes('xlink broken'), true);
+
+  // resolvePageLink (cross-page links) against a stub tree
+  (function () {
+    const saved = treeData;
+    treeData = [{ type: 'folder', name: 'F', path: 'F', children: [
+      { type: 'page', name: 'MyPage', path: 'F/MyPage.json', tags: [], langs: [] },
+    ] }];
+    t('resolvePageLink resolves by bare name', resolvePageLink('MyPage').path, 'F/MyPage.json');
+    t('resolvePageLink resolves by path', resolvePageLink('F/MyPage').path, 'F/MyPage.json');
+    t('resolvePageLink ignores #section suffix', resolvePageLink('MyPage#Sec').found, true);
+    t('resolvePageLink miss → not found', resolvePageLink('Ghost').found, false);
+    treeData = saved;
+  })();
+
+  // collectBlocksFromPage (offline quick-paste search walker)
+  (function () {
+    const out = [];
+    collectBlocksFromPage('Dir/Pg.json', { sections: [
+      { title: 'S', blocks: [{ type: 'sql', code: 'SELECT Id' }, { type: 'bash', label: 'run', code: 'ls' }],
+        subsections: [{ title: 'Sub', blocks: [{ type: 'sql', code: 'select name' }], subsections: [] }] },
+    ] }, 'select', out);
+    t('collectBlocksFromPage matches code (case-insensitive)', out.length, 2);
+    t('collectBlocksFromPage builds a breadcrumb trail', out[0].trail, 'S');
+    t('collectBlocksFromPage descends subsections', out[1].trail, 'S › Sub');
+  })();
+
+  // attachReorderArrows (reorder mode — used for both sections and blocks)
+  (function () {
+    const arr = [{}, {}, {}];
+    const mid = document.createElement('div');
+    attachReorderArrows(mid, arr, 1);
+    t('attachReorderArrows adds up+down', mid.querySelectorAll('.reorder-arrow').length, 2);
+    t('attachReorderArrows marks the element reordering', mid.classList.contains('reordering'), true);
+    t('attachReorderArrows up enabled in the middle', mid.querySelector('.reorder-arrow.up').classList.contains('disabled'), false);
+    const first = document.createElement('div'); attachReorderArrows(first, arr, 0);
+    t('attachReorderArrows up disabled at idx 0', first.querySelector('.reorder-arrow.up').classList.contains('disabled'), true);
+    const last = document.createElement('div'); attachReorderArrows(last, arr, 2);
+    t('attachReorderArrows down disabled at last idx', last.querySelector('.reorder-arrow.down').classList.contains('disabled'), true);
+  })();
+
+  // pageToHtml (standalone HTML export)
+  (function () {
+    const html = pageToHtml({ title: 'T', sections: [
+      { title: 'S', tags: ['x'], blocks: [{ type: 'sql', code: 'SELECT 1' }],
+        subsections: [{ title: 'Sub', blocks: [{ type: 'markdown', note: true, code: '**b**' }], subsections: [] }] },
+    ] });
+    t('pageToHtml is a full document', html.startsWith('<!DOCTYPE html>'), true);
+    t('pageToHtml inlines theme + token colors', html.includes('<style>') && html.includes('token.keyword'), true);
+    t('pageToHtml renders a section heading', html.includes('<h2>S</h2>'), true);
+    t('pageToHtml renders a note block as prose', html.includes('<div class="note">') && html.includes('<strong>b</strong>'), true);
+    t('pageToHtml escapes the title', pageToHtml({ title: '<x>', sections: [] }).includes('&lt;x&gt;'), true);
+  })();
+
+  document.getElementById('summary').innerHTML =
+    `<span class="${fail ? 'fail' : 'pass'}">${pass} passed, ${fail} failed</span>`;
+  window.__testResult = { pass, fail };
+
+  // ---- async: offline trash/history reducers (drive the real IndexedDB code) ----
+  // These touch the same 'codeman' DB the app uses, so snapshot the real cache
+  // first and restore it in `finally` — opening this page never corrupts data.
+  (async () => {
+    const snap = {};
+    const savedQueue = syncQueue.slice();
+    function ta(name, got, want) {
+      const ok = JSON.stringify(got) === JSON.stringify(want);
+      ok ? pass++ : fail++;
+      const d = document.createElement('div');
+      d.className = 'row ' + (ok ? 'pass' : 'fail');
+      d.textContent = (ok ? '✓ ' : '✗ ') + name + (ok ? '' : `  →  got ${JSON.stringify(got)} want ${JSON.stringify(want)}`);
+      out.appendChild(d);
+    }
+    try {
+      for (const k of ['tree', 'queue', 'trash', 'history']) snap[k] = await idbGet('kv', k);
+
+      const TP = 'zztest_folder/Page.json';
+      const baseTree = () => [{ type: 'folder', name: 'zztest_folder', path: 'zztest_folder', children: [
+        { type: 'page', name: 'Page', path: TP, tags: [], langs: [] },
+      ] }];
+
+      // reset to a known state
+      let tree = baseTree();
+      await idbSet('kv', 'tree', tree); treeData = tree;
+      await idbSet('pages', TP, { title: 'Page', sections: [{ title: 'S', blocks: [{ type: 'sql', code: 'SELECT 1' }], subsections: [] }] });
+      await idbSet('kv', 'trash', []); await idbSet('kv', 'history', {});
+      syncQueue.length = 0;
+
+      // trash: record + list
+      await recordLocalTrash(TP);
+      let list = await offlineListTrash();
+      ta('offline trash records a deleted page', list.length, 1);
+      ta('offline trash keeps origPath', list[0] && list[0].origPath, TP);
+
+      // trash: restore cancels a still-queued delete (clean no-op)
+      removeFromTree(tree, TP);
+      syncQueue.push({ action: 'delete', body: { path: TP } });
+      const r1 = await offlineRestoreTrash({ id: list[0].id });
+      ta('restore returns ok', !!(r1 && r1.ok), true);
+      ta('restore cancels the queued delete', syncQueue.length, 0);
+      ta('restore puts the node back in the tree', !!findInTree(treeData, TP), true);
+      ta('restore empties the local trash', (await offlineListTrash()).length, 0);
+
+      // trash: restore rebuilds when the delete already synced (no queued delete)
+      tree = baseTree(); await idbSet('kv', 'tree', tree); treeData = tree;
+      await idbSet('kv', 'trash', []); syncQueue.length = 0;
+      await recordLocalTrash(TP);
+      const t2 = await offlineListTrash();
+      removeFromTree(treeData, TP); await idbSet('kv', 'tree', treeData);
+      await offlineRestoreTrash({ id: t2[0].id });
+      ta('restore-after-sync queues create_page', syncQueue.some(o => o.action === 'create_page' && o.body.name === 'Page'), true);
+      ta('restore-after-sync queues forced save_page', syncQueue.some(o => o.action === 'save_page' && o.body.path === TP && o.body.force === true), true);
+
+      // history: record + list + get + restore
+      await idbSet('kv', 'history', {}); syncQueue.length = 0;
+      await idbSet('pages', TP, { title: 'Page', sections: [{ title: 'v1' }] });
+      await recordLocalHistory(TP, { title: 'Page', sections: [{ title: 'v0' }] });
+      const hist = await offlineListHistory(TP);
+      ta('offline history lists a version', hist.length, 1);
+      const ver = await offlineGetHistory(TP, hist[0].ts);
+      ta('offline history returns the snapshot', ver.sections[0].title, 'v0');
+      const r3 = await offlineRestoreHistory({ path: TP, ts: hist[0].ts });
+      ta('restore_history returns ok', !!(r3 && r3.ok), true);
+      const afterPage = await idbGet('pages', TP);
+      ta('restore_history applies the version to the cache', afterPage.sections[0].title, 'v0');
+      ta('restore_history queues a save', syncQueue.some(o => o.action === 'save_page' && o.body.path === TP), true);
+
+      await idbDel('pages', TP);
+    } catch (e) {
+      fail++;
+      const d = document.createElement('div'); d.className = 'row fail';
+      d.textContent = '✗ offline reducer tests threw: ' + (e && e.message);
+      out.appendChild(d);
+    } finally {
+      // restore the real cache exactly as it was
+      for (const k of ['tree', 'queue', 'trash', 'history']) {
+        if (snap[k] !== undefined) await idbSet('kv', k, snap[k]); else await idbDel('kv', k);
+      }
+      syncQueue.length = 0; syncQueue.push(...savedQueue);
+      document.getElementById('summary').innerHTML =
+        `<span class="${fail ? 'fail' : 'pass'}">${pass} passed, ${fail} failed</span>`;
+      window.__testResult = { pass, fail, done: true };
+    }
+  })();
+</script>
+</body>
+</html>

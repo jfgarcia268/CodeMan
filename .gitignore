@@ -1,0 +1,9 @@
+# macOS
+.DS_Store
+
+# CodeMan local-dev data (real data lives outside the repo via CODEMAN_DATA)
+codeman/structures/
+
+# Desktop wrapper build artifacts / deps
+codeman-desktop/node_modules/
+codeman-desktop/dist/

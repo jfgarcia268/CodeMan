@@ -1,0 +1,43 @@
+{
+  "name": "codeman-desktop",
+  "version": "1.0.0",
+  "description": "CodeMan desktop wrapper — opens offline, syncs to the NAS when reachable.",
+  "main": "main.js",
+  "author": "Juan Felipe Garcia",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --mac"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.jfgarcia.codeman",
+    "productName": "CodeMan",
+    "directories": { "output": "dist" },
+    "files": ["main.js", "config.js"],
+    "extraResources": [
+      {
+        "from": "../codeman",
+        "to": "codeman",
+        "filter": [
+          "**/*",
+          "!structures/**",
+          "!structures_pre_*/**",
+          "!_codeman_backups/**",
+          "!tests.html"
+        ]
+      }
+    ],
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.developer-tools",
+      "identity": null,
+      "extendInfo": {
+        "NSLocalNetworkUsageDescription": "CodeMan connects to your NAS on the local network to load and save your snippets."
+      }
+    }
+  }
+}
