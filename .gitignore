@@ -1,6 +1,10 @@
 # macOS
 .DS_Store
 
+# Local-only private context (deployment specifics, data provenance) — auto-loaded
+# by Claude Code, never committed. Keep private notes here, not in CLAUDE.md.
+CLAUDE.local.md
+
 # CodeMan local-dev data (real data lives outside the repo via CODEMAN_DATA)
 codeman/structures/
 
