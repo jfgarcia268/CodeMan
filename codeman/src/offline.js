@@ -30,10 +30,105 @@ async function idbDel(store, key) {
   return new Promise((res) => { const tx = db.transaction(store, 'readwrite'); tx.objectStore(store).delete(key); tx.oncomplete = () => res(); });
 }
 
+/* ---------- PER-SERVER NAMESPACING ----------
+   The IndexedDB lives at a fixed origin (the desktop wrapper pins a fixed
+   localhost port so the cache survives launches), so without qualification ALL
+   servers would share ONE cache + write-queue — and a queue meant for server A
+   could replay into server B. We avoid that by keying every offline record by
+   the active server's identity. The desktop preload sets window.CODEMAN_SERVER_URL;
+   a plain browser leaves it unset → a single fixed 'ns:local' namespace, i.e.
+   behaviour identical to before. NS_SEP is a control char that can't occur in a
+   page path, so namespaced keys are unambiguously distinguishable from legacy ones. */
+const NS_SEP = '';
+function nsHash(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0; return h.toString(36); }
+function computeNS() {
+  const u = ((typeof window !== 'undefined' && window.CODEMAN_SERVER_URL) || '').trim();
+  return u ? 'ns:' + nsHash(u) : 'ns:local';
+}
+let NS = computeNS();
+const kvKey = (key) => NS + NS_SEP + key;
+const pageKey = (p) => NS + NS_SEP + p;
+async function kvGet(key) { return idbGet('kv', kvKey(key)); }
+async function kvSet(key, val) { return idbSet('kv', kvKey(key), val); }
+async function pageGet(p) { return idbGet('pages', pageKey(p)); }
+async function pageSet(p, val) { return idbSet('pages', pageKey(p), val); }
+async function pageDel(p) { return idbDel('pages', pageKey(p)); }
+
+// One-time migration: pre-namespacing builds stored un-prefixed keys (incl. a
+// possibly-pending queue). On the first boot after the upgrade, fold that legacy
+// data into the CURRENTLY active namespace — which is the server the data was
+// implicitly for — so nothing is stranded. Runs once (global flag), leaves the
+// originals in place (harmless: cursors only read the active namespace's keys).
+async function migrateLegacy() {
+  try {
+    if (await idbGet('kv', '__migrated')) return;
+    const legacyQueue = await idbGet('kv', 'queue');
+    const legacyTree = await idbGet('kv', 'tree');
+    if (legacyQueue || legacyTree) {
+      if (legacyQueue) await kvSet('queue', legacyQueue);
+      if (legacyTree) await kvSet('tree', legacyTree);
+      for (const k of ['trash', 'history']) { const v = await idbGet('kv', k); if (v) await kvSet(k, v); }
+      const db = await idbOpen();
+      await new Promise((resolve) => {
+        const cur = db.transaction('pages', 'readonly').objectStore('pages').openCursor();
+        const moves = [];
+        cur.onsuccess = (e) => {
+          const c = e.target.result;
+          if (!c) { Promise.all(moves).then(resolve, resolve); return; }
+          if (String(c.key).indexOf(NS_SEP) === -1) moves.push(pageSet(c.key, c.value)); // un-prefixed = legacy
+          c.continue();
+        };
+        cur.onerror = () => resolve();
+      });
+    }
+    await idbSet('kv', '__migrated', true);
+  } catch (e) {}
+}
+
 let offlineState = false;
 let syncQueue = [];
-(async () => { try { syncQueue = (await idbGet('kv', 'queue')) || []; } catch (e) {} updateOfflineBadge(); })();
-async function saveQueue() { try { await idbSet('kv', 'queue', syncQueue); } catch (e) {} }
+(async () => {
+  try { await migrateLegacy(); } catch (e) {}
+  try { syncQueue = (await kvGet('queue')) || []; } catch (e) {}
+  updateOfflineBadge();
+})();
+// Hooks the desktop wrapper calls (main.js) to drive safe server/mode switching.
+if (typeof window !== 'undefined') {
+  // How many writes are queued in the ACTIVE namespace (→ which merge prompt to show).
+  window.__codemanQueueLen = () => syncQueue.length;
+  // Flush the active namespace's queue against the active server; resolve with the
+  // remaining count. Used for "Sync now / Sync first" before a switch.
+  window.__codemanFlush = async () => { try { await flushQueue(); } catch (e) {} return syncQueue.length; };
+  // Adopt the CURRENT namespace's cache + queue into the namespace of targetUrl, so
+  // local-only work can be pushed up when first connecting a server. The wrapper then
+  // switches the active server and flushes, replaying the adopted writes onto it.
+  window.__codemanAdoptInto = async (targetUrl) => {
+    try {
+      const fromNS = NS;
+      const u = (targetUrl || '').trim();
+      const toNS = u ? 'ns:' + nsHash(u) : 'ns:local';
+      if (toNS === fromNS) return;
+      for (const k of ['queue', 'tree', 'trash', 'history']) {
+        const v = await idbGet('kv', fromNS + NS_SEP + k);
+        if (v !== undefined) await idbSet('kv', toNS + NS_SEP + k, v);
+      }
+      const db = await idbOpen();
+      await new Promise((resolve) => {
+        const cur = db.transaction('pages', 'readonly').objectStore('pages').openCursor();
+        const moves = [];
+        cur.onsuccess = (e) => {
+          const c = e.target.result;
+          if (!c) { Promise.all(moves).then(resolve, resolve); return; }
+          const key = String(c.key);
+          if (key.startsWith(fromNS + NS_SEP)) moves.push(idbSet('pages', toNS + NS_SEP + key.slice(fromNS.length + NS_SEP.length), c.value));
+          c.continue();
+        };
+        cur.onerror = () => resolve();
+      });
+    } catch (e) {}
+  };
+}
+async function saveQueue() { try { await kvSet('queue', syncQueue); } catch (e) {} }
 async function enqueue(op) { syncQueue.push(op); await saveQueue(); updateOfflineBadge(); }
 
 function setOffline(on) {
@@ -57,7 +152,7 @@ async function probeBackend() {
   if (!offlineState) return true;
   try {
     const fresh = await apiFetch('tree');         // reachable? (throws/aborts if not)
-    await idbSet('kv', 'tree', fresh);
+    await kvSet('tree', fresh);
     treeData = fresh; renderTree();
     setOffline(false);                            // clears state + flushes the queue
     return true;
@@ -100,7 +195,7 @@ async function flushQueue() {
     }
     if (!syncQueue.length) {
       const fresh = await apiFetch('tree');     // reconcile cache with server truth
-      await idbSet('kv', 'tree', fresh);
+      await kvSet('tree', fresh);
       treeData = fresh; renderTree();
       toast(conflicts
         ? 'Synced — ' + conflicts + ' conflict' + (conflicts === 1 ? '' : 's') + ' overwritten (prior versions in History)'
@@ -112,10 +207,10 @@ async function flushQueue() {
 // Keep the IndexedDB mirror current after a successful backend call.
 async function cacheOnSuccess(action, body, query, data) {
   try {
-    if (action === 'tree') await idbSet('kv', 'tree', data);
-    else if (action === 'get_page') { const p = (body && body.path) || qparam(query, 'path'); if (p) { const copy = Object.assign({}, data); delete copy._mtime; await idbSet('pages', p, copy); } }
-    else if (action === 'save_page' && body) { const copy = Object.assign({}, body.data); delete copy._mtime; await idbSet('pages', body.path, copy); }
-    else if (action === 'delete' && body) await idbDel('pages', body.path);
+    if (action === 'tree') await kvSet('tree', data);
+    else if (action === 'get_page') { const p = (body && body.path) || qparam(query, 'path'); if (p) { const copy = Object.assign({}, data); delete copy._mtime; await pageSet(p, copy); } }
+    else if (action === 'save_page' && body) { const copy = Object.assign({}, body.data); delete copy._mtime; await pageSet(body.path, copy); }
+    else if (action === 'delete' && body) await pageDel(body.path);
   } catch (e) {}
 }
 
@@ -128,10 +223,10 @@ function qparam(query, key) {
 // Serve a request from the local mirror; queue writes for later replay.
 async function offlineApi(action, body, query) {
   switch (action) {
-    case 'tree': return (await idbGet('kv', 'tree')) || [];
+    case 'tree': return (await kvGet('tree')) || [];
     case 'get_page': {
       const p = (body && body.path) || qparam(query, 'path');
-      return (await idbGet('pages', p)) || { title: nameFromPath(p || ''), sections: [], _mtime: null };
+      return (await pageGet(p)) || { title: nameFromPath(p || ''), sections: [], _mtime: null };
     }
     case 'search_content': return offlineSearch(qparam(query, 'q'));
     case 'search_blocks': return offlineSearchBlocks(qparam(query, 'q'));
@@ -152,9 +247,9 @@ async function offlineApi(action, body, query) {
 
     case 'save_page': {
       const copy = Object.assign({}, body.data); delete copy._mtime;
-      const prev = await idbGet('pages', body.path);
+      const prev = await pageGet(body.path);
       if (prev) await recordLocalHistory(body.path, prev); // version prior content
-      await idbSet('pages', body.path, copy);
+      await pageSet(body.path, copy);
       await enqueue({ action, body }); return { ok: true, offline: true, mtime: null };
     }
     case 'delete': {
@@ -176,47 +271,47 @@ async function offlineApi(action, body, query) {
 // Snapshot an item into the local trash before it's removed from the cache.
 async function recordLocalTrash(path) {
   try {
-    const tree = (await idbGet('kv', 'tree')) || [];
+    const tree = (await kvGet('tree')) || [];
     const node = findInTree(tree, path);
     const isDir = node ? node.type === 'folder' : !String(path).endsWith('.json');
     const name = String(path).split('/').pop().replace(/\.json$/, '');
-    const data = isDir ? null : ((await idbGet('pages', path)) || null);
-    const list = (await idbGet('kv', 'trash')) || [];
+    const data = isDir ? null : ((await pageGet(path)) || null);
+    const list = (await kvGet('trash')) || [];
     list.unshift({
       id: 'local__' + Date.now() + '__' + name,
       origPath: path, name, deletedAt: Math.floor(Date.now() / 1000), isDir,
       data, node: node ? JSON.parse(JSON.stringify(node)) : null,
     });
-    await idbSet('kv', 'trash', list);
+    await kvSet('trash', list);
   } catch (e) {}
 }
 
 async function offlineListTrash() {
-  const list = (await idbGet('kv', 'trash')) || [];
+  const list = (await kvGet('trash')) || [];
   return list.map(e => ({ id: e.id, origPath: e.origPath, name: e.name, deletedAt: e.deletedAt, isDir: e.isDir }));
 }
 
 async function offlineRestoreTrash(body) {
   const id = body && body.id;
-  const list = (await idbGet('kv', 'trash')) || [];
+  const list = (await kvGet('trash')) || [];
   const idx = list.findIndex(e => e.id === id);
   if (idx === -1) return { error: 'offline: trash item not found' };
   const entry = list[idx];
-  if (!entry.isDir && entry.data) await idbSet('pages', entry.origPath, entry.data);
+  if (!entry.isDir && entry.data) await pageSet(entry.origPath, entry.data);
   await restoreNodeToTree(entry);
   // If the matching delete is still queued, cancelling it makes this a clean
   // no-op server-side; otherwise the delete already synced, so rebuild on replay.
   const qi = syncQueue.findIndex(op => op.action === 'delete' && op.body && op.body.path === entry.origPath);
   if (qi !== -1) { syncQueue.splice(qi, 1); await saveQueue(); }
   else { await enqueueReconstruct(entry); }
-  list.splice(idx, 1); await idbSet('kv', 'trash', list);
+  list.splice(idx, 1); await kvSet('trash', list);
   updateOfflineBadge();
   return { ok: true, offline: true, path: entry.origPath };
 }
 
 // Re-insert a trashed node back into its original parent in the tree cache.
 async function restoreNodeToTree(entry) {
-  const tree = (await idbGet('kv', 'tree')) || [];
+  const tree = (await kvGet('tree')) || [];
   if (!findInTree(tree, entry.origPath)) {
     const parent = entry.origPath.includes('/') ? entry.origPath.slice(0, entry.origPath.lastIndexOf('/')) : '';
     const list = parent ? ((findInTree(tree, parent) || {}).children) : tree;
@@ -226,7 +321,7 @@ async function restoreNodeToTree(entry) {
         : { type: 'page', name: entry.name, path: entry.origPath, tags: [], langs: [] }));
     }
   }
-  await idbSet('kv', 'tree', tree);
+  await kvSet('tree', tree);
   treeData = tree; renderTree();
 }
 
@@ -245,7 +340,7 @@ async function enqueueReconstruct(entry) {
       for (const c of (n.children || [])) await walk(c);
     } else {
       await enqueue({ action: 'create_page', body: { parent: parentOf(n.path), name: n.name } });
-      const data = await idbGet('pages', n.path);
+      const data = await pageGet(n.path);
       if (data) await enqueue({ action: 'save_page', body: { path: n.path, data, force: true } });
     }
   };
@@ -256,7 +351,7 @@ async function enqueueReconstruct(entry) {
 // Offline empty only discards the local restore snapshots; any queued deletes
 // still run on reconnect, so items remain recoverable from the server trash.
 async function offlineEmptyTrash() {
-  await idbSet('kv', 'trash', []);
+  await kvSet('trash', []);
   return { ok: true, offline: true };
 }
 
@@ -265,34 +360,34 @@ async function offlineEmptyTrash() {
 const LOCAL_HISTORY_KEEP = 20;
 async function recordLocalHistory(path, content) {
   try {
-    const all = (await idbGet('kv', 'history')) || {};
+    const all = (await kvGet('history')) || {};
     const json = JSON.stringify(content);
     const list = all[path] || [];
     list.unshift({ ts: Math.floor(Date.now() / 1000), size: json.length, data: content });
     all[path] = list.slice(0, LOCAL_HISTORY_KEEP);
-    await idbSet('kv', 'history', all);
+    await kvSet('history', all);
   } catch (e) {}
 }
 
 async function offlineListHistory(path) {
-  const all = (await idbGet('kv', 'history')) || {};
+  const all = (await kvGet('history')) || {};
   return (all[path] || []).map(v => ({ ts: v.ts, size: v.size }));
 }
 
 async function offlineGetHistory(path, ts) {
-  const all = (await idbGet('kv', 'history')) || {};
+  const all = (await kvGet('history')) || {};
   const v = (all[path] || []).find(x => String(x.ts) === String(ts));
   return v ? v.data : { error: 'offline: version not found' };
 }
 
 async function offlineRestoreHistory(body) {
   const path = body && body.path, ts = body && body.ts;
-  const all = (await idbGet('kv', 'history')) || {};
+  const all = (await kvGet('history')) || {};
   const v = (all[path] || []).find(x => String(x.ts) === String(ts));
   if (!v) return { error: 'offline: version not found' };
-  const cur = await idbGet('pages', path);
+  const cur = await pageGet(path);
   if (cur) await recordLocalHistory(path, cur); // snapshot current so restore is undoable
-  await idbSet('pages', path, v.data);
+  await pageSet(path, v.data);
   await enqueue({ action: 'save_page', body: { path, data: v.data, force: true } });
   return { ok: true, offline: true, mtime: null };
 }
@@ -308,7 +403,9 @@ async function offlineSearch(q) {
     cur.onsuccess = (e) => {
       const c = e.target.result;
       if (!c) return res(out);
-      try { if (JSON.stringify(c.value).toLowerCase().includes(q)) out.push(c.key); } catch (er) {}
+      if (String(c.key).startsWith(NS + NS_SEP)) {
+        try { if (JSON.stringify(c.value).toLowerCase().includes(q)) out.push(c.key.slice(NS.length + NS_SEP.length)); } catch (er) {}
+      }
       c.continue();
     };
     cur.onerror = () => res(out);
@@ -317,7 +414,7 @@ async function offlineSearch(q) {
 
 // Aggregate tags from the cached tree (page nodes carry their tag list).
 async function offlineListTags() {
-  const tree = (await idbGet('kv', 'tree')) || [];
+  const tree = (await kvGet('tree')) || [];
   const counts = {};
   (function walk(nodes) {
     nodes.forEach(n => {
@@ -340,7 +437,9 @@ async function offlineSearchBlocks(q) {
     cur.onsuccess = (e) => {
       const c = e.target.result;
       if (!c) return res(out.slice(0, 100));
-      try { collectBlocksFromPage(c.key, c.value, q, out); } catch (er) {}
+      if (String(c.key).startsWith(NS + NS_SEP)) {
+        try { collectBlocksFromPage(c.key.slice(NS.length + NS_SEP.length), c.value, q, out); } catch (er) {}
+      }
       c.continue();
     };
     cur.onerror = () => res(out);
@@ -366,7 +465,7 @@ function collectBlocksFromPage(path, data, q, out) {
 
 // Apply a structural change to the cached tree so the UI reflects it offline.
 async function mutateTreeCache(action, body) {
-  const tree = (await idbGet('kv', 'tree')) || [];
+  const tree = (await kvGet('tree')) || [];
   const childrenOf = (parent) => { if (!parent) return tree; const n = findInTree(tree, parent); return n ? (n.children || (n.children = [])) : null; };
   if (action === 'create_folder' || action === 'create_project') {
     const list = childrenOf(body.parent || ''); if (!list) return;
@@ -376,9 +475,9 @@ async function mutateTreeCache(action, body) {
     const list = childrenOf(body.parent || ''); if (!list) return;
     const path = (body.parent ? body.parent + '/' : '') + body.name + '.json';
     if (!list.some(n => n.path === path)) list.push({ type: 'page', name: body.name, path, tags: [], langs: [] });
-    await idbSet('pages', path, { title: body.name, sections: [] });
+    await pageSet(path, { title: body.name, sections: [] });
   } else if (action === 'delete') {
-    removeFromTree(tree, body.path); await idbDel('pages', body.path);
+    removeFromTree(tree, body.path); await pageDel(body.path);
   } else if (action === 'rename') {
     const node = findInTree(tree, body.path); if (!node) return;
     const parent = body.path.includes('/') ? body.path.slice(0, body.path.lastIndexOf('/')) : '';
@@ -397,7 +496,7 @@ async function mutateTreeCache(action, body) {
     const key = (n) => n.type === 'folder' ? n.name : n.name + '.json';
     list.sort((a, b) => body.order.indexOf(key(a)) - body.order.indexOf(key(b)));
   }
-  await idbSet('kv', 'tree', tree);
+  await kvSet('tree', tree);
   treeData = tree; renderTree();
 }
 function findInTree(tree, path) { for (const n of tree) { if (n.path === path) return n; if (n.children) { const f = findInTree(n.children, path); if (f) return f; } } return null; }

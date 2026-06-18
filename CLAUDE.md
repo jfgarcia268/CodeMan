@@ -185,9 +185,30 @@ HTTPS/Gatekeeper/PWA install are blocked.
   persist across launches (an ephemeral port would reset them every launch).
 - **Configurable server URL (no rebuild):** resolved as `CODEMAN_NAS_BASE` env > saved
   `settings.json` (in `app.getPath('userData')`) > `config.js` `DEFAULT_SERVER_URL`. First launch
-  with nothing configured opens a setup screen (served at `/__settings`) offering **a server URL
-  OR offline-only** (`{offlineOnly:true}`); change anytime via the **Server / Offline…** menu.
-  `app.setName('CodeMan')` pins the user-data dir so dev and packaged builds share settings.
+  with nothing configured opens a setup screen (served at `/__settings`, in the main window)
+  offering **a server URL OR offline-only** (`{offlineOnly:true}`). `app.setName('CodeMan')` pins
+  the user-data dir so dev and packaged builds share settings.
+- **Native Settings (`Cmd+,`)** opens the same `/__settings` HTML in a **dedicated child
+  `BrowserWindow`** (the main app stays alive — not the old in-place `loadURL` that wiped it). The
+  panel reads live state from **`GET /__status`**, offers a **Test-connection** button (**`POST
+  /__test`** = a server-side reachability probe of a *candidate* URL, 5s `AbortController`), and a
+  Server/Local toggle. Saving `POST`s to `/__config`, which calls `applySwitch()`.
+- **Safe mode switching / data sync** is the core of the settings work. The offline cache +
+  write-queue are **namespaced per server** in `offline.js` (see its gotcha), so a queue can
+  **never replay against the wrong server** — that's the hard guarantee. On top, `applySwitch()`
+  shows **native `dialog.showMessageBox`** prompts when switching with unsynced changes:
+  Local→Server with local work = *Push to server* (adopts the local namespace into the server's via
+  `window.__codemanAdoptInto`, then flushes) / *Keep on this Mac*; Server→Local or Server A→Server B
+  with a queue = *Sync now/first* (`window.__codemanFlush` while the **old** server is still the
+  active proxy target) / *Switch anyway* (the queue parks under its own namespace, flushes when you
+  return). `main.js` reads the pending count via `window.__codemanQueueLen` before prompting.
+- **Renderer learns the active server via `preload.js`** (the only `webPreferences.preload`):
+  `ipcRenderer.sendSync('codeman:server-url')` → `window.CODEMAN_SERVER_URL`, set **before any page
+  script** so `offline.js` can pick its namespace at module load. `sendSync` (not
+  `additionalArguments`) means a post-switch `loadURL` reload re-reads the **live** URL, re-namespacing
+  for free. `sandbox:false` (so the preload can `sendSync`), `contextIsolation:true`. `CODEMAN_API_BASE`
+  stays `''` — the renderer still uses the relative, proxied `api.php`. Add `preload.js` to
+  `package.json` `build.files` or the packaged app ships without it.
 - **macOS specifics:** unsigned (`identity:null`) ad-hoc build → on download, the quarantine flag
   makes Gatekeeper report it as "damaged"; users clear it with
   `xattr -dr com.apple.quarantine /Applications/CodeMan.app` (see README — the "right-click →
