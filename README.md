@@ -113,16 +113,17 @@ offline away from the server.
 
 ---
 
-## 4. Desktop app (macOS, optional)
+## 4. Desktop app (macOS & Windows, optional)
 
 `codeman-desktop/` wraps the UI in a small Electron app that **opens and works fully
 offline** — it bundles the app shell locally and talks to your server only when
 reachable. No certificate, no PWA setup required.
 
-### Install
+### Install — macOS
 
-1. Download the latest `CodeMan-*.dmg` from the repo's **[Releases](../../releases)**
-   page (built by CI), or build it yourself (below).
+1. Download the right `.dmg` for your Mac from the repo's **[Releases](../../releases)**
+   page (built by CI): **`CodeMan-<v>-arm64.dmg`** for Apple Silicon (M-series) or
+   **`CodeMan-<v>-x64.dmg`** for Intel Macs. Or build it yourself (below).
 2. Open the `.dmg` and drag **CodeMan** into **Applications**. Eject the disk image.
 3. **Clear the download quarantine** (required — see note). In Terminal:
    ```bash
@@ -139,6 +140,22 @@ reachable. No certificate, no PWA setup required.
 > command above removes that flag and it opens fine. (The usual “right-click → Open” trick
 > does **not** clear the *damaged* error — use the command.) If you'd rather avoid this
 > step entirely, the app would need proper Developer ID signing + notarization.
+
+### Install — Windows
+
+1. Download **`CodeMan-<v>.exe`** (the Windows x64 installer) from the
+   **[Releases](../../releases)** page.
+2. Run it. Because the build is **unsigned**, Windows SmartScreen will likely show
+   **“Windows protected your PC.”** Click **More info → Run anyway** to continue — this is
+   the Windows equivalent of the macOS step above.
+3. The installer lets you choose the install location, then launches CodeMan. On first
+   network access Windows may prompt to allow it through the firewall — allow it to reach
+   a server on your LAN.
+
+> **Why the SmartScreen prompt?** The installer has no code-signing certificate (the
+> Windows analogue of Apple notarization), so SmartScreen flags an "unknown publisher."
+> The app is safe; clicking **Run anyway** proceeds. Avoiding the prompt entirely would
+> require a paid code-signing certificate.
 
 ### First launch — connect a server or go offline-only
 
@@ -165,13 +182,19 @@ itself contains no personal URL. (Advanced: `CODEMAN_NAS_BASE` env overrides at 
 ```bash
 cd codeman-desktop
 npm install
-npm run dist      # → dist/CodeMan-<version>-arm64.dmg  (Apple Silicon)
+npm run dist:mac  # macOS → dist/CodeMan-<version>-arm64.dmg + CodeMan-<version>-x64.dmg
+npm run dist:win  # Windows → dist/CodeMan-<version>.exe  (run on a Windows machine)
 npm start         # run in dev without packaging
 ```
 
-The build is unsigned. To run on an **Intel** Mac, change the build to a universal
-target. Releases are produced automatically by the GitHub Actions workflow
-(`.github/workflows/codeman-desktop.yml`) when you push a version tag, e.g.:
+The macOS build produces **both** an Apple-Silicon (`arm64`) and an Intel (`x64`) `.dmg`
+from one command on either kind of Mac (no native deps, so it just repackages the prebuilt
+Electron binaries). The Windows NSIS installer must be built on Windows (`npm run
+dist:win`). All builds are unsigned. App icons come from `codeman-desktop/build/`
+(`icon.icns` / `icon.ico`, generated from `codeman/icon-maskable.svg`). Releases are
+produced automatically by the GitHub Actions workflow
+(`.github/workflows/codeman-desktop.yml`) — an OS matrix (macOS + Windows) that builds all
+three artifacts — when you push a version tag, e.g.:
 
 ```bash
 git tag v3.2.0 && git push origin v3.2.0

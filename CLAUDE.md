@@ -168,7 +168,7 @@ file), not per block. Built for one user across devices, not simultaneous multi-
 
 ---
 
-## Desktop app (`codeman-desktop/`, Electron, macOS)
+## Desktop app (`codeman-desktop/`, Electron, macOS + Windows)
 
 Wraps the UI so it **opens and works fully offline** without any cert/PWA setup — useful where
 HTTPS/Gatekeeper/PWA install are blocked.
@@ -218,15 +218,25 @@ HTTPS/Gatekeeper/PWA install are blocked.
 - **Performance note:** the proxy resolves the server name per connection; if a `.local` mDNS name
   is slow to resolve on a given network, configure the server by **IP** instead (fast + stable;
   pair with a DHCP reservation).
-- **Build:** `cd codeman-desktop && npm install && npm run dist` → `dist/CodeMan-<version>-arm64.dmg`.
+- **Build:** `cd codeman-desktop && npm install`, then `npm run dist:mac` (→ **both**
+  `dist/CodeMan-<version>-arm64.dmg` + `-x64.dmg`, since there are no native deps the single arm64
+  runner repackages both arches) or `npm run dist:win` (→ `dist/CodeMan-<version>.exe`, NSIS, must
+  run on Windows). `npm run dist` builds for the host OS. App **icons** live in
+  `codeman-desktop/build/` (`icon.icns` for mac, `icon.ico` for win) — both generated from
+  `codeman/icon-maskable.svg` and committed; CI just consumes them. Targets/arches + `artifactName`
+  are in `package.json` `build` (`mac.target` = dmg×[arm64,x64], `win.target` = nsis×x64).
   `npm start` runs it in dev. `CODEMAN_SMOKE=1` does a non-interactive boot+reach check.
 
 ### CI (`.github/workflows/codeman-desktop.yml`)
-Triggers **only** on a version tag (`v*`), on `macos-14` (arm64): `npm ci` → set the app version
-from the tag (`v3.2.0` → `3.2.0`, and `sed` the same version into `codeman/version.js` for the
-bundled shell) → `npm run dist` → publish the `.dmg` to a GitHub Release.
-Unsigned (`CSC_IDENTITY_AUTO_DISCOVERY=false`). Release flow: bump **both** `codeman/version.js`
-(drives the web footer + SW cache for the git-synced web/NAS deployment) and
+Triggers **only** on a version tag (`v*`). An **OS matrix** builds all three artifacts and
+publishes them to one GitHub Release: `macos-14` runs `npm run dist:mac` → arm64 + x64 `.dmg`;
+`windows-latest` runs `npm run dist:win` → the NSIS `.exe`. Both legs: `npm ci` → set the app
+version from the tag (`v3.2.0` → `3.2.0`, and `sed` the same version into `codeman/version.js` for
+the bundled shell — the version-sync step is `shell: bash` so `sed` works on the Windows runner's
+git-bash) → build → `softprops/action-gh-release` uploads the per-platform glob (`*.dmg` / `*.exe`)
+to the tag's Release (created once, files appended). Unsigned (`CSC_IDENTITY_AUTO_DISCOVERY=false`)
+— macOS needs the `xattr` clear, Windows shows a SmartScreen prompt. Release flow: bump **both**
+`codeman/version.js` (drives the web footer + SW cache for the git-synced web/NAS deployment) and
 `codeman-desktop/package.json`, commit, `git tag vX.Y.Z && git push origin vX.Y.Z`. (Heads-up: a
 repo's very first workflow, added in the same push as a tag, won't fire for that tag — re-push the
 tag once.)
@@ -442,5 +452,6 @@ content. **Desktop wrapper:** `settings.json` in the OS user-data dir holds the 
   effectively last-write-wins with no merge UI.
 - Offline `empty_trash` only clears local snapshots (queued deletes still run, so items stay
   recoverable from the server trash after reconnect).
-- The desktop build is **macOS/arm64 + unsigned**; an Intel Mac would need a universal target, and
-  avoiding the Gatekeeper step needs signing + notarization.
+- The desktop build ships **macOS (arm64 + x64 dmgs) + Windows (x64 NSIS exe)**, all **unsigned**;
+  avoiding the macOS Gatekeeper step needs Developer ID signing + notarization, and avoiding the
+  Windows SmartScreen prompt needs a code-signing certificate. No Linux target.
