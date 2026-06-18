@@ -12,8 +12,9 @@ optionally as a native desktop app.
 
 ```
 codeman/          the web app + PHP API (this is what you host)
-codeman-desktop/  optional macOS desktop wrapper (Electron)
-.github/workflows/codeman-desktop.yml   tag-triggered macOS build → Release
+codeman-desktop/  optional desktop wrapper (Electron, macOS + Windows)
+.github/workflows/codeman-desktop.yml   tag-triggered macOS + Windows build → Release
+docs/images/      README screenshots (generated — see Local dev)
 ```
 
 > **Maintaining this file:** keep it about the **code** — architecture, data model,
@@ -249,6 +250,14 @@ tag once.)
 - Serve `codeman/` with any PHP host. Simplest: `cd codeman && php -S localhost:8090` (data falls
   back to `codeman/structures/`, which is gitignored).
 - Run `codeman/tests.html` in a browser for the unit tests.
+- **README screenshots** live in `docs/images/` and are referenced by `README.md`. Regenerate
+  them against a **throwaway generic dataset** — point `CODEMAN_DATA` at a temp dir, seed
+  vendor-neutral demo pages, and serve that on a spare port; **never** screenshot real/private
+  data (the local `structures/` is work data). The desktop setup/settings shots come from
+  Electron launched with a temp `--user-data-dir` (so the real `settings.json` is untouched) —
+  its `/__settings` panel is served on `BASE_PORT` (47615) and renders the "Set up" vs
+  "Settings" variant from `/__status`. Capturing via a headless browser (e.g. puppeteer-core
+  driving the installed Chrome) yields crisp retina PNGs straight to disk.
 
 ---
 
