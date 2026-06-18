@@ -174,7 +174,37 @@ function toast(msg) {
   }
   t.textContent = msg;
   t.classList.add('show');
-  setTimeout(() => t.classList.remove('show'), 1200);
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => t.classList.remove('show'), 1900);
+}
+
+// Copy text to the clipboard, robust across BOTH secure and INSECURE contexts.
+// The async Clipboard API (navigator.clipboard) is UNDEFINED off https/localhost —
+// e.g. a NAS served over plain http — so without a fallback Copy silently throws
+// there. Try the modern API when available (await + catch rejections), else fall
+// back to a hidden-textarea execCommand('copy'). Resolves to whether it succeeded.
+async function copyText(text) {
+  text = text == null ? '' : String(text);
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (e) { /* fall through to the legacy path */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-1000px';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus(); ta.select();
+    try { ta.setSelectionRange(0, text.length); } catch (e) {}
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch (e) { return false; }
 }
 
 // A tiny confirmation bubble that pops right next to a control (e.g. the Copy
@@ -187,13 +217,16 @@ function flashCopied(anchorEl, msg) {
   pop.textContent = msg || 'Copied to clipboard';
   document.body.appendChild(pop);
   const r = anchorEl.getBoundingClientRect();
-  // center over the anchor, clamped to the viewport
-  const x = Math.min(window.innerWidth - 8, Math.max(8 + pop.offsetWidth / 2, r.left + r.width / 2));
+  // Center over the anchor, clamped to the viewport. The bubble is translateX(-50%),
+  // so clamp by HALF the width on BOTH sides (the right edge was spilling off-screen
+  // for buttons near the right edge — notably on mobile and right-aligned toolbars).
+  const half = pop.offsetWidth / 2;
+  const x = Math.min(window.innerWidth - 8 - half, Math.max(8 + half, r.left + r.width / 2));
   pop.style.left = Math.round(x) + 'px';
   pop.style.top = Math.round(r.top - 6) + 'px';
   // next frame → trigger the fade-in/up transition, then remove
   requestAnimationFrame(() => pop.classList.add('show'));
-  setTimeout(() => { pop.classList.remove('show'); setTimeout(() => pop.remove(), 200); }, 1100);
+  setTimeout(() => { pop.classList.remove('show'); setTimeout(() => pop.remove(), 200); }, 1800);
 }
 
 /* ---------- MODALS (themed replacements for prompt/confirm) ---------- */

@@ -218,7 +218,7 @@ function openFavorites() {
       const sub = document.createElement('div'); sub.className = 'panel-row-sub'; sub.textContent = r.page || '';
       info.append(nm, sub);
       const copy = document.createElement('button'); copy.textContent = 'Copy';
-      copy.onclick = () => { navigator.clipboard.writeText(r.code); toast('Copied to clipboard'); };
+      copy.onclick = () => { copyText(r.code).then(ok => toast(ok ? 'Copied to clipboard' : 'Copy failed')); };
       row.append(info, copy);
       body.appendChild(row);
     });
@@ -372,7 +372,7 @@ function openBlockPalette() {
     const act = list.querySelector('.cmdk-row.active');
     if (act) act.scrollIntoView({ block: 'nearest' });
   }
-  function copyHit(b) { navigator.clipboard.writeText(b.code || ''); recordCopy(b); toast('Copied to clipboard'); close(); }
+  function copyHit(b) { copyText(b.code || '').then(ok => { if (ok) recordCopy(b); toast(ok ? 'Copied to clipboard' : 'Copy failed'); }); close(); }
   function openHit(b) { openPage(b.path); close(); }
   function search() {
     const q = input.value.trim();
@@ -426,7 +426,15 @@ function openTagManager() {
       if (to === from) return;
       const res = await api('rename_tag', { from, to });
       if (res && res.error) { toast(res.error); return; }
+      // Refresh open tabs so their in-memory tags match disk — otherwise the next
+      // autosave of an already-open page would silently re-write the OLD tag back
+      // (same open-tab reconciliation that Find & Replace does after replace_content).
+      for (const tab of openPages) {
+        const d = await api('get_page', undefined, 'path=' + encodeURIComponent(tab.path));
+        if (d && !d.error) { const m = d._mtime != null ? d._mtime : null; delete d._mtime; tab.data = d; tab.baseMtime = m; if (tab.path === activePath) currentPageData = d; }
+      }
       await loadTree(); // refresh sidebar badges/index
+      if (activePath) renderPage();
       toast((to ? 'Renamed' : 'Deleted') + ' in ' + (res.pages || 0) + ' page' + (res.pages === 1 ? '' : 's'));
       close(); openTagManager();
     };

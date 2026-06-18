@@ -1426,9 +1426,7 @@ function renderChecklistBlock(block, parentArray, idx) {
 
   const copyBtn = mkBtn('Copy', () => {
     const txt = block.items.map(i => (i.done ? '☑ ' : '☐ ') + i.text).join('\n');
-    navigator.clipboard.writeText(txt);
-    recordCopy(block);
-    flashCopied(copyBtn);
+    copyText(txt).then(ok => { if (ok) recordCopy(block); flashCopied(copyBtn, ok ? 'Copied to clipboard' : 'Copy failed'); });
   });
   copyBtn.className = 'secondary block-copy';
   copyBtn.title = 'Copy to clipboard';
@@ -1688,9 +1686,7 @@ function renderRichBlock(block, parentArray, idx) {
   revertBtn.className = 'secondary block-revert';
 
   const copyBtn = mkBtn('Copy', () => {
-    navigator.clipboard.writeText(surface.innerText || '');
-    recordCopy(block);
-    flashCopied(copyBtn);
+    copyText(surface.innerText || '').then(ok => { if (ok) recordCopy(block); flashCopied(copyBtn, ok ? 'Copied to clipboard' : 'Copy failed'); });
   });
   copyBtn.className = 'secondary block-copy';
   copyBtn.title = 'Copy to clipboard';
@@ -1884,11 +1880,12 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
 
   const copyBtn = mkBtn('Copy', () => {
     const out = varsActive() ? substituteVars(block.code, varValuesNow()) : (block.code || '');
-    navigator.clipboard.writeText(out);
-    recordCopy(block);
     const vals = varValuesNow();
     const missing = varsActive() && parseVars(block.code).some(n => !vals[n]);
-    flashCopied(copyBtn, missing ? 'Copied — vars missing' : 'Copied to clipboard');
+    copyText(out).then(ok => {
+      if (ok) recordCopy(block);
+      flashCopied(copyBtn, ok ? (missing ? 'Copied — vars missing' : 'Copied to clipboard') : 'Copy failed');
+    });
   });
   copyBtn.className = 'secondary block-copy';
   copyBtn.title = 'Copy to clipboard';
@@ -1921,7 +1918,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     menu.style.left = Math.round(Math.max(8, r.right - 200)) + 'px';
     copyAsOptions().forEach(([label, text]) => {
       const o = document.createElement('div'); o.className = 'mini-menu-opt'; o.textContent = label;
-      o.onclick = () => { menu.remove(); navigator.clipboard.writeText(text); recordCopy(block); toast('Copied: ' + label); };
+      o.onclick = () => { menu.remove(); copyText(text).then(ok => { if (ok) recordCopy(block); toast(ok ? 'Copied: ' + label : 'Copy failed'); }); };
       menu.appendChild(o);
     });
     document.body.appendChild(menu);
@@ -2010,7 +2007,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     items.push({ divider: true });
     copyAsOptions().forEach(([label, text]) => items.push({
       icon: '▾', label: 'Copy: ' + label,
-      onClick: () => { navigator.clipboard.writeText(text); recordCopy(block); toast('Copied: ' + label); },
+      onClick: () => { copyText(text).then(ok => { if (ok) recordCopy(block); toast(ok ? 'Copied: ' + label : 'Copy failed'); }); },
     }));
     showMiniMenu(overflowBtn, items);
   });
@@ -2103,6 +2100,14 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
   textarea.className = 'code-edit';
   textarea.value = block.code || '';
   textarea.spellcheck = false;
+  // Stop the browser AND extensions (Grammarly etc.) from drawing squiggle/underline
+  // overlays inside the code editor — they're meaningless on code and leave stray lines.
+  textarea.autocapitalize = 'off';
+  textarea.autocomplete = 'off';
+  textarea.setAttribute('autocorrect', 'off');
+  textarea.setAttribute('data-gramm', 'false');
+  textarea.setAttribute('data-gramm_editor', 'false');
+  textarea.setAttribute('data-enable-grammarly', 'false');
   // Inline metrics so the caret/text layout matches the gutter + view exactly.
   textarea.style.lineHeight = edLineH + 'px';
   textarea.style.fontSize = edFont + 'px';

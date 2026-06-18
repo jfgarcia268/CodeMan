@@ -890,11 +890,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 }
 .section-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start; /* top-align so title + actions don't float mid-height beside a tall (multi-row) tag block */
   padding: 8px 12px;
   cursor: pointer;
   gap: 8px;
+  min-height: 36px;
 }
+/* keep the chevron + title sitting on the first row (aligned with the action buttons) */
+.section-header > .section-toggle, .section-header > .section-title { line-height: 20px; }
 .section-header:hover { background: #2a2d2e; }
 .section-title {
   flex: 1;
@@ -1107,7 +1110,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .block-toolbar .block-clear,
 .block-toolbar .type-menu,
 .block-toolbar .copy-as { display: none; }
-.block-toolbar .block-overflow { display: inline-flex; align-items: center; }
+.block-toolbar .block-overflow { display: inline-flex; align-items: center; line-height: 1; }
 
 /* language picker */
 .lang-picker { position: relative; }
@@ -1204,6 +1207,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   display: none;             /* shown only while editing */
 }
 .block:not(.viewing) .code-edit { display: block; }
+/* The code/note editor is a TRANSPARENT textarea overlaying the highlighted layer.
+   Its focus affordance is the block's editing state (border + Save/Cancel), so the
+   global :focus-visible ring must NOT apply here — an outline on the full-bleed
+   overlay drew a stray blue box around the code while editing. */
+.code-edit:focus, .code-edit:focus-visible { outline: none; }
 /* Neutralise the Prism theme's pre padding/margin/line-height so the rendered
    text lines up row-for-row with the textarea and the gutter (the .code-view
    wrapper supplies the 10px padding that matches the gutter's top padding). */
@@ -1976,4 +1984,7 @@ pre.md-code {
 
   /* --- offline badge clears the home indicator --- */
   .offline-badge { bottom: calc(12px + env(safe-area-inset-bottom)); }
+  /* the open drawer covers the bottom-right corner where the sync badge sits;
+     hide it while the drawer is open so it can't overlap the Expand/Collapse bar */
+  body.is-mobile:not(.sidebar-hidden) .offline-badge { display: none; }
 }
