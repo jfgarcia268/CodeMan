@@ -473,6 +473,11 @@ function renderMillerFolderCard(node, depth, selected) {
   const c = folderCounts(node);
   const el = document.createElement('div');
   el.className = 'subfolder-card' + (selected ? ' selected' : '') + (node.project ? ' project-card' : '');
+  el.setAttribute('role', 'treeitem');
+  el.tabIndex = -1;
+  el.dataset.path = node.path;
+  el.setAttribute('aria-label', node.name + (node.project ? ' project' : ' folder'));
+  if (selected) el.setAttribute('aria-selected', 'true');
   el.draggable = true;
   el.addEventListener('dragstart', e => { e.dataTransfer.setData('text/plain', node.path); e.dataTransfer.effectAllowed = 'move'; el.classList.add('dragging'); document.body.classList.toggle('dragging-project', !!node.project); });
   el.addEventListener('dragend', () => { el.classList.remove('dragging'); document.body.classList.remove('dragging-project'); });
@@ -566,8 +571,75 @@ function collectMatchingPages(nodes, q, out) {
   return out;
 }
 
+/* ---------- TREE KEYBOARD NAV & ROLES (accessibility) ----------
+   The tree is built from <div>s; these give it real treeitem semantics and make it
+   keyboard-operable. Enter/Space activate any row (BOTH layouts); the single-column
+   tree additionally gets Up/Down/Left/Right roving navigation. Activating a folder
+   re-renders the tree (selectFolder → renderTree), so we restore focus by data-path. */
+let treeKbdBound = false;
+function bindTreeKeys(container) {
+  if (treeKbdBound) return;            // attach once — renderTree only swaps innerHTML
+  treeKbdBound = true;
+  container.addEventListener('keydown', onTreeKeydown);
+}
+function visibleTreeItems(container) {
+  return Array.from(container.querySelectorAll('[role="treeitem"]')).filter(el => el.offsetParent !== null);
+}
+function focusTreeItem(items, i) {
+  const el = items[Math.max(0, Math.min(i, items.length - 1))];
+  if (!el) return;
+  items.forEach(x => { x.tabIndex = -1; });
+  el.tabIndex = 0; el.focus();
+}
+// Activate a row (click), then restore keyboard focus to the equivalent row by path
+// since folder activation rebuilds the tree.
+function activateTreeItem(container, item) {
+  const path = item.dataset.path;
+  item.click();
+  const items = visibleTreeItems(container);
+  const after = items.find(x => x.dataset.path === path);
+  if (after) focusTreeItem(items, items.indexOf(after));
+}
+// Keep exactly ONE row tabbable (open page → selected folder → first row) so Tab lands
+// in the tree and arrows take over. Never steals focus on its own (mouse-safe).
+function initRovingTabindex(container) {
+  const items = visibleTreeItems(container);
+  if (!items.length || items.some(el => el.tabIndex === 0)) return;
+  const preferred = container.querySelector('.tree-row.active[role="treeitem"], .subfolder-card.selected[role="treeitem"], [role="treeitem"][aria-selected="true"]');
+  (preferred && items.includes(preferred) ? preferred : items[0]).tabIndex = 0;
+}
+function onTreeKeydown(e) {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return; // don't hijack inline edit
+  const container = e.currentTarget;
+  const item = e.target.closest('[role="treeitem"]');
+  const k = e.key;
+  if (k === 'Enter' || k === ' ' || k === 'Spacebar') { if (item) { e.preventDefault(); activateTreeItem(container, item); } return; }
+  if (effectiveMode() === 'double') return;  // arrow nav is single-column only (Miller is a drill UI)
+  const items = visibleTreeItems(container);
+  if (!items.length) return;
+  const idx = item ? items.indexOf(item) : -1;
+  if (k === 'ArrowDown') { e.preventDefault(); focusTreeItem(items, idx + 1); }
+  else if (k === 'ArrowUp') { e.preventDefault(); focusTreeItem(items, idx - 1); }
+  else if (k === 'Home') { e.preventDefault(); focusTreeItem(items, 0); }
+  else if (k === 'End') { e.preventDefault(); focusTreeItem(items, items.length - 1); }
+  else if (k === 'ArrowRight' && item) {
+    const exp = item.getAttribute('aria-expanded');
+    if (exp === 'false') { e.preventDefault(); activateTreeItem(container, item); }       // expand
+    else if (exp === 'true') { e.preventDefault(); focusTreeItem(items, idx + 1); }        // into first child
+  }
+  else if (k === 'ArrowLeft' && item) {
+    if (item.getAttribute('aria-expanded') === 'true') { e.preventDefault(); activateTreeItem(container, item); return; } // collapse
+    e.preventDefault();                                                                    // else jump to parent
+    const nodeEl = item.closest('.tree-node');
+    const parentRow = nodeEl && nodeEl.parentElement.closest('.tree-node') && nodeEl.parentElement.closest('.tree-node').querySelector(':scope > .tree-row[role="treeitem"]');
+    if (parentRow) focusTreeItem(items, items.indexOf(parentRow));
+  }
+}
+
 function renderTree() {
   const container = document.getElementById('tree');
+  container.setAttribute('role', 'tree');
+  bindTreeKeys(container);
   const pageCol = document.getElementById('pageCol');
   const area = document.getElementById('treeArea');
   area.classList.toggle('double', effectiveMode() === 'double');
@@ -581,6 +653,7 @@ function renderTree() {
   if (effectiveMode() === 'double') {
     pageCol.style.display = 'none';
     renderMiller(container, q); // clears + restores its own scroll internally
+    initRovingTabindex(container);
     return;
   }
 
@@ -598,6 +671,7 @@ function renderTree() {
   if (pendingNew && pendingNew.parent === '') container.appendChild(buildPendingRow());
   attachRootDrop(container);
   container.scrollTop = prevScrollTop;
+  initRovingTabindex(container);
 }
 
 function updateLayoutToggle() {
@@ -652,7 +726,11 @@ function renderTreeNode(node, opts) {
 
   const row = document.createElement('div');
   row.className = 'tree-row';
-  if (node.type === 'page' && node.path === currentPagePath) row.classList.add('active');
+  row.setAttribute('role', 'treeitem');
+  row.tabIndex = -1; // roving: initRovingTabindex() promotes one row to 0 each render
+  row.dataset.path = node.path;
+  row.setAttribute('aria-label', node.name + (node.type === 'folder' ? ' folder' : ' page'));
+  if (node.type === 'page' && node.path === currentPagePath) { row.classList.add('active'); row.setAttribute('aria-selected', 'true'); }
 
   const chevron = document.createElement('span');
   chevron.className = 'tree-chevron';
@@ -714,10 +792,12 @@ function renderTreeNode(node, opts) {
 
     const parts = node.path.split('/');
     parts.pop(); // drop filename
-    if (parts.length) {
+    {
+      // Always show a location crumb (root pages read "Root") so two pages that
+      // share a display name are distinguishable at a glance.
       const crumb = document.createElement('div');
       crumb.className = 'card-crumb';
-      crumb.textContent = parts.join(' › ');
+      crumb.textContent = parts.length ? parts.join(' › ') : 'Root';
       row.appendChild(crumb);
     }
 
@@ -780,6 +860,7 @@ function renderTreeNode(node, opts) {
     const isOpen = forceOpen || hasPending || expandedFolders.has(node.path);
     childrenEl.style.display = isOpen ? 'block' : 'none';
     if (isOpen) row.classList.add('expanded');
+    if (showArrow) row.setAttribute('aria-expanded', String(isOpen));
     // open vs closed folder glyph as the primary expansion cue (projects keep 📦)
     if (!node.project) icon.textContent = isOpen ? '\u{1F4C2}' : '\u{1F4C1}';
     renderTreeNodes(node.children || [], childrenEl, opts);
@@ -790,6 +871,7 @@ function renderTreeNode(node, opts) {
       const open = childrenEl.style.display === 'none';
       childrenEl.style.display = open ? 'block' : 'none';
       row.classList.toggle('expanded', open);
+      if (showArrow) row.setAttribute('aria-expanded', String(open));
       if (!node.project) icon.textContent = open ? '\u{1F4C2}' : '\u{1F4C1}';
       if (open) expandedFolders.add(node.path);
       else expandedFolders.delete(node.path);
@@ -915,11 +997,20 @@ function buildPendingRow() {
   };
   input.addEventListener('click', e => e.stopPropagation());
   input.addEventListener('mousedown', e => e.stopPropagation());
+  input.title = 'Enter to create · Esc to cancel';
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); finish(true); }
     else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
   });
-  input.addEventListener('blur', () => finish(true));
+  // Click-away cancels (was: auto-commit on blur, which surprised users). The ✓/✕
+  // buttons preventDefault on mousedown so their click lands before this blur fires.
+  input.addEventListener('blur', () => finish(false));
+
+  const ok = document.createElement('button'); ok.className = 'pending-ok'; ok.textContent = '✓'; ok.title = 'Create (Enter)';
+  const no = document.createElement('button'); no.className = 'pending-cancel secondary'; no.textContent = '✕'; no.title = 'Cancel (Esc)';
+  [ok, no].forEach(b => b.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); }));
+  ok.addEventListener('click', e => { e.stopPropagation(); finish(true); });
+  no.addEventListener('click', e => { e.stopPropagation(); finish(false); });
 
   let row;
   if (isFolderish && effectiveMode() === 'double') {
@@ -929,21 +1020,24 @@ function buildPendingRow() {
     const icon = document.createElement('span'); icon.className = 'sf-icon'; icon.textContent = isProject ? '\u{1F4E6}' : '\u{1F4C1}';
     const body = document.createElement('div'); body.className = 'sf-body';
     body.appendChild(input);
-    row.append(icon, body);
+    const acts = document.createElement('span'); acts.className = 'pending-acts'; acts.append(ok, no);
+    row.append(icon, body, acts);
   } else if (isFolderish) {
     // single-column folder bar / project bar (matches .tree-row.is-folder)
     row = document.createElement('div');
     row.className = 'tree-row is-folder pending-new' + (isProject ? ' is-project' : '');
     const chevron = document.createElement('span'); chevron.className = 'tree-chevron';
     const icon = document.createElement('span'); icon.className = 'tree-icon'; icon.textContent = isProject ? '\u{1F4E6}' : '\u{1F4C1}';
-    row.append(chevron, icon, input);
+    const acts = document.createElement('span'); acts.className = 'pending-acts'; acts.append(ok, no);
+    row.append(chevron, icon, input, acts);
   } else {
     // page card (matches .tree-row.is-page, used in both layouts)
     row = document.createElement('div');
     row.className = 'tree-row is-page pending-new';
     const top = document.createElement('div'); top.className = 'card-top';
     const icon = document.createElement('span'); icon.className = 'tree-icon'; icon.textContent = '\u{1F4C4}';
-    top.append(icon, input);
+    const acts = document.createElement('span'); acts.className = 'pending-acts'; acts.append(ok, no);
+    top.append(icon, input, acts);
     row.appendChild(top);
   }
 
@@ -989,8 +1083,8 @@ function startInlineRename(node, label, row) {
 
   input.addEventListener('click', e => e.stopPropagation());
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') input.blur();
-    if (e.key === 'Escape') { done = true; renderTree(); }
+    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+    else if (e.key === 'Escape') { e.preventDefault(); done = true; renderTree(); } // cancel before blur can commit
   });
   input.addEventListener('blur', commit);
 

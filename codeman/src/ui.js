@@ -33,6 +33,7 @@ function setDeepSearch(on) {
   deepSearch = on;
   try { localStorage.setItem('codeman.deepSearch', on ? '1' : '0'); } catch (e) {}
   deepSearchToggle.classList.toggle('on', on);
+  deepSearchToggle.setAttribute('aria-pressed', on ? 'true' : 'false');
   deepSearchToggle.title = on ? 'Searching inside page content (click to disable)'
                               : 'Also search inside page content';
   deepMatches = new Set();
@@ -56,6 +57,9 @@ setDeepSearch(deepSearch); // initialise toggle state
 /* ---------- LAYOUT TOGGLE ---------- */
 
 document.getElementById('layoutToggle').addEventListener('click', (e) => {
+  // On mobile effectiveMode() is forced to single, so toggling here would only persist
+  // an invisible preference change. The switch is hidden on mobile anyway; bail to be safe.
+  if (document.body.classList.contains('is-mobile')) return;
   const opt = e.target.closest('.ls-opt');
   if (opt) setSidebarMode(opt.dataset.mode);
   else setSidebarMode(sidebarMode === 'single' ? 'double' : 'single');
@@ -175,6 +179,17 @@ function applySidebarWidth(w) {
     }
     renderTree(); // effectiveMode() changed → re-render the tree in the right layout
   }
-  mq.addEventListener('change', (e) => apply(e.matches));
+  mq.addEventListener('change', (e) => {
+    apply(e.matches);
+    // Block toolbars render differently per layout (desktop text vs mobile icons), so
+    // the OPEN page must re-render on the breakpoint cross — not just the tree. Only on
+    // a real flip (not initial), and only if a page is open. Preserve scroll position.
+    if (currentPagePath) {
+      const page = document.getElementById('page');
+      const top = page ? page.scrollTop : 0;
+      renderPage();
+      setTimeout(() => { const p = document.getElementById('page'); if (p) p.scrollTop = top; }, 0);
+    }
+  });
   apply(mq.matches);
 })();

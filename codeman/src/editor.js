@@ -309,7 +309,22 @@ function renderPageBody() {
   page.innerHTML = '';
 
   if (!currentPagePath) {
-    page.innerHTML = '<div class="empty-state">Select or create a page to get started</div>';
+    // Onboarding empty state: orient a new user with primary CTAs + the ⌘K hint,
+    // and a "open the sidebar" nudge when it's hidden (so the tree isn't a dead end).
+    const empty = document.createElement('div');
+    empty.className = 'empty-state onboard';
+    const mk = (label, cls, fn) => { const b = document.createElement('button'); b.textContent = label; if (cls) b.className = cls; b.addEventListener('click', fn); return b; };
+    const h = document.createElement('div'); h.className = 'onboard-title'; h.textContent = 'No page open';
+    const sub = document.createElement('div'); sub.className = 'onboard-sub'; sub.textContent = 'Create your first snippet page, or pick one from the sidebar.';
+    const actions = document.createElement('div'); actions.className = 'onboard-actions';
+    actions.append(mk('+ New Project', '', () => createProjectHere()), mk('+ New Page', '', () => createPageHere()));
+    if (document.body.classList.contains('sidebar-hidden')) {
+      actions.appendChild(mk('☰ Open the sidebar', 'secondary', () => setSidebarHidden(false)));
+    }
+    const hint = document.createElement('div'); hint.className = 'onboard-hint';
+    hint.innerHTML = 'Press <kbd>⌘K</kbd> to jump to any page or run a command';
+    empty.append(h, sub, actions, hint);
+    page.appendChild(empty);
     return;
   }
 
@@ -1409,14 +1424,13 @@ function renderChecklistBlock(block, parentArray, idx) {
 
   const typeBtn = makeTypeMenuButton(block);
 
-  const copyBtn = mkBtn('Copy to clipboard', () => {
+  const copyBtn = mkBtn('Copy', () => {
     const txt = block.items.map(i => (i.done ? '☑ ' : '☐ ') + i.text).join('\n');
-    navigator.clipboard.writeText(txt);
-    recordCopy(block);
-    flashCopied(copyBtn);
+    copyText(txt).then(ok => { if (ok) recordCopy(block); flashCopied(copyBtn, ok ? 'Copied to clipboard' : 'Copy failed'); });
   });
   copyBtn.className = 'secondary block-copy';
-  if (isMobile) { copyBtn.textContent = '⧉'; copyBtn.title = 'Copy to clipboard'; }
+  copyBtn.title = 'Copy to clipboard';
+  if (isMobile) copyBtn.textContent = '⧉';
 
   const dupBtn = mkBtn('Duplicate', () => {
     parentArray.push(JSON.parse(JSON.stringify(block)));
@@ -1671,13 +1685,12 @@ function renderRichBlock(block, parentArray, idx) {
   });
   revertBtn.className = 'secondary block-revert';
 
-  const copyBtn = mkBtn('Copy to clipboard', () => {
-    navigator.clipboard.writeText(surface.innerText || '');
-    recordCopy(block);
-    flashCopied(copyBtn);
+  const copyBtn = mkBtn('Copy', () => {
+    copyText(surface.innerText || '').then(ok => { if (ok) recordCopy(block); flashCopied(copyBtn, ok ? 'Copied to clipboard' : 'Copy failed'); });
   });
   copyBtn.className = 'secondary block-copy';
-  if (isMobile) { copyBtn.textContent = '⧉'; copyBtn.title = 'Copy to clipboard'; }
+  copyBtn.title = 'Copy to clipboard';
+  if (isMobile) copyBtn.textContent = '⧉';
 
   const dupBtn = mkBtn('Duplicate', () => {
     parentArray.push(JSON.parse(JSON.stringify(block)));
@@ -1771,11 +1784,14 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     block.showLines = on;
     el.classList.toggle('show-lines', on);
     lineToggle.classList.toggle('on', on);
+    lineToggle.setAttribute('aria-pressed', String(on));
     updateGutter();
     scheduleSave();
   });
   lineToggle.className = 'secondary line-toggle' + (linesOn ? ' on' : '');
   lineToggle.title = 'Toggle line numbers';
+  lineToggle.setAttribute('aria-label', 'Toggle line numbers');
+  lineToggle.setAttribute('aria-pressed', String(linesOn));
 
   // Variables toggle (off by default): when on, _V_NAME_V_ markers become
   // fill-in fields shown above the code in view mode, substituted into the
@@ -1790,6 +1806,8 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
   });
   varToggle.className = 'secondary var-toggle' + (varsOn ? ' on' : '');
   varToggle.title = 'Toggle variables — wrap a value as _V_NAME_V_, then fill it in';
+  varToggle.setAttribute('aria-label', 'Toggle variables');
+  varToggle.setAttribute('aria-pressed', String(varsOn));
 
   // One "type" switch replaces the old ¶ / T toggles — convert to any kind.
   const typeBtn = makeTypeMenuButton(block);
@@ -1860,16 +1878,18 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
   });
   revertBtn.className = 'secondary block-revert';
 
-  const copyBtn = mkBtn('Copy to clipboard', () => {
+  const copyBtn = mkBtn('Copy', () => {
     const out = varsActive() ? substituteVars(block.code, varValuesNow()) : (block.code || '');
-    navigator.clipboard.writeText(out);
-    recordCopy(block);
     const vals = varValuesNow();
     const missing = varsActive() && parseVars(block.code).some(n => !vals[n]);
-    flashCopied(copyBtn, missing ? 'Copied — vars missing' : 'Copied to clipboard');
+    copyText(out).then(ok => {
+      if (ok) recordCopy(block);
+      flashCopied(copyBtn, ok ? (missing ? 'Copied — vars missing' : 'Copied to clipboard') : 'Copy failed');
+    });
   });
   copyBtn.className = 'secondary block-copy';
-  if (isMobile) { copyBtn.textContent = '⧉'; copyBtn.title = 'Copy to clipboard'; }
+  copyBtn.title = 'Copy to clipboard';
+  if (isMobile) copyBtn.textContent = '⧉';
 
   // Alternative clipboard formats for the block's code. On desktop this is the "▾"
   // button next to Copy; on mobile the same options live inside the ⋯ menu (the
@@ -1898,7 +1918,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     menu.style.left = Math.round(Math.max(8, r.right - 200)) + 'px';
     copyAsOptions().forEach(([label, text]) => {
       const o = document.createElement('div'); o.className = 'mini-menu-opt'; o.textContent = label;
-      o.onclick = () => { menu.remove(); navigator.clipboard.writeText(text); recordCopy(block); toast('Copied: ' + label); };
+      o.onclick = () => { menu.remove(); copyText(text).then(ok => { if (ok) recordCopy(block); toast(ok ? 'Copied: ' + label : 'Copy failed'); }); };
       menu.appendChild(o);
     });
     document.body.appendChild(menu);
@@ -1987,7 +2007,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     items.push({ divider: true });
     copyAsOptions().forEach(([label, text]) => items.push({
       icon: '▾', label: 'Copy: ' + label,
-      onClick: () => { navigator.clipboard.writeText(text); recordCopy(block); toast('Copied: ' + label); },
+      onClick: () => { copyText(text).then(ok => { if (ok) recordCopy(block); toast(ok ? 'Copied: ' + label : 'Copy failed'); }); },
     }));
     showMiniMenu(overflowBtn, items);
   });
@@ -2080,6 +2100,14 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
   textarea.className = 'code-edit';
   textarea.value = block.code || '';
   textarea.spellcheck = false;
+  // Stop the browser AND extensions (Grammarly etc.) from drawing squiggle/underline
+  // overlays inside the code editor — they're meaningless on code and leave stray lines.
+  textarea.autocapitalize = 'off';
+  textarea.autocomplete = 'off';
+  textarea.setAttribute('autocorrect', 'off');
+  textarea.setAttribute('data-gramm', 'false');
+  textarea.setAttribute('data-gramm_editor', 'false');
+  textarea.setAttribute('data-enable-grammarly', 'false');
   // Inline metrics so the caret/text layout matches the gutter + view exactly.
   textarea.style.lineHeight = edLineH + 'px';
   textarea.style.fontSize = edFont + 'px';
@@ -2102,15 +2130,16 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
   textarea.addEventListener('scroll', syncScroll);
   // keep the active-line highlight in step with the caret
   ['keyup', 'click', 'focus', 'select'].forEach(ev => textarea.addEventListener(ev, updateActiveLine));
-  textarea.addEventListener('blur', (e) => {
-    // staying within this block (clicking Save/Revert/label/lang picker) isn't
-    // "leaving" — don't switch to view mode (which would hide those controls).
-    if (e.relatedTarget && el.contains(e.relatedTarget)) return;
-    el.classList.add('viewing');
-    updateActiveLine();
-    renderVarsPanel();   // code may have changed → refresh var fields
-    refreshSectionVars();
-    updatePreview();
+  // Sticky editing: clicking away from the block no longer exits edit mode — the
+  // block stays editable until Save / Revert-Cancel (or Esc, below). Autosave is on
+  // `input` + flushSave on tab switch, both independent of focus, so nothing is lost
+  // while a block sits in edit mode. The old blur handler's side-effects (updateActiveLine/
+  // renderVarsPanel/refreshSectionVars/updatePreview) only prepped the view-mode render and
+  // already run on Save and on live input, so they're not needed on blur.
+  textarea.addEventListener('keydown', (e) => {
+    // Esc = a quick "done": same path as the Cancel/Revert button (cancels when
+    // clean, reverts when dirty), so blocks don't pile up open without a mouse exit.
+    if (e.key === 'Escape') { e.preventDefault(); revertBtn.click(); }
   });
 
   const view = document.createElement('div');

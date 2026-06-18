@@ -9,6 +9,7 @@
   --border-2: #444;       /* stronger borders */
   --text: #ddd;           /* primary text */
   --text-dim: #888;       /* secondary text */
+  --muted: #9aa0a8;       /* dim labels/stamps — was an undefined fallback; centralized to pass AA */
   --accent: #0e639c;      /* primary accent (buttons, focus) */
   --accent-2: #094771;    /* accent hover / active row */
 }
@@ -504,7 +505,7 @@ body.mode-double #collapseAllBtn { display: none; }
 .card-meta { display: flex; flex-wrap: wrap; gap: 5px; }
 .card-tags { padding-top: 6px; border-top: 1px solid #383b3d; }
 .lang-badge {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   color: #fff;
   padding: 1px 7px;
@@ -512,7 +513,7 @@ body.mode-double #collapseAllBtn { display: none; }
   white-space: nowrap;
 }
 .card-tag {
-  font-size: 10px;
+  font-size: 11px;
   color: #cfe6ff;
   background: #2b4d6b;
   border: 1px solid #37648c;
@@ -603,6 +604,11 @@ body.mode-double #collapseAllBtn { display: none; }
 }
 .pending-input::placeholder { text-transform: none; letter-spacing: normal; color: var(--text-dim); }
 .subfolder-card.pending-new { cursor: default; }
+/* inline create commit/cancel affordances */
+.pending-acts { display: inline-flex; gap: 3px; flex-shrink: 0; margin-left: 4px; }
+.pending-acts button { padding: 1px 7px; font-size: 12px; line-height: 1.4; }
+.pending-ok { background: #2e7d46; }
+.pending-ok:hover { background: #379152; }
 .tree-actions { display: none; gap: 2px; }
 .tree-row:hover .tree-actions { display: flex; }
 .tree-actions button {
@@ -650,8 +656,18 @@ button {
 button:hover { background: #1177bb; }
 button.secondary { background: #3a3d41; }
 button.secondary:hover { background: #4a4d51; }
-button.danger { background: #a1260d; }
-button.danger:hover { background: #c1340f; }
+/* Delete is de-emphasized at rest (neutral, dimmed red text) so destructive
+   actions don't dominate the toolbar; full red only on hover/keyboard focus. */
+button.danger { background: #3a3d41; color: #e0a0a0; }
+button.danger:hover, button.danger:focus-visible { background: #c1340f; color: #fff; }
+
+/* Keyboard-only focus ring (mouse clicks stay ring-free via :focus-visible).
+   The app was effectively unusable by keyboard without this. */
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible,
+[tabindex]:focus-visible, .tree-row:focus-visible, .subfolder-card:focus-visible, .miller-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 
 .main {
   flex: 1;
@@ -853,6 +869,18 @@ button.danger:hover { background: #c1340f; }
   color: #777;
   font-size: 14px;
 }
+/* Onboarding empty state — primary CTAs + ⌘K hint for first-run orientation. */
+.empty-state.onboard { flex-direction: column; gap: 10px; text-align: center; padding: 24px; }
+.onboard-title { font-size: 20px; color: var(--text); }
+.onboard-sub { font-size: 13px; color: var(--muted); max-width: 420px; }
+.onboard-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-top: 6px; }
+.onboard-actions button { font-size: 13px; padding: 8px 16px; }
+.onboard-hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+.onboard-hint kbd {
+  font: 600 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--panel-2); border: 1px solid var(--border-2); border-bottom-width: 2px;
+  border-radius: 4px; padding: 1px 6px; color: var(--text);
+}
 
 .section {
   border: 1px solid var(--border);
@@ -862,11 +890,14 @@ button.danger:hover { background: #c1340f; }
 }
 .section-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start; /* top-align so title + actions don't float mid-height beside a tall (multi-row) tag block */
   padding: 8px 12px;
   cursor: pointer;
   gap: 8px;
+  min-height: 36px;
 }
+/* keep the chevron + title sitting on the first row (aligned with the action buttons) */
+.section-header > .section-toggle, .section-header > .section-title { line-height: 20px; }
 .section-header:hover { background: #2a2d2e; }
 .section-title {
   flex: 1;
@@ -1054,6 +1085,9 @@ button.danger:hover { background: #c1340f; }
   background: #2d2d2d;
   border-bottom: 1px solid var(--border);
 }
+/* Toolbar buttons never wrap (no more two-line "Copy") and share one height so
+   the row baseline stays aligned. */
+.block-toolbar button { white-space: nowrap; min-height: 26px; }
 .block-toolbar select {
   background: #3a3d41;
   color: var(--text);
@@ -1063,9 +1097,20 @@ button.danger:hover { background: #c1340f; }
   font-size: 12px;
 }
 .block-toolbar .spacer { flex: 1; }
-/* The ⋯ overflow button is a mobile-only declutter control — never shown on desktop
-   (the @media block flips it to inline-flex and hides the actions it stands in for). */
-.block-toolbar .block-overflow { display: none; }
+/* The ⋯ overflow declutters the toolbar on BOTH desktop and mobile: the secondary
+   actions (#, $, block-kind convert, Duplicate, Split, To-subsection, Clear-done,
+   copy-as) live inside it, leaving a primary row of type · label · Edit/Save/Revert ·
+   Copy · ⋯ · Delete. The hidden buttons stay in the DOM so the menu can proxy them
+   via .click(). (Was desktop-only-hidden before the UI/UX declutter pass.) */
+.block-toolbar .line-toggle,
+.block-toolbar .var-toggle,
+.block-toolbar .block-dup,
+.block-toolbar .block-split,
+.block-toolbar .block-tosub,
+.block-toolbar .block-clear,
+.block-toolbar .type-menu,
+.block-toolbar .copy-as { display: none; }
+.block-toolbar .block-overflow { display: inline-flex; align-items: center; line-height: 1; }
 
 /* language picker */
 .lang-picker { position: relative; }
@@ -1162,6 +1207,11 @@ button.danger:hover { background: #c1340f; }
   display: none;             /* shown only while editing */
 }
 .block:not(.viewing) .code-edit { display: block; }
+/* The code/note editor is a TRANSPARENT textarea overlaying the highlighted layer.
+   Its focus affordance is the block's editing state (border + Save/Cancel), so the
+   global :focus-visible ring must NOT apply here — an outline on the full-bleed
+   overlay drew a stray blue box around the code while editing. */
+.code-edit:focus, .code-edit:focus-visible { outline: none; }
 /* Neutralise the Prism theme's pre padding/margin/line-height so the rendered
    text lines up row-for-row with the textarea and the gutter (the .code-view
    wrapper supplies the 10px padding that matches the gutter's top padding). */
@@ -1822,19 +1872,11 @@ pre.md-code {
   .block-toolbar .spacer { display: none; }
   .block-toolbar button { min-height: 32px; padding: 5px 8px; font-size: 12px; }
 
-  /* --- block toolbar: icon-only on mobile, with everything secondary folded into the
-     single ⋯ menu. Hidden actions (line/var/dup/split/to-sub proxy their .click();
-     block-kind + copy-as are rebuilt as menu items). The bar becomes one tidy row:
-     [lang] [✎] [⧉] [⋯] [Delete], with the Label input on its own full-width row. --- */
-  body.is-mobile .block-toolbar .line-toggle,
-  body.is-mobile .block-toolbar .var-toggle,
-  body.is-mobile .block-toolbar .block-dup,
-  body.is-mobile .block-toolbar .block-split,
-  body.is-mobile .block-toolbar .block-tosub,
-  body.is-mobile .block-toolbar .block-clear,
-  body.is-mobile .block-toolbar .type-menu,
-  body.is-mobile .block-toolbar .copy-as { display: none; }
-  body.is-mobile .block-toolbar .block-overflow { display: inline-flex; align-items: center; }
+  /* --- block toolbar: icon-only on mobile. The secondary actions are already folded
+     into the single ⋯ menu globally (see the .block-toolbar declutter rules above —
+     hidden actions proxy their .click(); block-kind + copy-as are rebuilt as items).
+     The bar becomes one tidy row: [lang] [✎] [⧉] [⋯] [Delete], with the Label input
+     on its own full-width row. --- */
   /* Label input drops to its own full-width row below the action buttons */
   body.is-mobile .block-toolbar .block-label {
     order: 99; flex-basis: 100%; flex-grow: 0;
@@ -1942,4 +1984,7 @@ pre.md-code {
 
   /* --- offline badge clears the home indicator --- */
   .offline-badge { bottom: calc(12px + env(safe-area-inset-bottom)); }
+  /* the open drawer covers the bottom-right corner where the sync badge sits;
+     hide it while the drawer is open so it can't overlap the Expand/Collapse bar */
+  body.is-mobile:not(.sidebar-hidden) .offline-badge { display: none; }
 }

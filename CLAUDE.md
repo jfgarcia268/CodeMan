@@ -30,7 +30,7 @@ codeman-desktop/  optional macOS desktop wrapper (Electron)
 |------|------|
 | `index.html` | Markup; loads **vendored** Prism (offline), then `version.js`, then the 7 ordered `src/*.js` scripts (via the dynamic loader array — `version.js` is first so `CODEMAN_VERSION` exists before the modules run). Cache-busts CSS/JS with a `?v=` query over http(s); on `file://` the query is skipped (Chromium won't resolve `foo.js?v=…` off disk). The stylesheet is a plain `<link>` whose href gets `?v=` appended by JS — **never** `document.write` (that wipes the document under a `file://` load). |
 | `version.js` | **Single version source of truth.** `self.CODEMAN_VERSION = 'X.Y.Z'` — read by the footer (`init.js`) and `importScripts`-ed by `sw.js` for the cache name. Bump this one file per release (CI also syncs it from the git tag for the packaged desktop build). |
-| `src/core.js` | Languages, global state, the `api()` wrapper (offline-aware) + `apiFetch`, toast, themed modals. `apiFetch` builds a relative `api.php?...` URL, or prefixes `window.CODEMAN_API_BASE` if set (the desktop wrapper sets it; in a browser it's unset → relative). |
+| `src/core.js` | Languages, global state, the `api()` wrapper (offline-aware) + `apiFetch`, toast, `flashCopied`, the `copyText()` clipboard helper (see gotcha), themed modals. `apiFetch` builds a relative `api.php?...` URL, or prefixes `window.CODEMAN_API_BASE` if non-empty — but it's `''` everywhere today (unset in a browser; the desktop preload sets it to `''` so the renderer keeps using the relative, proxied `api.php`), so the URL is effectively always relative. |
 | `src/tree.js` | Sidebar tree (single column) + Miller columns (double, **always exactly 2** — `MILLER_COLS`) + drag-to-sort. `effectiveMode()` forces single-column when `body.is-mobile`, without changing the persisted `sidebarMode` (which **defaults to `double`** on desktop). Project helpers: `pathPrefixes`, `projectChain` (the project-ancestor chain), `isValidProjectParent`; the project-chain banner + color-coded breadcrumb live here. |
 | `src/editor.js` | Page tabs, page/section/block editor, language picker, blocks (code/note/rich/checklist), merge/split/reorder, variables, save (conflict-aware). |
 | `src/features.js` | Trash & history UI, history diff, favorites + recently-copied, tag manager, command palette, quick-paste block palette, find & replace, export/import, `primeOfflineCache`, `rebuildIndex`, and `openMoreMenu` (the sidebar `⋯` overflow menu, reusing the `.mini-menu` pattern). |
@@ -185,9 +185,30 @@ HTTPS/Gatekeeper/PWA install are blocked.
   persist across launches (an ephemeral port would reset them every launch).
 - **Configurable server URL (no rebuild):** resolved as `CODEMAN_NAS_BASE` env > saved
   `settings.json` (in `app.getPath('userData')`) > `config.js` `DEFAULT_SERVER_URL`. First launch
-  with nothing configured opens a setup screen (served at `/__settings`) offering **a server URL
-  OR offline-only** (`{offlineOnly:true}`); change anytime via the **Server / Offline…** menu.
-  `app.setName('CodeMan')` pins the user-data dir so dev and packaged builds share settings.
+  with nothing configured opens a setup screen (served at `/__settings`, in the main window)
+  offering **a server URL OR offline-only** (`{offlineOnly:true}`). `app.setName('CodeMan')` pins
+  the user-data dir so dev and packaged builds share settings.
+- **Native Settings (`Cmd+,`)** opens the same `/__settings` HTML in a **dedicated child
+  `BrowserWindow`** (the main app stays alive — not the old in-place `loadURL` that wiped it). The
+  panel reads live state from **`GET /__status`**, offers a **Test-connection** button (**`POST
+  /__test`** = a server-side reachability probe of a *candidate* URL, 5s `AbortController`), and a
+  Server/Local toggle. Saving `POST`s to `/__config`, which calls `applySwitch()`.
+- **Safe mode switching / data sync** is the core of the settings work. The offline cache +
+  write-queue are **namespaced per server** in `offline.js` (see its gotcha), so a queue can
+  **never replay against the wrong server** — that's the hard guarantee. On top, `applySwitch()`
+  shows **native `dialog.showMessageBox`** prompts when switching with unsynced changes:
+  Local→Server with local work = *Push to server* (adopts the local namespace into the server's via
+  `window.__codemanAdoptInto`, then flushes) / *Keep on this Mac*; Server→Local or Server A→Server B
+  with a queue = *Sync now/first* (`window.__codemanFlush` while the **old** server is still the
+  active proxy target) / *Switch anyway* (the queue parks under its own namespace, flushes when you
+  return). `main.js` reads the pending count via `window.__codemanQueueLen` before prompting.
+- **Renderer learns the active server via `preload.js`** (the only `webPreferences.preload`):
+  `ipcRenderer.sendSync('codeman:server-url')` → `window.CODEMAN_SERVER_URL`, set **before any page
+  script** so `offline.js` can pick its namespace at module load. `sendSync` (not
+  `additionalArguments`) means a post-switch `loadURL` reload re-reads the **live** URL, re-namespacing
+  for free. `sandbox:false` (so the preload can `sendSync`), `contextIsolation:true`. `CODEMAN_API_BASE`
+  stays `''` — the renderer still uses the relative, proxied `api.php`. Add `preload.js` to
+  `package.json` `build.files` or the packaged app ships without it.
 - **macOS specifics:** unsigned (`identity:null`) ad-hoc build → on download, the quarantine flag
   makes Gatekeeper report it as "damaged"; users clear it with
   `xattr -dr com.apple.quarantine /Applications/CodeMan.app` (see README — the "right-click →
@@ -262,27 +283,67 @@ tag once.)
   the project ancestors of any path form a prefix from the root — `projectChain()` relies on this.
   Guard all create/move/reorder paths with `isValidProjectParent` (server mirrors it in
   `create_project`/`move`); don't add a new path that bypasses it.
-- **Mobile code-block toolbar is icon-only with ONE merged `⋯` menu.** `renderBlock` reads
-  `isMobile = body.classList.contains('is-mobile')` at render time (blocks re-render on demand;
-  the matchMedia listener re-renders on the 768px flip) and swaps Edit→`✎`, Save→`✓`,
-  Copy→`⧉` (keeping `title=` for a11y; Delete stays red text, Revert is owned by
-  `refreshRevertLabel`). The `.block-overflow` (`⋯`) opens `showMiniMenu` with three groups
-  separated by `{divider:true}` (rendered as `.mini-menu-sep`): (1) direct actions `#` lines /
-  `$` vars / Duplicate / Split / `⤵ To subsection` — these stay in the DOM, `display:none` under
-  `body.is-mobile`, and the menu **proxies them via `.click()`** (no handler duplication);
-  (2) the block-kind convert list (`BLOCK_KINDS`), folding away the desktop `Code ▾` `.type-menu`;
-  (3) Copy-as formats via the shared `copyAsOptions()` helper, folding away the desktop `▾`
-  `.copy-as`. Copy-as is **rebuilt as items** (not proxied) because its own popup anchors to its
-  button rect, invalid while hidden. CSS also drops the `.block-label` to its own full-width row.
-  Everything is `body.is-mobile`/media-gated and `⋯` is `display:none` off-mobile → **desktop is
-  byte-identical** (full text toolbar, both `Code ▾` and `▾`).
+- **The code-block `⋯` overflow menu now declutters BOTH desktop and mobile** (was mobile-only
+  before the UI/UX pass). The secondary actions — `#` lines / `$` vars / Duplicate / Split /
+  `⤵ To subsection` / block-kind `.type-menu` / copy-as `.copy-as` — are hidden by **unconditional**
+  `.block-toolbar` rules (not `body.is-mobile`-gated anymore) and folded into `.block-overflow`,
+  which is `display:inline-flex` on every width. They stay in the DOM so the menu **proxies them via
+  `.click()`** (copy-as is rebuilt as items — its popup anchors to its own rect, invalid while
+  hidden). Primary row = `type-picker · label · Edit/Save/Revert · Copy · ⋯ · Delete` (Copy is
+  labelled "Copy", `title="Copy to clipboard"`). `renderBlock` still reads
+  `isMobile = body.classList.contains('is-mobile')` for the **icon swaps** (Edit→`✎`, Save→`✓`,
+  Copy→`⧉`, Delete→`✕`) and label-on-own-row; the open page re-renders on the 768px flip
+  (`initMobile` calls `renderPage()`), so toolbars reflow without a reload. The `⋯` menu groups
+  (`showMiniMenu`, `{divider:true}`→`.mini-menu-sep`): direct actions · `BLOCK_KINDS` convert ·
+  copy-as. **Desktop is no longer byte-identical** — that was an intentional declutter.
 - **ALL block kinds get the icon toolbar (not just code/note).** `renderChecklistBlock` and
   `renderRichBlock` mirror the same mobile treatment: Edit→`✎`/Save→`✓` (rich), Copy→`⧉`, Delete→`✕`,
   label on its own row, and a `.block-overflow` (`⋯`) that folds Duplicate + the block-kind convert
-  (and Clear-done for checklists) — necessary because the generic `body.is-mobile .block-toolbar
-  .type-menu/.block-dup/.block-clear { display:none }` rules already strip those buttons, so without
-  a `⋯` they'd be unreachable. Rich's convert syncs `surface.innerHTML` into `block.code` first.
-  Shared marker classes (`.block-copy`/`.block-dup`/`.block-clear`) drive the CSS hide + icon sizing.
+  (and Clear-done for checklists) — necessary because the generic (now **unconditional**, not just
+  `body.is-mobile`) `.block-toolbar .type-menu/.block-dup/.block-clear { display:none }` rules strip
+  those buttons, so without a `⋯` they'd be unreachable. Rich's convert syncs `surface.innerHTML`
+  into `block.code` first. Shared marker classes (`.block-copy`/`.block-dup`/`.block-clear`) drive
+  the CSS hide + icon sizing.
+- **Sidebar tree is keyboard-operable + ARIA (a11y pass).** `#tree` is `role="tree"`; rows
+  (`.tree-row`) and Miller folder cards (`.subfolder-card`) are `role="treeitem"` with a
+  `data-path`, `aria-label`, roving `tabindex` (exactly one row is `tabindex=0` via
+  `initRovingTabindex`, called at the end of `renderTree`), folders carry `aria-expanded`. One
+  delegated `keydown` on `#tree` (`onTreeKeydown`, bound once via `bindTreeKeys`): Enter/Space
+  activate any row in BOTH layouts (`activateTreeItem` clicks then restores focus by `data-path`,
+  since folder activation re-renders via `selectFolder`); single-column also gets Up/Down/Home/End +
+  Left/Right expand-collapse/parent. It bails when `e.target` is an INPUT (don't hijack inline
+  rename/create). A global `:focus-visible` ring lives near the base `button{}` rule.
+- **Delete buttons are de-emphasized at rest.** `button.danger` is neutral (`#3a3d41` / dim-red
+  text) until `:hover`/`:focus-visible` (then full red). The empty page is an **onboarding** state
+  (`.empty-state.onboard`: + New Project / + New Page CTAs, ⌘K hint, "Open the sidebar" nudge when
+  `body.sidebar-hidden`). Inline create (`buildPendingRow`) has visible `✓`/`✕`; **blur now cancels**
+  (was auto-commit) — the `✓`/`✕` `mousedown`-preventDefault so their click lands before blur.
+- **Copy uses `copyText()` (core.js), never a bare `navigator.clipboard`.** `navigator.clipboard`
+  is **`undefined` in insecure contexts** (a NAS served over plain `http://…`), so a direct
+  `writeText` throws there → Copy silently fails with no feedback (it only "worked" on localhost /
+  the desktop app / HTTPS). `copyText(text)` uses the async Clipboard API when `window.isSecureContext`,
+  else falls back to a hidden-textarea `document.execCommand('copy')`, and resolves a success
+  boolean. **All** copy sites (code/note/rich/checklist blocks, both copy-as menus, recently-copied,
+  quick-paste) route through it and then show a `flashCopied` bubble / `toast` — "Copied…" on success,
+  "Copy failed" otherwise (~1.8s; `flashCopied` clamps by half-width on BOTH edges so it never spills
+  off-screen). Don't reintroduce a direct `navigator.clipboard.writeText`.
+- **The global `:focus-visible` ring is deliberately excluded from the code editor.** `.code-edit`
+  (the transparent overlay textarea) keeps `outline:none` even on focus — the ring's specificity
+  otherwise drew a stray blue box around the code while editing; the block's editing state (border +
+  Save/Cancel) is the focus affordance. The code textarea also sets `spellcheck=false` +
+  `data-gramm`/`data-gramm_editor`/`data-enable-grammarly="false"` + `autocorrect/autocapitalize/
+  autocomplete="off"` so the browser AND extensions (Grammarly) stop drawing squiggle/underline
+  overlays on code. `.section-header` is `align-items:flex-start` so the title/actions don't float
+  mid-height beside a tall multi-row tag block.
+- **Tag-mutating actions must refresh open tabs.** `applyRename` (tag manager rename/merge/delete)
+  re-fetches every open page after the server write (`get_page` → reset `tab.data`/`tab.baseMtime`,
+  re-render the active page), mirroring what Find & Replace's replace-all already does — otherwise an
+  open tab's stale in-memory `currentPageData` would silently re-save the OLD tag on the next autosave.
+  Any new bulk server-side mutation of page content needs the same open-tab reconciliation.
+- **`tests.html` seeds via the namespaced wrappers.** Since `offline.js` keys IndexedDB per server,
+  the offline-reducer tests must seed/read/snapshot/restore through `kvGet/kvSet/kvDel` +
+  `pageGet/pageSet/pageDel` (NOT raw `idbGet/idbSet('kv'|'pages', …)`), or they'd miss the active
+  namespace AND fail to restore the real cache. Keep that contract when adding offline tests.
 - **iOS home-screen PWA top inset:** `body.is-mobile .main` gets `padding-top:env(safe-area-inset-top)`
   + a `#1b1b1b` background (the tab-bar colour) so the tab bar/header clear the Dynamic Island in
   standalone mode (status bar is `black-translucent`, `viewport-fit=cover`). The floating ☰ is

@@ -1,6 +1,6 @@
 {
   "name": "codeman-desktop",
-  "version": "1.2.1",
+  "version": "1.4.1",
   "description": "CodeMan desktop wrapper — opens offline, syncs to the NAS when reachable.",
   "main": "main.js",
   "author": "Juan Felipe Garcia",
@@ -17,7 +17,7 @@
     "appId": "com.jfgarcia.codeman",
     "productName": "CodeMan",
     "directories": { "output": "dist" },
-    "files": ["main.js", "config.js"],
+    "files": ["main.js", "config.js", "preload.js"],
     "extraResources": [
       {
         "from": "../codeman",
