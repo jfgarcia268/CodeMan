@@ -49,7 +49,8 @@ the load order in `index.html` *is* the dependency order. Edit a file, reload th
 
 ⚠️ **Hidden data dirs** (dot-prefixed, skipped by `buildTree`, never web-served):
 `.trash/` (soft-deletes + `.meta`), `.history/<page>/<mtime>.json` (last 20 per page),
-`.index.json` (metadata cache), `.order.json` (per-folder child order), `.project` (marker).
+`.index.json` (metadata cache), `.order.json` (per-folder child order), `.project` (marker),
+`.colsort.json` (root-level map of per-column sort prefs for the double layout).
 
 ---
 
@@ -414,6 +415,16 @@ tag once.)
   desktop (tab band ~34→40px). The `☰` is **drawn as three CSS bars** (`#showSidebarBtn::before` +
   `box-shadow`, glyph hidden via `color:transparent`), not the `☰` font glyph — whose ink sits high
   in the em box, so font-centering never looked centered. The CSS bars are pixel-centered at any size.
+- **Per-column sort (double layout) sorts client-side, persists server-side.** Each Miller column
+  has a `.miller-col-head` with a `⇅` sort button (`buildColSortMenu`) offering Name/Code-type/Kind ×
+  asc/desc + "Manual order". The choice is stored on the server in a single root-level `.colsort.json`
+  (`{ "<folderRelPath>": {field,dir} }`, ""=root) via the `set_col_sort` action, and fetched alongside
+  the tree by `loadTree` (`col_sorts` action → `colSort` map). **`buildTree` is deliberately untouched** —
+  the actual ordering is done in `renderMillerColumn` via the pure `sortMillerChildren(children, pref)`
+  (so it works offline against the cached tree, and the array-shaped `tree` response stays intact for
+  `offline.js`). An active sort renders a **flat, intermixed** list (no folders/pages `.miller-divider`);
+  no pref = today's folders-first + divider + `.order.json` order. **Dragging an item (`dropReorder`)
+  clears the column's sort** (drag = "I want manual order"). Single-column layout is unaffected.
 
 ---
 

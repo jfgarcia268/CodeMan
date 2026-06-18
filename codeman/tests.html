@@ -215,6 +215,23 @@
     treeData = saved;
   })();
 
+  // sortMillerChildren (per-column sort for the double layout)
+  (function () {
+    const kids = [
+      { type: 'page', name: 'beta', langs: ['sql'] },
+      { type: 'folder', name: 'Zeta' },
+      { type: 'page', name: 'alpha', langs: ['bash'] },
+      { type: 'folder', name: 'Apex', project: true },
+    ];
+    const names = pref => sortMillerChildren(kids, pref).map(n => n.name);
+    t('sort: no pref → unchanged copy', names(null), ['beta', 'Zeta', 'alpha', 'Apex']);
+    t('sort: name asc (case-insensitive, intermixed)', names({ field: 'name', dir: 'asc' }), ['alpha', 'Apex', 'beta', 'Zeta']);
+    t('sort: name desc reverses', names({ field: 'name', dir: 'desc' }), ['Zeta', 'beta', 'Apex', 'alpha']);
+    t('sort: kind asc (project<folder<page, tie by name)', names({ field: 'kind', dir: 'asc' }), ['Apex', 'Zeta', 'alpha', 'beta']);
+    t('sort: lang asc (folders empty-key first, then bash<sql)', names({ field: 'lang', dir: 'asc' }), ['Apex', 'Zeta', 'alpha', 'beta']);
+    t('sort: returns a new array (no mutation)', kids.map(n => n.name), ['beta', 'Zeta', 'alpha', 'Apex']);
+  })();
+
   // collectBlocksFromPage (offline quick-paste search walker)
   (function () {
     const out = [];

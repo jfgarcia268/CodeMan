@@ -209,6 +209,7 @@ async function flushQueue() {
 async function cacheOnSuccess(action, body, query, data) {
   try {
     if (action === 'tree') await kvSet('tree', data);
+    else if (action === 'col_sorts') await kvSet('colsorts', data);
     else if (action === 'get_page') { const p = (body && body.path) || qparam(query, 'path'); if (p) { const copy = Object.assign({}, data); delete copy._mtime; await pageSet(p, copy); } }
     else if (action === 'save_page' && body) { const copy = Object.assign({}, body.data); delete copy._mtime; await pageSet(body.path, copy); }
     else if (action === 'delete' && body) await pageDel(body.path);
@@ -225,6 +226,7 @@ function qparam(query, key) {
 async function offlineApi(action, body, query) {
   switch (action) {
     case 'tree': return (await kvGet('tree')) || [];
+    case 'col_sorts': return (await kvGet('colsorts')) || {};
     case 'get_page': {
       const p = (body && body.path) || qparam(query, 'path');
       return (await pageGet(p)) || { title: nameFromPath(p || ''), sections: [], _mtime: null };
@@ -256,6 +258,14 @@ async function offlineApi(action, body, query) {
     case 'delete': {
       await recordLocalTrash(body.path); // snapshot before the cache clears it
       await mutateTreeCache(action, body);
+      await enqueue({ action, body }); return { ok: true, offline: true };
+    }
+    case 'set_col_sort': {
+      // Sorting is client-side, so just mirror the preference locally + replay later.
+      const map = (await kvGet('colsorts')) || {};
+      if (body && ['name', 'lang', 'kind'].includes(body.field)) map[body.parent || ''] = { field: body.field, dir: body.dir === 'desc' ? 'desc' : 'asc' };
+      else if (body) delete map[body.parent || ''];
+      await kvSet('colsorts', map);
       await enqueue({ action, body }); return { ok: true, offline: true };
     }
     case 'create_page': case 'create_folder': case 'create_project':
