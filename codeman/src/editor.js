@@ -2130,15 +2130,16 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
   textarea.addEventListener('scroll', syncScroll);
   // keep the active-line highlight in step with the caret
   ['keyup', 'click', 'focus', 'select'].forEach(ev => textarea.addEventListener(ev, updateActiveLine));
-  textarea.addEventListener('blur', (e) => {
-    // staying within this block (clicking Save/Revert/label/lang picker) isn't
-    // "leaving" — don't switch to view mode (which would hide those controls).
-    if (e.relatedTarget && el.contains(e.relatedTarget)) return;
-    el.classList.add('viewing');
-    updateActiveLine();
-    renderVarsPanel();   // code may have changed → refresh var fields
-    refreshSectionVars();
-    updatePreview();
+  // Sticky editing: clicking away from the block no longer exits edit mode — the
+  // block stays editable until Save / Revert-Cancel (or Esc, below). Autosave is on
+  // `input` + flushSave on tab switch, both independent of focus, so nothing is lost
+  // while a block sits in edit mode. The old blur handler's side-effects (updateActiveLine/
+  // renderVarsPanel/refreshSectionVars/updatePreview) only prepped the view-mode render and
+  // already run on Save and on live input, so they're not needed on blur.
+  textarea.addEventListener('keydown', (e) => {
+    // Esc = a quick "done": same path as the Cancel/Revert button (cancels when
+    // clean, reverts when dirty), so blocks don't pile up open without a mouse exit.
+    if (e.key === 'Escape') { e.preventDefault(); revertBtn.click(); }
   });
 
   const view = document.createElement('div');
