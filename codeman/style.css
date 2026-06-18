@@ -49,14 +49,26 @@ body.sidebar-hidden .sidebar,
 body.sidebar-hidden .sidebar-resizer { display: none; }
 #showSidebarBtn {
   display: none;
+  position: relative;
+  padding: 0;
   width: 32px;
   height: 32px;
-  font-size: 16px;
+  /* Hide the ☰ glyph (its ink sits high in the em box, so font-centering is never
+     perfectly centered) and draw the hamburger with CSS instead — three bars built
+     from one absolutely-centered ::before + its box-shadow, pixel-centered in any font. */
+  font-size: 0;
+  color: transparent;
   background: var(--panel-2);
   border: 1px solid var(--border-2);
   border-radius: 6px;
-  color: var(--text);
   cursor: pointer;
+}
+#showSidebarBtn::before {
+  content: '';
+  position: absolute; top: 50%; left: 50%;
+  width: 16px; height: 2px; margin: -1px 0 0 -8px;
+  background: var(--text); border-radius: 1px;
+  box-shadow: 0 -5px var(--text), 0 5px var(--text);
 }
 #showSidebarBtn:hover { background: #3a3a3d; }
 /* When hidden on desktop, the sidebar collapses to a slim rail that occupies real
@@ -74,16 +86,17 @@ body.sidebar-hidden:not(.is-mobile) .sidebar-rail {
   background: var(--panel);
   border-right: 1px solid var(--border);
 }
-body.sidebar-hidden:not(.is-mobile) #showSidebarBtn { display: block; }
+body.sidebar-hidden:not(.is-mobile) #showSidebarBtn { display: flex; }
 
 .sidebar-header {
-  padding: 12px;
+  padding: 0 12px 12px;    /* no top inset: the brand row IS the 40px top band */
   border-bottom: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
-.brand-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+/* brand row = a 40px band aligned with the tab strip + ☰ button (one top band) */
+.brand-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; min-height: 40px; flex-shrink: 0; }
 .brand { display: flex; align-items: center; gap: 7px; font-weight: bold; font-size: 16px; }
 .brand-icon { width: 20px; height: 20px; display: block; flex-shrink: 0; }
 .brand-tools { display: flex; gap: 4px; flex-shrink: 0; }
@@ -660,6 +673,8 @@ button.danger:hover { background: #c1340f; }
   border-bottom: 1px solid var(--border);
   flex-wrap: wrap;
   flex-shrink: 0;          /* static banner row — never scrolls with the page body */
+  min-height: 40px;        /* one 40px top band shared with the ☰ button + sidebar brand row */
+  box-sizing: border-box;
 }
 .main-tab {
   display: flex;
@@ -723,6 +738,9 @@ button.danger:hover { background: #c1340f; }
   font-size: 22px;
 }
 .page-header-actions { display: flex; gap: 6px; }
+/* The ⋯ "More page actions" button is a mobile-only declutter control — never on
+   desktop (the @media block shows it and hides the actions it stands in for). */
+.page-header-actions .page-header-more { display: none; }
 /* clickable folder path above the title */
 .page-path {
   flex-basis: 100%;
@@ -806,9 +824,18 @@ button.danger:hover { background: #c1340f; }
 }
 .page-area.outline-open .page-outline { display: block; }
 .outline-head {
+  display: flex; align-items: center; justify-content: space-between;
   font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px;
   color: var(--text-dim); padding: 2px 8px 8px;
 }
+/* close ✕ — hidden on desktop (the rail isn't an overlay and the header toggle is
+   visible); revealed on mobile where the overlay would otherwise trap the user. */
+.outline-close {
+  display: none; cursor: pointer; color: var(--text-dim);
+  font-size: 11px; text-transform: none; letter-spacing: 0; padding: 0 2px;
+}
+.outline-close:hover { color: #fff; }
+.outline-backdrop { display: none; }   /* never shown on desktop */
 .outline-item {
   font-size: 12.5px; color: var(--text);
   padding: 4px 8px; border-radius: 4px; cursor: pointer;
@@ -1036,6 +1063,9 @@ button.danger:hover { background: #c1340f; }
   font-size: 12px;
 }
 .block-toolbar .spacer { flex: 1; }
+/* The ⋯ overflow button is a mobile-only declutter control — never shown on desktop
+   (the @media block flips it to inline-flex and hides the actions it stands in for). */
+.block-toolbar .block-overflow { display: none; }
 
 /* language picker */
 .lang-picker { position: relative; }
@@ -1618,6 +1648,8 @@ pre.md-code {
    that follow line up cleanly into two columns */
 .mini-menu-opt .mm-ic { display: inline-flex; align-items: center; justify-content: flex-start; width: 24px; flex-shrink: 0; font-size: 12px; color: var(--muted, #9aa0a8); }
 .mini-menu-opt.active .mm-ic, .mini-menu-opt:hover .mm-ic { color: inherit; }
+/* section divider between groups of options (e.g. actions · block-kind · copy-as) */
+.mini-menu-sep { height: 1px; margin: 4px 6px; background: var(--border-2); }
 
 /* ---- Checklist (todo) block ---- */
 .block.checklist .todo-progress {
@@ -1731,15 +1763,40 @@ pre.md-code {
      the button floats as a hamburger over the off-canvas drawer, clear of the notch */
   body.is-mobile .sidebar-rail { display: contents; }
   body.is-mobile.sidebar-hidden #showSidebarBtn {
-    display: block;
+    display: flex;
     position: fixed; z-index: 200;
-    top: calc(8px + env(safe-area-inset-top));
-    left: calc(8px + env(safe-area-inset-left));
-    width: 40px; height: 40px; font-size: 20px;
+    /* 30px button centered in the 40px tab band (5px top + 30 + 5px bottom) so it
+       has even margins on all four sides instead of touching the band edges */
+    top: calc(5px + env(safe-area-inset-top));
+    left: calc(10px + env(safe-area-inset-left));
+    width: 30px; height: 30px; font-size: 18px;
   }
-  /* keep the header banner clear of the floating ☰ button */
+  /* keep the tab strip clear of the floating ☰ button. The header sits BELOW the
+     strip, so it doesn't need the clearance — give it normal padding aligned with
+     the page body (14px), not a 56px indent that reads as an empty left gap. */
   body.is-mobile .main-tabs { padding-left: 56px; }
-  body.is-mobile .page-header { padding-left: 56px; padding-right: 12px; }
+  body.is-mobile .page-header { padding-left: 14px; padding-right: 14px; }
+
+  /* tab strip: one scrolling line so the tabs + "Close all" never wrap below into
+     the page; "Close all" stays pinned (sticky) at the right edge while scrolling. */
+  body.is-mobile .main-tabs {
+    flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden;
+    -webkit-overflow-scrolling: touch; scrollbar-width: none;
+    min-height: 40px; align-items: center;   /* seat tabs in the 40px band beside the ☰ */
+  }
+  body.is-mobile .main-tabs::-webkit-scrollbar { display: none; }
+  body.is-mobile .main-tab { flex-shrink: 0; max-width: 160px; }
+  body.is-mobile .main-tab-closeall {
+    flex-shrink: 0; position: sticky; right: 0; margin-bottom: 4px;
+    background: #1b1b1b; box-shadow: -8px 0 8px -4px #1b1b1b;
+  }
+
+  /* --- iOS home-screen PWA: clear the Dynamic Island / notch. Pad the top of the
+     main column by the safe-area inset so the tab bar + header don't render under
+     the island, and paint that strip the tab-bar colour so it looks seamless. The
+     floating ☰ is position:fixed and already inset-offset, so it doesn't double-shift.
+     env() resolves to 0 on non-notched devices → no change there. --- */
+  body.is-mobile .main { padding-top: env(safe-area-inset-top); background: #1b1b1b; }
 
   /* --- single-column tree only: hide the double-layout toggle --- */
   body.is-mobile .layout-switch { display: none !important; }
@@ -1764,12 +1821,56 @@ pre.md-code {
   .block-toolbar .spacer { display: none; }
   .block-toolbar button { min-height: 32px; padding: 5px 8px; font-size: 12px; }
 
-  /* --- section header: keep [toggle · title · actions] on row 1, push the tags
-     onto their own full-width row below (no more cramming/cut-off) --- */
+  /* --- block toolbar: icon-only on mobile, with everything secondary folded into the
+     single ⋯ menu. Hidden actions (line/var/dup/split/to-sub proxy their .click();
+     block-kind + copy-as are rebuilt as menu items). The bar becomes one tidy row:
+     [lang] [✎] [⧉] [⋯] [Delete], with the Label input on its own full-width row. --- */
+  body.is-mobile .block-toolbar .line-toggle,
+  body.is-mobile .block-toolbar .var-toggle,
+  body.is-mobile .block-toolbar .block-dup,
+  body.is-mobile .block-toolbar .block-split,
+  body.is-mobile .block-toolbar .block-tosub,
+  body.is-mobile .block-toolbar .block-clear,
+  body.is-mobile .block-toolbar .type-menu,
+  body.is-mobile .block-toolbar .copy-as { display: none; }
+  body.is-mobile .block-toolbar .block-overflow { display: inline-flex; align-items: center; }
+  /* Label input drops to its own full-width row below the action buttons */
+  body.is-mobile .block-toolbar .block-label {
+    order: 99; flex-basis: 100%; flex-grow: 0;
+    background: var(--bg); border-radius: 4px; padding: 7px 10px;
+  }
+  /* square-ish icon buttons (centered glyph, comfortable tap target) */
+  body.is-mobile .block-toolbar .block-edit,
+  body.is-mobile .block-toolbar .block-save,
+  body.is-mobile .block-toolbar .block-copy,
+  body.is-mobile .block-toolbar .block-overflow {
+    min-width: 34px; justify-content: center; padding: 5px 6px;
+  }
+  /* lang picker: let it shrink so it doesn't hog the row */
+  body.is-mobile .block-toolbar .lang-picker-btn { min-width: 0; max-width: 130px; }
+
+  /* --- section header (mobile): one compact row — [▼ title  🏷N  ⛶Merge  $ ⤴ 🗑].
+     Tags become a count button → picklist menu, and the per-section merge bar is
+     relocated here from the body (see renderSection). No more tag-chip row + merge
+     row eating vertical space. --- */
   .section-header { flex-wrap: wrap; }
   .section-header .section-title { min-width: 0; }
   .section-header .section-actions { order: 4; }
-  .section-header .tags { order: 5; flex-basis: 100%; margin: 4px 0 0; }
+  /* even 6px spacing between ALL header buttons: the row's top-level gap, the
+     section-actions internal gap ($ ✕), and the merge bar's gap all match — so
+     🏷N · ⛶ · $ · ✕ are evenly spaced instead of the actions cluster being tighter */
+  body.is-mobile .section-header { gap: 6px; }
+  body.is-mobile .section-header .section-actions { gap: 6px; }
+  body.is-mobile .section-header .tags { display: none; }   /* desktop chips never used on mobile */
+  body.is-mobile .section-tags-btn { min-height: 32px; padding: 6px 9px; font-size: 13px; flex-shrink: 0; }
+  body.is-mobile .section-header .merge-bar { margin: 0; gap: 6px; flex-wrap: wrap; }
+  body.is-mobile .section-header .merge-bar button { min-height: 32px; }
+  /* keep all four header buttons the same height/footprint so the row reads evenly */
+  body.is-mobile .section-header .section-actions button,
+  body.is-mobile .section-header .merge-bar button,
+  body.is-mobile .section-tags-btn { min-height: 34px; }
+  /* the transient add-tag input (opened from the menu) gets its own row */
+  body.is-mobile .section-header .tag-input { order: 6; flex-basis: 100%; margin-top: 4px; width: auto; }
 
   /* --- nothing forces the page wider than the viewport: only the code area
      scrolls horizontally, inside its own block --- */
@@ -1787,15 +1888,45 @@ pre.md-code {
   .page { padding: 12px 14px; }
   .page-header h1 { font-size: 19px; }
 
-  /* --- page-header action row: wrap tidily with compact buttons --- */
-  .page-header-actions { flex-wrap: wrap; gap: 6px; }
-  .page-header-actions button { padding: 6px 8px; font-size: 12px; }
+  /* --- compact mobile page header ---------------------------------------------
+     Three short rows: breadcrumb (ellipsis) / title + action cluster / slim filter.
+     Only ⋯ and + Section show; the other actions fold into the ⋯ menu and their
+     source buttons are display:none (.page-act-demote). Desktop (>768px) is outside
+     this @media block and keeps the full 7-button row. --- */
+  body.is-mobile .page-header { gap: 6px 8px; padding-top: 12px; padding-bottom: 12px; }
+  body.is-mobile .page-header .page-path {
+    order: 1; flex-wrap: nowrap; overflow: hidden; white-space: nowrap;
+    text-overflow: ellipsis; margin-bottom: 2px;
+  }
+  body.is-mobile .page-header h1 {
+    order: 2; flex: 1 1 auto; min-width: 0; font-size: 17px;
+    overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  }
+  /* action cluster sits inline at the right of the title row (not full-width) */
+  body.is-mobile .page-header-actions {
+    order: 2; flex: 0 0 auto; flex-wrap: nowrap; gap: 6px; margin-left: auto;
+  }
+  body.is-mobile .page-header-actions .page-act-demote { display: none; }
+  body.is-mobile .page-header-actions .page-header-more {
+    display: inline-flex; align-items: center; justify-content: center; min-width: 34px;
+  }
+  body.is-mobile .page-header-actions button { min-height: 32px; padding: 6px 9px; font-size: 13px; }
+  /* filter: its own slim full-width row below the title */
+  body.is-mobile .page-search { order: 3; flex-basis: 100%; max-width: none; margin: 0; }
+  body.is-mobile .page-search input { min-height: 36px; }
 
   /* --- in-page outline as an overlay rail, not a fixed side column --- */
   .page-area.outline-open .page-outline {
     position: fixed; top: 0; bottom: 0; left: 0; z-index: 280;
     width: min(80vw, 300px);
     box-shadow: 2px 0 18px rgba(0, 0, 0, 0.5);
+  }
+  /* reveal the outline's close ✕ and a tap-outside backdrop (z just under the 280
+     overlay) so the overlay can always be dismissed on a phone */
+  body.is-mobile .outline-close { display: inline; }
+  body.is-mobile.outline-open .outline-backdrop {
+    display: block; position: fixed; inset: 0; z-index: 279;
+    background: rgba(0, 0, 0, 0.5);
   }
 
   /* --- modals / palettes as near-full-width sheets --- */

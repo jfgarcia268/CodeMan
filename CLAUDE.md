@@ -39,7 +39,7 @@ codeman-desktop/  optional macOS desktop wrapper (Electron)
 | `src/init.js` | Bootstrap IIFE + Service Worker registration (skipped on `file://`/insecure contexts) + sets the footer version label from `CODEMAN_VERSION`. |
 | `sw.js` | **PWA Service Worker** — precaches the app shell so CodeMan boots when the server is unreachable (network-first + cache fallback, `ignoreSearch` so `?v=` URLs hit cache, stable cache keys). `api.php` is deliberately **not** intercepted. `CACHE_VERSION` is derived from `version.js` (`importScripts('version.js')`) — bump `version.js`, not this. |
 | `manifest.webmanifest` + `icon-maskable.svg` + `favicon.svg` | PWA manifest (installable) + icons. |
-| `style.css` | All styling. Palette lives in `:root` **design tokens** (dark-only — light theme was intentionally dropped; don't add a theme toggle). Hidden-sidebar desktop **rail** (`.sidebar-rail`). One `@media (max-width:768px)` block at the end makes the UI mobile-responsive (drawer sidebar, always-visible row actions on touch, 16px inputs to stop iOS zoom, **block toolbar wraps** instead of overflowing, section tags drop to their own row). |
+| `style.css` | All styling. Palette lives in `:root` **design tokens** (dark-only — light theme was intentionally dropped; don't add a theme toggle). Hidden-sidebar desktop **rail** (`.sidebar-rail`). One `@media (max-width:768px)` block at the end makes the UI mobile-responsive — see the **Mobile** gotchas below (drawer sidebar, always-visible row actions on touch, 16px inputs + viewport zoom-lock, **icon-only block toolbars** with a `⋯` overflow menu, **count-button tag menus**, a compact page header, and an aligned **40px top band**). |
 | `api.php` | Filesystem API: tree, page CRUD, move, reorder, content/block search, metadata index, projects, trash, history, save-conflict detection, find & replace, tag rename, optional password gate. |
 | `vendor/prism/` | Vendored Prism (core + autoloader + grammars + theme) — **no CDN**, works offline. Grammars autoload on demand; an unviewed language won't highlight offline until first rendered. |
 | `tests.html` | Standalone browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + offline trash/history reducers (snapshots/restores the real IndexedDB cache, safe to run). Open it in a browser; ~82 assertions. |
@@ -254,9 +254,83 @@ tag once.)
   the project ancestors of any path form a prefix from the root — `projectChain()` relies on this.
   Guard all create/move/reorder paths with `isValidProjectParent` (server mirrors it in
   `create_project`/`move`); don't add a new path that bypasses it.
-- **Block toolbar declutter is CSS-only (mobile wrap), not a JS overflow menu.** The toolbar's
-  secondary buttons are non-contiguous, so a true `⋯` menu would require reordering it and risk a
-  desktop regression. Mobile just sets `flex-wrap:wrap` + hides the spacer. Keep desktop untouched.
+- **Mobile code-block toolbar is icon-only with ONE merged `⋯` menu.** `renderBlock` reads
+  `isMobile = body.classList.contains('is-mobile')` at render time (blocks re-render on demand;
+  the matchMedia listener re-renders on the 768px flip) and swaps Edit→`✎`, Save→`✓`,
+  Copy→`⧉` (keeping `title=` for a11y; Delete stays red text, Revert is owned by
+  `refreshRevertLabel`). The `.block-overflow` (`⋯`) opens `showMiniMenu` with three groups
+  separated by `{divider:true}` (rendered as `.mini-menu-sep`): (1) direct actions `#` lines /
+  `$` vars / Duplicate / Split / `⤵ To subsection` — these stay in the DOM, `display:none` under
+  `body.is-mobile`, and the menu **proxies them via `.click()`** (no handler duplication);
+  (2) the block-kind convert list (`BLOCK_KINDS`), folding away the desktop `Code ▾` `.type-menu`;
+  (3) Copy-as formats via the shared `copyAsOptions()` helper, folding away the desktop `▾`
+  `.copy-as`. Copy-as is **rebuilt as items** (not proxied) because its own popup anchors to its
+  button rect, invalid while hidden. CSS also drops the `.block-label` to its own full-width row.
+  Everything is `body.is-mobile`/media-gated and `⋯` is `display:none` off-mobile → **desktop is
+  byte-identical** (full text toolbar, both `Code ▾` and `▾`).
+- **ALL block kinds get the icon toolbar (not just code/note).** `renderChecklistBlock` and
+  `renderRichBlock` mirror the same mobile treatment: Edit→`✎`/Save→`✓` (rich), Copy→`⧉`, Delete→`✕`,
+  label on its own row, and a `.block-overflow` (`⋯`) that folds Duplicate + the block-kind convert
+  (and Clear-done for checklists) — necessary because the generic `body.is-mobile .block-toolbar
+  .type-menu/.block-dup/.block-clear { display:none }` rules already strip those buttons, so without
+  a `⋯` they'd be unreachable. Rich's convert syncs `surface.innerHTML` into `block.code` first.
+  Shared marker classes (`.block-copy`/`.block-dup`/`.block-clear`) drive the CSS hide + icon sizing.
+- **iOS home-screen PWA top inset:** `body.is-mobile .main` gets `padding-top:env(safe-area-inset-top)`
+  + a `#1b1b1b` background (the tab-bar colour) so the tab bar/header clear the Dynamic Island in
+  standalone mode (status bar is `black-translucent`, `viewport-fit=cover`). The floating ☰ is
+  already inset-offset, so padding `.main` doesn't double-shift it. `env()` is 0 on non-notched
+  devices. The header uses **normal 14px side padding** (the ☰ clearance lives on `.main-tabs`,
+  which is what the ☰ overlaps — the header sits below it, so no 56px indent).
+- **Compact mobile page header = title + `⋯` + `+ Section` only.** `renderPageBody` builds all
+  seven action buttons as today, but on mobile only `+ Section` and a new `.page-header-more`
+  (`⋯`) show; the other six (Outline, Collapse-all, the `.fav-star`, History, Export, Reorder)
+  carry a `.page-act-demote` class that's `display:none` under `body.is-mobile` and are folded
+  into the `⋯`'s `showMiniMenu` (state re-read on each open). Menu items **proxy the real buttons
+  via `.click()`** (no duplication); **Export is the exception** — `exportMenu(anchor)` anchors a
+  submenu to its arg, so it's passed `headerMoreBtn` (a hidden `exportBtn` would open at 0,0).
+  `.page-header-more` is `display:none` off-mobile → **desktop keeps the full 7-button row**. CSS
+  puts the title + action cluster on one row (`margin-left:auto`), breadcrumb ellipsizes, filter
+  is its own slim row — no ragged wrap, no empty gap.
+- **Mobile is zoom-locked + the code editor renders at 16px.** The viewport meta has
+  `maximum-scale=1, user-scalable=no` (kills pinch-zoom AND iOS focus-zoom — an intentional a11y
+  tradeoff). Belt-and-suspenders for the focus case: `renderBlock` reads `isMobile` and picks
+  `edFont = isMobile ? 16 : ED_FONT_SIZE` / `edLineH = isMobile ? 24 : ED_LINE_H`, then **every**
+  editor layer (gutter, `.ln`, textarea, view, `pre`, `code`) uses those locals — so the textarea
+  is ≥16px (no focus-zoom, more readable) AND all layers share one metric so the transparent
+  textarea stays pixel-aligned with the Prism overlay (the gutter gotcha above). Desktop →
+  locals equal 13/19, byte-identical. `pageToHtml` export doesn't use `ED_*`, so it's unaffected.
+- **Mobile tab strip scrolls horizontally.** `body.is-mobile .main-tabs` is `flex-wrap:nowrap;
+  overflow-x:auto` (scrollbar hidden) so tabs never wrap; `.main-tab` is `flex-shrink:0;
+  max-width:160px`, and `.main-tab-closeall` is `position:sticky; right:0` so "Close all" stays
+  pinned at the right edge instead of wrapping onto its own line above the page. Desktop keeps
+  `flex-wrap:wrap`.
+- **The in-page Outline overlay is dismissible on mobile.** `.outline-head` carries an
+  `.outline-close` ✕ (click → `toggleOutline`), and `initMobile` appends an `.outline-backdrop`
+  (tap-outside → close), mirroring the sidebar drawer's `.drawer-backdrop`. The backdrop is driven
+  by a `body.outline-open` class set in `toggleOutline`/`buildPageOutline` (the outline lives deep
+  in `.main`, not a body sibling). Both ✕ and backdrop are `display:none` off-mobile → desktop rail
+  unchanged.
+- **Mobile section header = one row: `▼ Title  🏷N  ⛶  $ ⤴ ✕`.** On mobile (`isMobile` checked
+  in `renderSection`), section tags collapse into a `.section-tags-btn` (`🏷 N` count) that opens a
+  `showMiniMenu` picklist (each tag with ✕ + an Add-tag item) instead of the wrapping chip row, and
+  the per-section merge bar is **relocated** out of the section body (`panel`) up onto the header
+  row via `panel.querySelector(':scope > .merge-bar')` + append (its start button shortened to just
+  `⛶`). Merge still works because its `target` (the panel) is captured in the closure — only the
+  controls move. Tag add/remove logic is shared via `removeTag`/`addTagFlow` (factored out of
+  `renderTags`). Desktop keeps inline chips + the body merge bar (the whole branch is `is-mobile`-gated).
+- **Mobile renames icons to save space.** On mobile every red Delete button (all four `delBtn` sites:
+  `renderBlock`/`renderChecklistBlock`/`renderRichBlock`/`renderSection`) becomes a red `✕`
+  (`title="Delete"`, keeps `danger`), and the per-section Merge button is just `⛶` (`title="Merge"`).
+  Desktop keeps the full text ("Delete", "⛶ Merge"). Gated by each function's `isMobile` flag.
+- **One 40px top band (desktop + mobile).** `.main-tabs` is `min-height:40px; box-sizing:border-box`
+  and `.brand-row` is `min-height:40px` with `.sidebar-header` top padding dropped — so the sidebar
+  brand row, the tab strip, and the `☰` toggle all share an aligned 40px band. Desktop hidden ☰
+  (32px, rail `padding-top:8px`) bottom-aligns at y40; the mobile ☰ is **30px centered** in the 40px
+  band (`top:calc(5px+safe-area); left:calc(10px+…); 30×30`) so it has even margins on all sides;
+  `body.is-mobile .main-tabs` is `min-height:40px; align-items:center`. This intentionally changed
+  desktop (tab band ~34→40px). The `☰` is **drawn as three CSS bars** (`#showSidebarBtn::before` +
+  `box-shadow`, glyph hidden via `color:transparent`), not the `☰` font glyph — whose ink sits high
+  in the em box, so font-centering never looked centered. The CSS bars are pixel-centered at any size.
 
 ---
 

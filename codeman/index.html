@@ -11,7 +11,9 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CodeMan">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- Zoom-locked: no pinch-zoom and no iOS auto-zoom when focusing inputs (the code
+     editor textarea is intentionally <16px and would otherwise trigger a focus-zoom). -->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <link rel="stylesheet" href="vendor/prism/themes/prism-tomorrow.min.css">
 <!-- cache-bust style.css the same way as the app JS, so style edits never go stale -->
 <!-- Plain link (works on http(s) AND the file:// desktop wrapper). Over http(s)

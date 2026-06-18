@@ -216,6 +216,9 @@ function toggleOutline() {
   try { localStorage.setItem('codeman.outlineOpen', outlineOpen ? '1' : '0'); } catch (e) {}
   const btn = document.querySelector('.outline-toggle');
   if (btn) btn.classList.toggle('on', outlineOpen);
+  // Body-level state class so the mobile tap-outside backdrop (appended to <body>
+  // in initMobile) can react — the outline lives deep inside .main, not a sibling.
+  document.body.classList.toggle('outline-open', outlineOpen);
   buildPageOutline();
 }
 
@@ -227,9 +230,15 @@ function buildPageOutline() {
   const outline = document.getElementById('pageOutline');
   if (!area || !outline) return;
   area.classList.toggle('outline-open', outlineOpen);
+  document.body.classList.toggle('outline-open', outlineOpen);  // drives the mobile backdrop
   if (!outlineOpen) { outlineMap = []; return; }
   outline.innerHTML = '';
-  const head = document.createElement('div'); head.className = 'outline-head'; head.textContent = 'Outline';
+  const head = document.createElement('div'); head.className = 'outline-head';
+  const headTitle = document.createElement('span'); headTitle.textContent = 'Outline';
+  const headClose = document.createElement('span'); headClose.className = 'outline-close';
+  headClose.textContent = '✕'; headClose.title = 'Close outline';
+  headClose.addEventListener('click', toggleOutline);
+  head.append(headTitle, headClose);
   outline.appendChild(head);
   const pageEl = document.getElementById('page');
   const secs = currentPagePath ? [...pageEl.querySelectorAll('.section')] : [];
@@ -271,6 +280,26 @@ function updateOutlineActive() {
     if (outlineMap[i].secEl.getBoundingClientRect().top - top <= 8) activeIdx = i; else break;
   }
   outlineMap.forEach((o, i) => o.item.classList.toggle('active', i === activeIdx));
+}
+
+// Collapse/expand every section AND nested subsection on the page. The header
+// toggle reads allSectionsCollapsed() to decide its direction + label, so one
+// button flips the whole page either way.
+function eachSectionDeep(sections, fn) {
+  (sections || []).forEach(s => {
+    fn(s);
+    eachSectionDeep(sectionContent(s).subsections, fn);
+  });
+}
+function allSectionsCollapsed(sections) {
+  let total = 0, collapsed = 0;
+  eachSectionDeep(sections, s => { total++; if (s.collapsed) collapsed++; });
+  return total > 0 && collapsed === total;
+}
+function setAllSectionsCollapsed(value) {
+  eachSectionDeep(currentPageData.sections, s => { s.collapsed = value; });
+  renderPage();
+  scheduleSave();
 }
 
 function renderPageBody() {
@@ -324,23 +353,30 @@ function renderPageBody() {
   const actions = document.createElement('div');
   actions.className = 'page-header-actions';
   const outlineBtn = document.createElement('button');
-  outlineBtn.className = 'secondary outline-toggle' + (outlineOpen ? ' on' : '');
+  outlineBtn.className = 'secondary outline-toggle page-act-demote' + (outlineOpen ? ' on' : '');
   outlineBtn.textContent = '≣ Outline';
   outlineBtn.title = 'Toggle the section outline';
   outlineBtn.addEventListener('click', toggleOutline);
   const favStar = buildFavStar(currentPagePath);
+  favStar.classList.add('page-act-demote');
   const historyBtn = document.createElement('button');
-  historyBtn.className = 'secondary';
+  historyBtn.className = 'secondary page-act-demote';
   historyBtn.textContent = '⟲ History';
   historyBtn.title = 'View and restore previous versions of this page';
   historyBtn.addEventListener('click', () => openHistory(currentPagePath));
   const exportBtn = document.createElement('button');
-  exportBtn.className = 'secondary';
+  exportBtn.className = 'secondary page-act-demote';
   exportBtn.textContent = '⤓ Export';
   exportBtn.title = 'Export this page';
   exportBtn.addEventListener('click', () => exportMenu(exportBtn));
+  const allCollapsed = allSectionsCollapsed(currentPageData.sections);
+  const foldBtn = document.createElement('button');
+  foldBtn.className = 'secondary page-act-demote';
+  foldBtn.textContent = allCollapsed ? '⊞ Expand all' : '⊟ Collapse all';
+  foldBtn.title = allCollapsed ? 'Expand every section on this page' : 'Collapse every section on this page';
+  foldBtn.addEventListener('click', () => setAllSectionsCollapsed(!allCollapsed));
   const reorderBtn = document.createElement('button');
-  reorderBtn.className = 'secondary' + (reorderMode ? ' on' : '');
+  reorderBtn.className = 'secondary page-act-demote' + (reorderMode ? ' on' : '');
   reorderBtn.textContent = '⇅ Reorder';
   reorderBtn.title = 'Reorder mode — show up/down arrows on sections and blocks';
   reorderBtn.addEventListener('click', () => { reorderMode = !reorderMode; renderPage(); });
@@ -357,7 +393,32 @@ function renderPageBody() {
       if (pageEl) pageEl.scrollTop = pageEl.scrollHeight;
     }, 0);
   });
-  actions.append(outlineBtn, favStar, historyBtn, exportBtn, reorderBtn, addSectionBtn);
+  // Mobile-only "⋯ More" — folds the secondary page actions behind a menu so the
+  // phone header is just [title  ⋯  + Section]. The real buttons stay in the DOM
+  // (CSS-hidden via .page-act-demote on mobile) and each item fires the real
+  // button's .click(), so handlers run once with no duplication. Desktop never
+  // renders this button (CSS display:none unless body.is-mobile). Export anchors
+  // its own submenu to the passed anchor, so we hand it the ⋯ button (a hidden
+  // exportBtn would open the submenu at 0,0).
+  const headerMoreBtn = document.createElement('button');
+  headerMoreBtn.className = 'secondary page-header-more';
+  headerMoreBtn.textContent = '⋯';
+  headerMoreBtn.title = 'More page actions';
+  headerMoreBtn.addEventListener('click', () => {
+    const allCollapsedNow = allSectionsCollapsed(currentPageData.sections);
+    showMiniMenu(headerMoreBtn, [
+      { icon: isFavorite(currentPagePath) ? '★' : '☆', label: isFavorite(currentPagePath) ? 'Unfavorite' : 'Favorite',
+        active: isFavorite(currentPagePath), onClick: () => favStar.click() },
+      { icon: '≣', label: 'Outline', active: outlineOpen, onClick: () => outlineBtn.click() },
+      { icon: allCollapsedNow ? '⊞' : '⊟', label: allCollapsedNow ? 'Expand all' : 'Collapse all',
+        onClick: () => foldBtn.click() },
+      { divider: true },
+      { icon: '⟲', label: 'History', onClick: () => historyBtn.click() },
+      { icon: '⤓', label: 'Export', onClick: () => exportMenu(headerMoreBtn) },
+      { icon: '⇅', label: 'Reorder', active: reorderMode, onClick: () => reorderBtn.click() },
+    ]);
+  });
+  actions.append(outlineBtn, foldBtn, favStar, historyBtn, exportBtn, reorderBtn, headerMoreBtn, addSectionBtn);
   header.append(buildPagePath(currentPagePath), title, searchWrap, actions);
 
   const q = effFilter.trim().toLowerCase();
@@ -645,7 +706,7 @@ function newChecklistBlock() {
 // the per-block "type" switch in sync, and means a new kind is one row here.
 const BLOCK_KINDS = [
   { kind: 'code', icon: '</>', label: 'Code' },
-  { kind: 'note', icon: '¶', label: 'Note (Markdown)' },
+  { kind: 'note', icon: '¶', label: 'Note (MD)' },
   { kind: 'rich', icon: 'T', label: 'Rich Text' },
   { kind: 'checklist', icon: '☑', label: 'Checklist' },
 ];
@@ -696,6 +757,7 @@ function showMiniMenu(anchorEl, items) {
   const menu = document.createElement('div');
   menu.className = 'mini-menu'; menu._anchor = anchorEl;
   items.forEach(it => {
+    if (it.divider) { const d = document.createElement('div'); d.className = 'mini-menu-sep'; menu.appendChild(d); return; }
     const o = document.createElement('div');
     o.className = 'mini-menu-opt' + (it.active ? ' active' : '');
     if (it.icon) { const ic = document.createElement('span'); ic.className = 'mm-ic'; ic.textContent = it.icon; o.appendChild(ic); }
@@ -750,6 +812,38 @@ function sectionContent(section) {
   return section;
 }
 
+// Shared tag mutation helpers — used by the desktop inline chips (renderTags) AND
+// the mobile tags-menu button, so the add/remove logic lives in one place.
+function removeTag(section, i) {
+  section.tags.splice(i, 1);
+  renderPage();
+  scheduleSave();
+}
+// Open a transient tag input. `place(input)` decides where it goes (desktop swaps
+// it in for the `+`; the mobile menu drops it into the section header). Commits the
+// trimmed value on Enter/blur, cancels on Escape.
+function addTagFlow(section, place) {
+  if (!section.tags) section.tags = [];
+  const input = document.createElement('input');
+  input.className = 'tag-input';
+  let done = false;
+  const commit = () => {
+    if (done) return;
+    done = true;
+    const v = input.value.trim();
+    if (v && !section.tags.includes(v)) section.tags.push(v);
+    renderPage();
+    scheduleSave();
+  };
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') input.blur();
+    if (e.key === 'Escape') { done = true; renderPage(); }
+  });
+  input.addEventListener('blur', commit);
+  place(input);
+  input.focus();
+}
+
 function renderTags(section) {
   if (!section.tags) section.tags = [];
   const wrap = document.createElement('span');
@@ -766,11 +860,7 @@ function renderTags(section) {
     x.className = 'tag-remove';
     x.textContent = '✕';
     x.title = 'Remove tag';
-    x.addEventListener('click', () => {
-      section.tags.splice(i, 1);
-      renderPage();
-      scheduleSave();
-    });
+    x.addEventListener('click', () => removeTag(section, i));
     chip.append(name, x);
     wrap.appendChild(chip);
   });
@@ -779,32 +869,14 @@ function renderTags(section) {
   add.className = 'tag-add';
   add.textContent = '+';
   add.title = 'Add tag';
-  add.addEventListener('click', () => {
-    const input = document.createElement('input');
-    input.className = 'tag-input';
-    let done = false;
-    const commit = () => {
-      if (done) return;
-      done = true;
-      const v = input.value.trim();
-      if (v && !section.tags.includes(v)) section.tags.push(v);
-      renderPage();
-      scheduleSave();
-    };
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') input.blur();
-      if (e.key === 'Escape') { done = true; renderPage(); }
-    });
-    input.addEventListener('blur', commit);
-    add.replaceWith(input);
-    input.focus();
-  });
+  add.addEventListener('click', () => addTagFlow(section, (input) => add.replaceWith(input)));
   wrap.appendChild(add);
 
   return wrap;
 }
 
 function renderSection(section, parentArray, idx, isSub, parentBlocks) {
+  const isMobile = document.body.classList.contains('is-mobile');
   const el = document.createElement('div');
   el.className = 'section' + (isSub ? ' subsection-node' : '') + (section.collapsed ? ' collapsed' : '');
 
@@ -873,6 +945,7 @@ function renderSection(section, parentArray, idx, isSub, parentBlocks) {
     scheduleSave();
   });
   delBtn.className = 'danger';
+  if (isMobile) { delBtn.textContent = '✕'; delBtn.title = 'Delete'; }
   if (dissolveBtn) sectionActions.append(secVarToggle, dissolveBtn, delBtn);
   else sectionActions.append(secVarToggle, delBtn);
 
@@ -939,7 +1012,33 @@ function renderSection(section, parentArray, idx, isSub, parentBlocks) {
 
   body.appendChild(panel);
 
-  headerEl.append(toggle, titleInput, renderTags(section), sectionActions);
+  if (isMobile) {
+    // Mobile: tags collapse into a compact "🏷 N" count button that opens a picklist
+    // (each tag removable + Add tag), and the section's ⛶ Merge bar is relocated out
+    // of the body up onto this same header row — one tidy row instead of three.
+    const n = (section.tags || []).length;
+    const tagsBtn = mkBtn('🏷 ' + n, () => {
+      const items = (section.tags || []).map((t, i) => ({
+        icon: '✕', label: t, onClick: () => removeTag(section, i),
+      }));
+      items.push({ divider: true });
+      items.push({ icon: '➕', label: 'Add tag',
+        onClick: () => addTagFlow(section, (input) => headerEl.insertBefore(input, sectionActions)) });
+      showMiniMenu(tagsBtn, items);
+    });
+    tagsBtn.className = 'secondary section-tags-btn';
+    tagsBtn.title = n ? n + ' tag' + (n === 1 ? '' : 's') : 'Add tags';
+    // The merge bar (when present) was appended into `panel`; move the element onto
+    // the header row. Its merge-mode target is still `panel` (closure), so selecting
+    // blocks keeps working — the controls just live up here now.
+    const mb = panel.querySelector(':scope > .merge-bar');
+    // Shorten the relocated merge button to just its icon on the tight header row.
+    const ms = mb && mb.querySelector('button');
+    if (ms) { ms.textContent = '⛶'; ms.title = 'Merge'; }
+    headerEl.append(toggle, titleInput, tagsBtn, ...(mb ? [mb] : []), sectionActions);
+  } else {
+    headerEl.append(toggle, titleInput, renderTags(section), sectionActions);
+  }
   headerEl.addEventListener('click', (e) => {
     if (e.target === headerEl || e.target === toggle) {
       section.collapsed = !section.collapsed;
@@ -1283,6 +1382,7 @@ function renderMarkdown(src) {
 // toggle/edit anytime, no separate edit mode — with a progress count and
 // Enter-to-add / Backspace-to-remove keyboard flow like a real todo list.
 function renderChecklistBlock(block, parentArray, idx) {
+  const isMobile = document.body.classList.contains('is-mobile');
   if (!Array.isArray(block.items)) block.items = [];
   const el = document.createElement('div');
   el.className = 'block checklist';
@@ -1315,6 +1415,8 @@ function renderChecklistBlock(block, parentArray, idx) {
     recordCopy(block);
     flashCopied(copyBtn);
   });
+  copyBtn.className = 'secondary block-copy';
+  if (isMobile) { copyBtn.textContent = '⧉'; copyBtn.title = 'Copy to clipboard'; }
 
   const dupBtn = mkBtn('Duplicate', () => {
     parentArray.push(JSON.parse(JSON.stringify(block)));
@@ -1322,6 +1424,7 @@ function renderChecklistBlock(block, parentArray, idx) {
     scheduleSave();
     toast('Block duplicated');
   });
+  dupBtn.className = 'secondary block-dup';
 
   const clearBtn = mkBtn('Clear done', () => {
     block.items = block.items.filter(i => !i.done);
@@ -1329,13 +1432,30 @@ function renderChecklistBlock(block, parentArray, idx) {
     renderItems();
     scheduleSave();
   });
-  clearBtn.className = 'secondary';
+  clearBtn.className = 'secondary block-clear';
   clearBtn.title = 'Remove all completed items';
+
+  // Mobile: fold the convert-type / Duplicate / Clear-done controls behind a ⋯ menu
+  // (same pattern as code blocks) so the toolbar is just [label · ⧉ · ⋯ · ✕].
+  const overflowBtn = mkBtn('⋯', () => {
+    showMiniMenu(overflowBtn, [
+      { icon: '⧉', label: 'Duplicate', onClick: () => dupBtn.click() },
+      { icon: '⊘', label: 'Clear done', onClick: () => clearBtn.click() },
+      { divider: true },
+      ...BLOCK_KINDS.map(k => ({
+        icon: k.icon, label: k.label, active: blockKind(block) === k.kind,
+        onClick: () => { convertBlock(block, k.kind); renderPage(); scheduleSave(); },
+      })),
+    ]);
+  });
+  overflowBtn.className = 'secondary block-overflow';
+  overflowBtn.title = 'More actions';
 
   const delBtn = mkBtn('Delete', () => { parentArray.splice(idx, 1); renderPage(); scheduleSave(); });
   delBtn.className = 'danger';
+  if (isMobile) { delBtn.textContent = '✕'; delBtn.title = 'Delete'; }
 
-  toolbar.append(labelInput, progress, spacer, typeBtn, copyBtn, dupBtn, clearBtn, delBtn);
+  toolbar.append(labelInput, progress, spacer, typeBtn, copyBtn, dupBtn, clearBtn, overflowBtn, delBtn);
 
   const listEl = document.createElement('div');
   listEl.className = 'todo-list';
@@ -1399,6 +1519,7 @@ function renderChecklistBlock(block, parentArray, idx) {
 // Content is sanitized HTML in block.code. Uses document.execCommand — deprecated
 // but universally supported and by far the simplest WYSIWYG path for a local tool.
 function renderRichBlock(block, parentArray, idx) {
+  const isMobile = document.body.classList.contains('is-mobile');
   const el = document.createElement('div');
   el.className = 'block rich' + (blockBackups.has(block) ? '' : ' viewing');
 
@@ -1517,6 +1638,7 @@ function renderRichBlock(block, parentArray, idx) {
   }
   const editBtn = mkBtn('Edit', enterEdit);
   editBtn.className = 'secondary block-edit';
+  if (isMobile) { editBtn.textContent = '✎'; editBtn.title = 'Edit'; }
 
   const saveBtn = mkBtn('Save', () => {
     block.code = sanitizeRichHtml(surface.innerHTML);
@@ -1528,6 +1650,7 @@ function renderRichBlock(block, parentArray, idx) {
     toast('Saved');
   });
   saveBtn.className = 'block-save';
+  if (isMobile) { saveBtn.textContent = '✓'; saveBtn.title = 'Save'; }
 
   const revertBtn = mkBtn('Cancel', () => {
     const backup = blockBackups.has(block) ? blockBackups.get(block) : (block.code || '');
@@ -1553,6 +1676,8 @@ function renderRichBlock(block, parentArray, idx) {
     recordCopy(block);
     flashCopied(copyBtn);
   });
+  copyBtn.className = 'secondary block-copy';
+  if (isMobile) { copyBtn.textContent = '⧉'; copyBtn.title = 'Copy to clipboard'; }
 
   const dupBtn = mkBtn('Duplicate', () => {
     parentArray.push(JSON.parse(JSON.stringify(block)));
@@ -1560,16 +1685,34 @@ function renderRichBlock(block, parentArray, idx) {
     scheduleSave();
     toast('Block duplicated');
   });
+  dupBtn.className = 'secondary block-dup';
 
   // Unified "type" switch (convert to Code / Note / Checklist, keeping the text).
   // Sync the latest HTML into block.code first so the conversion sees current text.
   const typeBtn = makeTypeMenuButton(block);
   typeBtn.addEventListener('mousedown', () => { block.code = sanitizeRichHtml(surface.innerHTML); }, true);
 
+  // Mobile: fold Duplicate + convert-type behind a ⋯ menu (mirrors code blocks) so
+  // the toolbar is just [label · ✎/✓ Cancel · ⧉ · ⋯ · ✕]. Sync the surface HTML into
+  // block.code before converting so the new kind keeps the current text.
+  const overflowBtn = mkBtn('⋯', () => {
+    showMiniMenu(overflowBtn, [
+      { icon: '⧉', label: 'Duplicate', onClick: () => dupBtn.click() },
+      { divider: true },
+      ...BLOCK_KINDS.map(k => ({
+        icon: k.icon, label: k.label, active: blockKind(block) === k.kind,
+        onClick: () => { block.code = sanitizeRichHtml(surface.innerHTML); convertBlock(block, k.kind); renderPage(); scheduleSave(); },
+      })),
+    ]);
+  });
+  overflowBtn.className = 'secondary block-overflow';
+  overflowBtn.title = 'More actions';
+
   const delBtn = mkBtn('Delete', () => { parentArray.splice(idx, 1); renderPage(); scheduleSave(); });
   delBtn.className = 'danger';
+  if (isMobile) { delBtn.textContent = '✕'; delBtn.title = 'Delete'; }
 
-  toolbar.append(labelInput, spacer, typeBtn, editBtn, saveBtn, revertBtn, copyBtn, dupBtn, delBtn);
+  toolbar.append(labelInput, spacer, typeBtn, editBtn, saveBtn, revertBtn, copyBtn, dupBtn, overflowBtn, delBtn);
   el.append(toolbar, fmt, surface);
   refreshRevertLabel();
   return el;
@@ -1588,6 +1731,18 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
   const refreshSectionVars = () => { if (sectionControlled && onSecVarsRefresh) onSecVarsRefresh(); };
   const varsActive = () => sectionControlled || !!block.varsOn;
   const varValuesNow = () => sectionControlled ? sectionVarValues : (block.varValues || {});
+  // On a phone the toolbar goes icon-only and folds its secondary controls into the
+  // ⋯ menu. Read the flag at render time (blocks re-render on demand, and the
+  // matchMedia listener re-renders when the breakpoint flips), so the bar always
+  // matches the current viewport. Desktop keeps the full text toolbar untouched.
+  const isMobile = document.body.classList.contains('is-mobile');
+  // On mobile, scale every editor layer up together so the code textarea is ≥16px
+  // (iOS won't focus-zoom into it) and code is more readable. ALL layers — gutter,
+  // .ln, textarea, view, pre, code — read THESE locals (not ED_* directly), so the
+  // transparent textarea stays pixel-aligned with the Prism overlay (the gutter-
+  // alignment gotcha). Desktop keeps the module constants exactly (13/19).
+  const edFont = isMobile ? 16 : ED_FONT_SIZE;
+  const edLineH = isMobile ? 24 : ED_LINE_H;   // ~1.5× of 16, mirrors the 13/19 ratio
 
   const toolbar = document.createElement('div');
   toolbar.className = 'block-toolbar';
@@ -1654,6 +1809,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
   }
   const editBtn = mkBtn('Edit', enterEdit);
   editBtn.className = 'secondary block-edit';
+  if (isMobile) { editBtn.textContent = '✎'; editBtn.title = 'Edit'; }
 
   const saveBtn = mkBtn('Save', () => {
     blockBackups.delete(block); // commit: end the edit session
@@ -1666,6 +1822,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     toast('Saved');
   });
   saveBtn.className = 'block-save';
+  if (isMobile) { saveBtn.textContent = '✓'; saveBtn.title = 'Save'; }
 
   // The same button is "Cancel" until you change something, then "Revert".
   function blockDirty() {
@@ -1711,8 +1868,27 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     const missing = varsActive() && parseVars(block.code).some(n => !vals[n]);
     flashCopied(copyBtn, missing ? 'Copied — vars missing' : 'Copied to clipboard');
   });
+  copyBtn.className = 'secondary block-copy';
+  if (isMobile) { copyBtn.textContent = '⧉'; copyBtn.title = 'Copy to clipboard'; }
 
-  // "Copy as…" menu — alternative clipboard formats for the block's code.
+  // Alternative clipboard formats for the block's code. On desktop this is the "▾"
+  // button next to Copy; on mobile the same options live inside the ⋯ menu (the
+  // button is hidden there, so its self-anchored popup would mis-position). The
+  // option list is shared via copyAsOptions() so both paths stay in sync.
+  function copyAsOptions() {
+    const raw = block.code || '';
+    const filled = varsActive() ? substituteVars(block.code, varValuesNow()) : raw;
+    const lang = block.note ? 'markdown' : (block.type || '');
+    const opts = [];
+    if (varsActive()) opts.push(['Variables filled', filled], ['Raw template', raw]);
+    else opts.push(['Raw', raw]);
+    opts.push(
+      ['Fenced Markdown', '```' + lang + '\n' + filled + '\n```'],
+      ['Escaped string', JSON.stringify(filled)],
+      ['One line', filled.replace(/\s*\n\s*/g, ' ').trim()]
+    );
+    return opts;
+  }
   const copyAsBtn = mkBtn('▾', () => {
     const existing = document.querySelector('.mini-menu');
     if (existing) { existing.remove(); return; }
@@ -1720,21 +1896,11 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     const r = copyAsBtn.getBoundingClientRect();
     menu.style.top = Math.round(r.bottom + 4) + 'px';
     menu.style.left = Math.round(Math.max(8, r.right - 200)) + 'px';
-    const raw = block.code || '';
-    const filled = varsActive() ? substituteVars(block.code, varValuesNow()) : raw;
-    const lang = block.note ? 'markdown' : (block.type || '');
-    const opt = (label, text) => {
+    copyAsOptions().forEach(([label, text]) => {
       const o = document.createElement('div'); o.className = 'mini-menu-opt'; o.textContent = label;
       o.onclick = () => { menu.remove(); navigator.clipboard.writeText(text); recordCopy(block); toast('Copied: ' + label); };
-      return o;
-    };
-    if (varsActive()) menu.append(opt('Variables filled', filled), opt('Raw template', raw));
-    else menu.append(opt('Raw', raw));
-    menu.append(
-      opt('Fenced Markdown', '```' + lang + '\n' + filled + '\n```'),
-      opt('Escaped string', JSON.stringify(filled)),
-      opt('One line', filled.replace(/\s*\n\s*/g, ' ').trim())
-    );
+      menu.appendChild(o);
+    });
     document.body.appendChild(menu);
     const off = (e) => { if (!menu.contains(e.target) && e.target !== copyAsBtn) { menu.remove(); document.removeEventListener('mousedown', off); } };
     setTimeout(() => document.addEventListener('mousedown', off), 0);
@@ -1750,6 +1916,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     scheduleSave();
     toast('Block duplicated');
   });
+  dupBtn.className = 'secondary block-dup';
 
   // Split this block into several — inverse of Merge. Splits on blank-line gaps
   // (Merge joins with a blank line); if there are none, splits at the caret.
@@ -1768,6 +1935,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     scheduleSave();
     toast('Split into ' + parts.length + ' blocks');
   });
+  splitBtn.className = 'secondary block-split';
   splitBtn.title = 'Split into separate blocks (on blank lines, or at the cursor)';
 
   // Move this block into a brand-new subsection in the same section (the block
@@ -1782,7 +1950,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     scheduleSave();
     toast('Block moved into a new subsection');
   });
-  toSubBtn.className = 'secondary';
+  toSubBtn.className = 'secondary block-tosub';
   toSubBtn.title = 'Move this block into a new subsection in this section';
 
   const delBtn = mkBtn('Delete', () => {
@@ -1791,6 +1959,40 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     scheduleSave();
   });
   delBtn.className = 'danger';
+  if (isMobile) { delBtn.textContent = '✕'; delBtn.title = 'Delete'; }
+
+  // Mobile-only "⋯" overflow: tucks the less-common actions behind a menu so the
+  // icon toolbar stays compact on a phone. Direct-action buttons stay in the DOM
+  // (CSS-hidden on mobile) and the menu items fire their .click() so the real
+  // handlers run with no duplication. The block-kind switch and Copy-as formats are
+  // rebuilt as items here (not proxied): copyAsBtn's popup anchors to its own rect,
+  // which is invalid while it's hidden. Desktop never renders ⋯ (display:none unless
+  // body.is-mobile), so its toolbar is unchanged.
+  const overflowBtn = mkBtn('⋯', () => {
+    const items = [];
+    if (!block.note) items.push({ icon: '#', label: 'Line numbers',
+      active: el.classList.contains('show-lines'), onClick: () => lineToggle.click() });
+    if (!sectionControlled) items.push({ icon: '$', label: 'Variables',
+      active: !!block.varsOn, onClick: () => varToggle.click() });
+    items.push({ icon: '⧉', label: 'Duplicate', onClick: () => dupBtn.click() });
+    if (!block.note) items.push({ icon: '⎘', label: 'Split', onClick: () => splitBtn.click() });
+    if (subsectionsArray) items.push({ icon: '⤵', label: 'To subsection', onClick: () => toSubBtn.click() });
+    // Block-kind switch (replaces the "Code ▾" button, folded into ⋯ on mobile).
+    items.push({ divider: true });
+    BLOCK_KINDS.forEach(k => items.push({
+      icon: k.icon, label: k.label, active: blockKind(block) === k.kind,
+      onClick: () => { convertBlock(block, k.kind); renderPage(); scheduleSave(); },
+    }));
+    // Copy-as formats (replaces the "▾" button, folded into ⋯ on mobile).
+    items.push({ divider: true });
+    copyAsOptions().forEach(([label, text]) => items.push({
+      icon: '▾', label: 'Copy: ' + label,
+      onClick: () => { navigator.clipboard.writeText(text); recordCopy(block); toast('Copied: ' + label); },
+    }));
+    showMiniMenu(overflowBtn, items);
+  });
+  overflowBtn.className = 'secondary block-overflow';
+  overflowBtn.title = 'More actions';
 
   // The block's own $ toggle is hidden when the section owns variables.
   // Note blocks render Markdown prose, so the language picker, line-number and
@@ -1800,7 +2002,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
   toolbarBtns.push(typeBtn, editBtn, saveBtn, revertBtn, copyBtn, copyAsBtn, dupBtn);
   if (!block.note) toolbarBtns.push(splitBtn);
   if (subsectionsArray) toolbarBtns.push(toSubBtn);   // between Split and Delete
-  toolbarBtns.push(delBtn);
+  toolbarBtns.push(overflowBtn, delBtn);   // ⋯ sits just left of Delete (mobile only)
   toolbar.append(...toolbarBtns);
 
   // Fill-in fields for the block's variables (shown above the code in view mode).
@@ -1841,8 +2043,8 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
   // Pin the gutter's metrics inline so they match the view/textarea exactly.
   gutter.style.paddingTop = ED_PAD + 'px';
   gutter.style.paddingBottom = ED_PAD + 'px';
-  gutter.style.lineHeight = ED_LINE_H + 'px';
-  gutter.style.fontSize = ED_FONT_SIZE + 'px';
+  gutter.style.lineHeight = edLineH + 'px';
+  gutter.style.fontSize = edFont + 'px';
   gutter.style.fontFamily = ED_FONT;
   // One element per line so we can highlight the line being edited.
   function updateGutter() {
@@ -1853,8 +2055,8 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
         const d = document.createElement('div');
         d.className = 'ln';
         d.textContent = i;
-        d.style.height = ED_LINE_H + 'px';
-        d.style.lineHeight = ED_LINE_H + 'px';
+        d.style.height = edLineH + 'px';
+        d.style.lineHeight = edLineH + 'px';
         frag.appendChild(d);
       }
       gutter.textContent = '';
@@ -1879,8 +2081,8 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
   textarea.value = block.code || '';
   textarea.spellcheck = false;
   // Inline metrics so the caret/text layout matches the gutter + view exactly.
-  textarea.style.lineHeight = ED_LINE_H + 'px';
-  textarea.style.fontSize = ED_FONT_SIZE + 'px';
+  textarea.style.lineHeight = edLineH + 'px';
+  textarea.style.fontSize = edFont + 'px';
   textarea.style.fontFamily = ED_FONT;
   textarea.style.padding = ED_PAD + 'px';
   // The textarea is transparent and overlays the colored layer; keep the layer
@@ -1914,8 +2116,8 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
   const view = document.createElement('div');
   view.className = 'code-view';
   view.style.padding = ED_PAD + 'px';
-  view.style.lineHeight = ED_LINE_H + 'px';
-  view.style.fontSize = ED_FONT_SIZE + 'px';
+  view.style.lineHeight = edLineH + 'px';
+  view.style.fontSize = edFont + 'px';
   view.style.fontFamily = ED_FONT;
   // Note: clicking the rendered code no longer enters edit mode, so text stays
   // selectable for copy/paste — use the Edit button to start editing.
@@ -1948,10 +2150,10 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     // Inline metrics override the Prism theme (padding:1em; line-height:1.5),
     // which would otherwise make code taller than the gutter and drift.
     pre.style.cssText = 'margin:0;padding:0;background:none;white-space:pre;' +
-      'line-height:' + ED_LINE_H + 'px;font-size:' + ED_FONT_SIZE + 'px;font-family:' + ED_FONT + ';';
+      'line-height:' + edLineH + 'px;font-size:' + edFont + 'px;font-family:' + ED_FONT + ';';
     const code = document.createElement('code');
     code.className = 'language-' + lang;
-    code.style.cssText = 'line-height:' + ED_LINE_H + 'px;font-size:' + ED_FONT_SIZE + 'px;font-family:' + ED_FONT + ';';
+    code.style.cssText = 'line-height:' + edLineH + 'px;font-size:' + edFont + 'px;font-family:' + ED_FONT + ';';
     // In view mode with variables active (block- or section-owned), render the
     // substituted code; while editing (or vars off) show the raw template so it
     // matches the textarea.
