@@ -2115,10 +2115,18 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
 
   const view = document.createElement('div');
   view.className = 'code-view';
-  view.style.padding = ED_PAD + 'px';
-  view.style.lineHeight = edLineH + 'px';
-  view.style.fontSize = edFont + 'px';
-  view.style.fontFamily = ED_FONT;
+  // Code/note share this view element, but only CODE needs the inline editor metrics
+  // (so the colored layer lines up row-for-row with the textarea + gutter). A NOTE
+  // renders Markdown prose, not aligned code — applying the monospace/edFont/edLineH/
+  // ED_PAD here would override its `.block.note .code-view` prose styling and make the
+  // markdown render cramped + code-like (lists hugging the box edge). So skip it for
+  // notes; the note's textarea still gets the metrics below (keeps editing at 16px).
+  if (!block.note) {
+    view.style.padding = ED_PAD + 'px';
+    view.style.lineHeight = edLineH + 'px';
+    view.style.fontSize = edFont + 'px';
+    view.style.fontFamily = ED_FONT;
+  }
   // Note: clicking the rendered code no longer enters edit mode, so text stays
   // selectable for copy/paste — use the Edit button to start editing.
 

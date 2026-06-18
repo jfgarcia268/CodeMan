@@ -236,6 +236,14 @@ tag once.)
   drifts vs. the gutter and grows down the file. Fix: `renderBlock` applies line metrics as
   **inline styles** (`ED_*` constants) on the gutter `.ln`, the textarea, the view, and the Prism
   `pre`/`code`. Inline beats any stylesheet (incl. stale CSS). Change the constants, not just CSS.
+- **Note views must NOT get the inline editor metrics.** Code and note blocks share the
+  `.code-view` element, but only CODE needs the inline `ED_*` font/line-height/padding (so the
+  colored layer lines up row-for-row with the textarea + gutter). A note renders **Markdown prose**,
+  so `renderBlock` applies those inline styles to the view **only when `!block.note`** — otherwise
+  the monospace/edFont/edLineH/ED_PAD override `.block.note .code-view`'s prose styling and the
+  Markdown renders cramped + code-like (lists hugging the box edge). The note's **textarea** still
+  gets the metrics (keeps editing at 16px / no iOS focus-zoom). Don't reintroduce the inline metrics
+  on note views to "align" them with anything — the note gutter is hidden and the editor is separate.
 - **Toolbar clicks vs. the editor's blur:** the textarea's blur switched the block to `viewing`,
   hiding Save/Revert mid-click. Fixed by bailing the blur handler when `e.relatedTarget` is inside
   the block. Don't `preventDefault()` the toolbar mousedown to "keep focus" — that swallowed clicks.
@@ -322,6 +330,10 @@ tag once.)
   `renderBlock`/`renderChecklistBlock`/`renderRichBlock`/`renderSection`) becomes a red `✕`
   (`title="Delete"`, keeps `danger`), and the per-section Merge button is just `⛶` (`title="Merge"`).
   Desktop keeps the full text ("Delete", "⛶ Merge"). Gated by each function's `isMobile` flag.
+  All mobile icon buttons share a uniform **34×32 square** footprint — the block toolbar icons
+  (`✎ ⧉ ⋯ ✕`, the `.danger` delete included) AND the section-header icons (`$ ⛶ ✕`) — so a
+  section/subsection delete `✕` is exactly the same size as a block's delete `✕` (the `🏷 N` tag
+  button keeps its text width).
 - **One 40px top band (desktop + mobile).** `.main-tabs` is `min-height:40px; box-sizing:border-box`
   and `.brand-row` is `min-height:40px` with `.sidebar-header` top padding dropped — so the sidebar
   brand row, the tab strip, and the `☰` toggle all share an aligned 40px band. Desktop hidden ☰
