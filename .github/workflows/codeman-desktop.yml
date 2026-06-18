@@ -1,9 +1,13 @@
-name: Build CodeMan desktop (macOS)
+name: Build CodeMan desktop (macOS + Windows)
 
-# Builds the CodeMan Electron .dmg on a macOS (Apple Silicon) runner — ONLY on a
-# version tag (e.g. v3.2.0), which then publishes the .dmg to a GitHub Release.
-# Build stays unsigned (no Apple dev cert), so first launch on each Mac still needs
-# right-click → Open + the macOS Local Network prompt.
+# Builds the CodeMan Electron installers — ONLY on a version tag (e.g. v3.2.0) —
+# then publishes them to a GitHub Release. Three artifacts:
+#   • CodeMan-<v>-arm64.dmg  (macOS Apple Silicon)   ┐ built on macos-14
+#   • CodeMan-<v>-x64.dmg    (macOS Intel / x86_64)  ┘
+#   • CodeMan-<v>.exe        (Windows x64, NSIS)       built on windows-latest
+# Builds stay unsigned (no Apple dev cert / no Windows code-signing cert): first
+# launch on each Mac still needs the `xattr` quarantine clear, and Windows shows a
+# SmartScreen "unknown publisher" prompt (More info → Run anyway). See README.
 
 on:
   push:
@@ -15,7 +19,17 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-14            # Apple Silicon → arm64 .dmg (matches the target Macs)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14          # Apple Silicon runner → builds arm64 + x64 dmgs
+            build: npm run dist:mac
+            artifacts: codeman-desktop/dist/*.dmg
+          - os: windows-latest    # → Windows NSIS .exe
+            build: npm run dist:win
+            artifacts: codeman-desktop/dist/*.exe
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: codeman-desktop
@@ -32,6 +46,7 @@ jobs:
         run: npm ci
 
       - name: Set version from tag
+        shell: bash      # so `sed` works on the Windows runner too (git-bash = GNU sed)
         run: |
           V="${GITHUB_REF_NAME#v}"        # v3.2.0 → 3.2.0
           echo "Setting app version to $V"
@@ -42,13 +57,13 @@ jobs:
           rm -f ../codeman/version.js.bak
           cat ../codeman/version.js
 
-      - name: Build .dmg
+      - name: Build installer
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'   # unsigned: don't hunt for a signing cert
-        run: npm run dist
+        run: ${{ matrix.build }}
 
-      - name: Publish .dmg to GitHub Release
+      - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: codeman-desktop/dist/*.dmg
+          files: ${{ matrix.artifacts }}
           fail_on_unmatched_files: true
