@@ -11,6 +11,11 @@ function saveExpanded() {
   try { localStorage.setItem(EXPANDED_KEY, JSON.stringify([...expandedFolders])); } catch (e) {}
 }
 let treeData = [];
+// Per-column sort preferences for the double (Miller) layout, keyed by folder path
+// (''=root) → { field:'name'|'lang'|'kind', dir:'asc'|'desc' }. Source of truth is the
+// server (.colsort.json, fetched in loadTree); a missing entry = manual/default order.
+// Sorting runs client-side (sortMillerChildren) so it also works offline.
+let colSort = {};
 // Folder the toolbar's +Folder/+Page act on in single-column mode (clicked folder).
 let selectedFolder = localStorage.getItem('codeman.selectedFolder') || '';
 // In-progress inline creation: { kind: 'folder'|'page', parent: '<folderPath>' }.
@@ -87,6 +92,7 @@ function expandAncestors(pagePath) {
 
 async function loadTree() {
   treeData = await api('tree');
+  try { colSort = (await api('col_sorts')) || {}; } catch (e) { colSort = colSort || {}; }
   renderTree();
 }
 
@@ -141,6 +147,36 @@ function folderChildren(path) {
     }
   })(treeData);
   return found || [];
+}
+
+// Sort a column's children by a saved preference (pure — returns a new array).
+// field: 'name' (case-insensitive), 'lang' (page primary code-type; folders sort as
+// '' so they group together), 'kind' (project<folder<page). dir flips the result.
+// Ties always break on name so the order is stable.
+function sortMillerChildren(children, pref) {
+  if (!pref || !pref.field) return children.slice();
+  const kindRank = n => n.type === 'folder' ? (n.project ? 0 : 1) : 2;
+  const langKey = n => n.type === 'page' ? ((n.langs || []).slice().sort()[0] || '').toLowerCase() : '';
+  const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+  const cmp = (a, b) => {
+    let d = 0;
+    if (pref.field === 'kind') d = kindRank(a) - kindRank(b);
+    else if (pref.field === 'lang') d = langKey(a).localeCompare(langKey(b));
+    if (d === 0) d = byName(a, b);
+    return d;
+  };
+  const out = children.slice().sort(cmp);
+  if (pref.dir === 'desc') out.reverse();
+  return out;
+}
+
+// Persist a column's sort choice (field='manual' clears it → back to default order).
+// Optimistic: update the in-memory map + re-render now, then write to the server.
+function setColSort(parentPath, field, dir) {
+  if (field === 'manual') delete colSort[parentPath];
+  else colSort[parentPath] = { field, dir };
+  renderTree();
+  api('set_col_sort', { parent: parentPath, field, dir });
 }
 
 // The tree node at a given path (or null).
@@ -376,29 +412,100 @@ function renderMillerColumn(parentPath, depth, isLast) {
   const pages = children.filter(c => c.type === 'page');
   const selectedChild = columnPath[depth];
   const pending = pendingNew && pendingNew.parent === parentPath;
+  const pref = colSort[parentPath];
 
   if (!folders.length && !pages.length && !pending) {
     const e = document.createElement('div'); e.className = 'tree-empty'; e.textContent = 'Empty';
     col.appendChild(e);
     return col;
   }
-  folders.forEach(f => {
+
+  // Per-column sort control (only worth showing once there's something to sort).
+  if (folders.length || pages.length) col.appendChild(renderColSortHead(parentPath, pref));
+
+  const addFolder = f => {
     const card = renderMillerFolderCard(f, depth, f.path === selectedChild || f.path === selectedFolder);
     attachColumnReorder(card, f, parentPath, true); // folders also accept "move into"
     col.appendChild(card);
-  });
-  if (folders.length && pages.length) {
-    const d = document.createElement('div'); d.className = 'miller-divider';
-    col.appendChild(d);
-  }
-  pages.forEach(p => {
-    const node = renderTreeNode(p);              // rich page card
+  };
+  const addPage = p => {
+    const node = renderTreeNode(p);                // rich page card
     const row = node.querySelector('.tree-row');
     if (row) attachColumnReorder(row, p, parentPath, false);
     col.appendChild(node);
-  });
+  };
+
+  if (pref && pref.field) {
+    // Active sort → one flat, intermixed list (no folders/pages divider).
+    sortMillerChildren(children, pref).forEach(n => n.type === 'folder' ? addFolder(n) : addPage(n));
+  } else {
+    // Default → folders first, divider, then pages (manual/.order.json order).
+    folders.forEach(addFolder);
+    if (folders.length && pages.length) {
+      const d = document.createElement('div'); d.className = 'miller-divider';
+      col.appendChild(d);
+    }
+    pages.forEach(addPage);
+  }
   if (pending) col.appendChild(buildPendingRow());
   return col;
+}
+
+// Labels for the sort fields, shown in the header chip + menu.
+const COL_SORT_FIELDS = [
+  { field: 'name', label: 'Name' },
+  { field: 'lang', label: 'Code-type' },
+  { field: 'kind', label: 'Kind' }
+];
+function colSortLabel(pref) {
+  if (!pref || !pref.field) return null;
+  const f = COL_SORT_FIELDS.find(x => x.field === pref.field);
+  return (f ? f.label : pref.field) + ' ' + (pref.dir === 'desc' ? '↓' : '↑');
+}
+
+// Slim header at the top of each Miller column: a sort button showing the active
+// choice (or ⇅ when default). Click opens the sort menu.
+function renderColSortHead(parentPath, pref) {
+  const head = document.createElement('div');
+  head.className = 'miller-col-head';
+  const btn = document.createElement('button');
+  btn.className = 'col-sort-btn' + (pref && pref.field ? ' active' : '');
+  btn.title = 'Sort this column';
+  btn.textContent = pref && pref.field ? '⇅ ' + colSortLabel(pref) : '⇅';
+  btn.addEventListener('click', e => { e.stopPropagation(); buildColSortMenu(btn, parentPath); });
+  head.appendChild(btn);
+  return head;
+}
+
+// Sort menu for a column (reuses the .mini-menu pattern). Offers each field × asc/desc,
+// then "Manual order" to clear. The current choice is marked.
+function buildColSortMenu(anchor, parentPath) {
+  const existing = document.querySelector('.mini-menu');
+  if (existing) { existing.remove(); return; }
+  const pref = colSort[parentPath];
+  const menu = document.createElement('div'); menu.className = 'mini-menu';
+  const r = anchor.getBoundingClientRect();
+  menu.style.top = Math.round(r.bottom + 4) + 'px';
+  menu.style.left = Math.round(r.left) + 'px';
+  const opt = (label, active, fn) => {
+    const o = document.createElement('div'); o.className = 'mini-menu-opt' + (active ? ' active' : '');
+    const ic = document.createElement('span'); ic.className = 'mm-ic'; ic.textContent = active ? '✓' : '';
+    const tx = document.createElement('span'); tx.textContent = label;
+    o.append(ic, tx);
+    o.onclick = () => { menu.remove(); fn(); };
+    return o;
+  };
+  const sep = () => { const d = document.createElement('div'); d.className = 'mini-menu-sep'; return d; };
+  COL_SORT_FIELDS.forEach(f => {
+    ['asc', 'desc'].forEach(dir => {
+      const active = pref && pref.field === f.field && pref.dir === dir;
+      menu.append(opt(f.label + ' ' + (dir === 'desc' ? '↓' : '↑'), active, () => setColSort(parentPath, f.field, dir)));
+    });
+  });
+  menu.append(sep(), opt('Manual order', !(pref && pref.field), () => setColSort(parentPath, 'manual')));
+  document.body.appendChild(menu);
+  const off = (e) => { if (!menu.contains(e.target) && e.target !== anchor) { menu.remove(); document.removeEventListener('mousedown', off); } };
+  setTimeout(() => document.addEventListener('mousedown', off), 0);
 }
 
 /* ---------- DRAG-TO-SORT (Miller columns) ---------- */
@@ -460,6 +567,8 @@ async function dropReorder(srcPath, parentPath, refNode, pos) {
   if (idx === -1) { await loadTree(); return; }
   list.splice(pos === 'before' ? idx : idx + 1, 0, srcName);
   await api('reorder', { parent: parentPath, order: list });
+  // Dragging means "I want a manual order" — drop any active sort on this column.
+  if (colSort[parentPath]) { delete colSort[parentPath]; api('set_col_sort', { parent: parentPath, field: 'manual' }); }
   if (srcParent !== parentPath && srcName.endsWith('.json')) {
     updateOpenPath(srcPath, (parentPath ? parentPath + '/' : '') + srcName);
     renderMainTabs();

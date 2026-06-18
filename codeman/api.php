@@ -85,6 +85,20 @@ function prependOrder($dir, $name) {
     writeOrder($dir, $order);
 }
 
+// Per-column sort preferences for the double (Miller) layout, persisted in a single
+// hidden .colsort.json at the data root: { "<folderRelPath>": {"field","dir"} } with
+// ""=root. Absent key = manual/default order. Sorting itself runs client-side; this
+// only stores the preference so it survives reloads and follows the user across devices.
+function colSortFile($base) { return rtrim($base, '/') . '/.colsort.json'; }
+function readColSorts($base) {
+    $f = colSortFile($base);
+    if (file_exists($f)) { $o = json_decode(@file_get_contents($f), true); if (is_array($o)) return $o; }
+    return [];
+}
+function writeColSorts($base, $map) {
+    file_put_contents(colSortFile($base), json_encode((object)$map), LOCK_EX);
+}
+
 // Walk a section (any depth, legacy or tabbed) collecting tags and block langs.
 function collectMeta($section, &$tags, &$langs) {
     if (!empty($section['tags']) && is_array($section['tags'])) {
@@ -530,6 +544,30 @@ switch ($action) {
         $dir = safePath($base, $input['parent'] ?? '');
         if (is_dir(rtrim($dir, '/')) && isset($input['order']) && is_array($input['order'])) {
             writeOrder($dir, $input['order']);
+        }
+        echo json_encode(['ok' => true]);
+        break;
+
+    case 'col_sorts':
+        // Return the per-column sort-preference map for the double (Miller) layout.
+        echo json_encode((object)readColSorts($base));
+        break;
+
+    case 'set_col_sort':
+        // Persist (or clear) a column's sort preference. input: { parent, field, dir }.
+        // field=manual (or unknown) clears the entry → back to manual/default order.
+        $dir = safePath($base, $input['parent'] ?? '');
+        if (is_dir(rtrim($dir, '/'))) {
+            $key = ltrim(substr(rtrim($dir, '/'), strlen($base)), '/');
+            $map = readColSorts($base);
+            $field = $input['field'] ?? 'manual';
+            $sortDir = ($input['dir'] ?? 'asc') === 'desc' ? 'desc' : 'asc';
+            if (in_array($field, ['name', 'lang', 'kind'], true)) {
+                $map[$key] = ['field' => $field, 'dir' => $sortDir];
+            } else {
+                unset($map[$key]);
+            }
+            writeColSorts($base, $map);
         }
         echo json_encode(['ok' => true]);
         break;

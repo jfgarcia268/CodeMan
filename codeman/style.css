@@ -220,6 +220,20 @@ body.sidebar-hidden:not(.is-mobile) #showSidebarBtn { display: flex; }
 .miller-col:last-child { border-right: none; }
 .miller-col.miller-col-wide { flex: 1 1 auto; }
 .miller-divider { height: 1px; background: var(--border); margin: 6px 4px; }
+/* per-column sort control: slim sticky bar with a sort button on the right */
+.miller-col-head {
+  display: flex; justify-content: flex-end; align-items: center;
+  position: sticky; top: -6px;           /* cancels .miller-col padding so it pins to the edge */
+  margin: -6px -6px 4px; padding: 4px 6px;
+  background: var(--bg, #1e1e1e); z-index: 2;
+}
+.col-sort-btn {
+  font-size: 11px; line-height: 1; padding: 3px 7px; border-radius: 4px;
+  color: var(--muted, #9aa0a8); background: transparent; border: 1px solid transparent;
+  cursor: pointer; white-space: nowrap;
+}
+.col-sort-btn:hover { background: var(--accent-2); color: var(--text); }
+.col-sort-btn.active { color: var(--text); border-color: var(--border-2, #3a3d41); }
 /* thin paging rail to slide the visible window one column left/right */
 .miller-rail {
   flex: 0 0 16px;
