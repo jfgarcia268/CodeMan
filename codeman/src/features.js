@@ -702,11 +702,15 @@ function openMoreMenu(anchor) {
     o.onclick = () => { menu.remove(); fn(); };
     return o;
   };
+  const sep = () => { const d = document.createElement('div'); d.className = 'mini-menu-sep'; return d; };
   menu.append(
+    // everyday actions
     opt('★', 'Favorites & recently copied', () => openFavorites()),
     opt('🏷', 'Manage tags', () => openTagManager()),
     opt('⧉', 'Quick-paste block', () => openBlockPalette()),
     opt('🗑', 'Trash', () => openTrash()),
+    sep(),
+    // maintenance
     opt('⟳', 'Rebuild index', () => rebuildIndex(anchor)),
     opt('☁', 'Download for offline', () => primeOfflineCache())
   );

@@ -50,6 +50,7 @@ const kvKey = (key) => NS + NS_SEP + key;
 const pageKey = (p) => NS + NS_SEP + p;
 async function kvGet(key) { return idbGet('kv', kvKey(key)); }
 async function kvSet(key, val) { return idbSet('kv', kvKey(key), val); }
+async function kvDel(key) { return idbDel('kv', kvKey(key)); }
 async function pageGet(p) { return idbGet('pages', pageKey(p)); }
 async function pageSet(p, val) { return idbSet('pages', pageKey(p), val); }
 async function pageDel(p) { return idbDel('pages', pageKey(p)); }

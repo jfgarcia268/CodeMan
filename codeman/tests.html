@@ -273,7 +273,10 @@
       out.appendChild(d);
     }
     try {
-      for (const k of ['tree', 'queue', 'trash', 'history']) snap[k] = await idbGet('kv', k);
+      // The offline cache is namespaced per server (offline.js): go through the SAME
+      // kvGet/kvSet/pageGet/pageSet wrappers the functions use, so we seed/read the
+      // active namespace AND snapshot/restore exactly the keys under test (safe to run).
+      for (const k of ['tree', 'queue', 'trash', 'history']) snap[k] = await kvGet(k);
 
       const TP = 'zztest_folder/Page.json';
       const baseTree = () => [{ type: 'folder', name: 'zztest_folder', path: 'zztest_folder', children: [
@@ -282,9 +285,9 @@
 
       // reset to a known state
       let tree = baseTree();
-      await idbSet('kv', 'tree', tree); treeData = tree;
-      await idbSet('pages', TP, { title: 'Page', sections: [{ title: 'S', blocks: [{ type: 'sql', code: 'SELECT 1' }], subsections: [] }] });
-      await idbSet('kv', 'trash', []); await idbSet('kv', 'history', {});
+      await kvSet('tree', tree); treeData = tree;
+      await pageSet(TP, { title: 'Page', sections: [{ title: 'S', blocks: [{ type: 'sql', code: 'SELECT 1' }], subsections: [] }] });
+      await kvSet('trash', []); await kvSet('history', {});
       syncQueue.length = 0;
 
       // trash: record + list
@@ -303,18 +306,18 @@
       ta('restore empties the local trash', (await offlineListTrash()).length, 0);
 
       // trash: restore rebuilds when the delete already synced (no queued delete)
-      tree = baseTree(); await idbSet('kv', 'tree', tree); treeData = tree;
-      await idbSet('kv', 'trash', []); syncQueue.length = 0;
+      tree = baseTree(); await kvSet('tree', tree); treeData = tree;
+      await kvSet('trash', []); syncQueue.length = 0;
       await recordLocalTrash(TP);
       const t2 = await offlineListTrash();
-      removeFromTree(treeData, TP); await idbSet('kv', 'tree', treeData);
+      removeFromTree(treeData, TP); await kvSet('tree', treeData);
       await offlineRestoreTrash({ id: t2[0].id });
       ta('restore-after-sync queues create_page', syncQueue.some(o => o.action === 'create_page' && o.body.name === 'Page'), true);
       ta('restore-after-sync queues forced save_page', syncQueue.some(o => o.action === 'save_page' && o.body.path === TP && o.body.force === true), true);
 
       // history: record + list + get + restore
-      await idbSet('kv', 'history', {}); syncQueue.length = 0;
-      await idbSet('pages', TP, { title: 'Page', sections: [{ title: 'v1' }] });
+      await kvSet('history', {}); syncQueue.length = 0;
+      await pageSet(TP, { title: 'Page', sections: [{ title: 'v1' }] });
       await recordLocalHistory(TP, { title: 'Page', sections: [{ title: 'v0' }] });
       const hist = await offlineListHistory(TP);
       ta('offline history lists a version', hist.length, 1);
@@ -322,11 +325,11 @@
       ta('offline history returns the snapshot', ver.sections[0].title, 'v0');
       const r3 = await offlineRestoreHistory({ path: TP, ts: hist[0].ts });
       ta('restore_history returns ok', !!(r3 && r3.ok), true);
-      const afterPage = await idbGet('pages', TP);
+      const afterPage = await pageGet(TP);
       ta('restore_history applies the version to the cache', afterPage.sections[0].title, 'v0');
       ta('restore_history queues a save', syncQueue.some(o => o.action === 'save_page' && o.body.path === TP), true);
 
-      await idbDel('pages', TP);
+      await pageDel(TP);
     } catch (e) {
       fail++;
       const d = document.createElement('div'); d.className = 'row fail';
@@ -335,7 +338,7 @@
     } finally {
       // restore the real cache exactly as it was
       for (const k of ['tree', 'queue', 'trash', 'history']) {
-        if (snap[k] !== undefined) await idbSet('kv', k, snap[k]); else await idbDel('kv', k);
+        if (snap[k] !== undefined) await kvSet(k, snap[k]); else await kvDel(k);
       }
       syncQueue.length = 0; syncQueue.push(...savedQueue);
       document.getElementById('summary').innerHTML =

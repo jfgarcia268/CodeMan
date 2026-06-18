@@ -283,27 +283,45 @@ tag once.)
   the project ancestors of any path form a prefix from the root — `projectChain()` relies on this.
   Guard all create/move/reorder paths with `isValidProjectParent` (server mirrors it in
   `create_project`/`move`); don't add a new path that bypasses it.
-- **Mobile code-block toolbar is icon-only with ONE merged `⋯` menu.** `renderBlock` reads
-  `isMobile = body.classList.contains('is-mobile')` at render time (blocks re-render on demand;
-  the matchMedia listener re-renders on the 768px flip) and swaps Edit→`✎`, Save→`✓`,
-  Copy→`⧉` (keeping `title=` for a11y; Delete stays red text, Revert is owned by
-  `refreshRevertLabel`). The `.block-overflow` (`⋯`) opens `showMiniMenu` with three groups
-  separated by `{divider:true}` (rendered as `.mini-menu-sep`): (1) direct actions `#` lines /
-  `$` vars / Duplicate / Split / `⤵ To subsection` — these stay in the DOM, `display:none` under
-  `body.is-mobile`, and the menu **proxies them via `.click()`** (no handler duplication);
-  (2) the block-kind convert list (`BLOCK_KINDS`), folding away the desktop `Code ▾` `.type-menu`;
-  (3) Copy-as formats via the shared `copyAsOptions()` helper, folding away the desktop `▾`
-  `.copy-as`. Copy-as is **rebuilt as items** (not proxied) because its own popup anchors to its
-  button rect, invalid while hidden. CSS also drops the `.block-label` to its own full-width row.
-  Everything is `body.is-mobile`/media-gated and `⋯` is `display:none` off-mobile → **desktop is
-  byte-identical** (full text toolbar, both `Code ▾` and `▾`).
+- **The code-block `⋯` overflow menu now declutters BOTH desktop and mobile** (was mobile-only
+  before the UI/UX pass). The secondary actions — `#` lines / `$` vars / Duplicate / Split /
+  `⤵ To subsection` / block-kind `.type-menu` / copy-as `.copy-as` — are hidden by **unconditional**
+  `.block-toolbar` rules (not `body.is-mobile`-gated anymore) and folded into `.block-overflow`,
+  which is `display:inline-flex` on every width. They stay in the DOM so the menu **proxies them via
+  `.click()`** (copy-as is rebuilt as items — its popup anchors to its own rect, invalid while
+  hidden). Primary row = `type-picker · label · Edit/Save/Revert · Copy · ⋯ · Delete` (Copy is
+  labelled "Copy", `title="Copy to clipboard"`). `renderBlock` still reads
+  `isMobile = body.classList.contains('is-mobile')` for the **icon swaps** (Edit→`✎`, Save→`✓`,
+  Copy→`⧉`, Delete→`✕`) and label-on-own-row; the open page re-renders on the 768px flip
+  (`initMobile` calls `renderPage()`), so toolbars reflow without a reload. The `⋯` menu groups
+  (`showMiniMenu`, `{divider:true}`→`.mini-menu-sep`): direct actions · `BLOCK_KINDS` convert ·
+  copy-as. **Desktop is no longer byte-identical** — that was an intentional declutter.
 - **ALL block kinds get the icon toolbar (not just code/note).** `renderChecklistBlock` and
   `renderRichBlock` mirror the same mobile treatment: Edit→`✎`/Save→`✓` (rich), Copy→`⧉`, Delete→`✕`,
   label on its own row, and a `.block-overflow` (`⋯`) that folds Duplicate + the block-kind convert
-  (and Clear-done for checklists) — necessary because the generic `body.is-mobile .block-toolbar
-  .type-menu/.block-dup/.block-clear { display:none }` rules already strip those buttons, so without
-  a `⋯` they'd be unreachable. Rich's convert syncs `surface.innerHTML` into `block.code` first.
-  Shared marker classes (`.block-copy`/`.block-dup`/`.block-clear`) drive the CSS hide + icon sizing.
+  (and Clear-done for checklists) — necessary because the generic (now **unconditional**, not just
+  `body.is-mobile`) `.block-toolbar .type-menu/.block-dup/.block-clear { display:none }` rules strip
+  those buttons, so without a `⋯` they'd be unreachable. Rich's convert syncs `surface.innerHTML`
+  into `block.code` first. Shared marker classes (`.block-copy`/`.block-dup`/`.block-clear`) drive
+  the CSS hide + icon sizing.
+- **Sidebar tree is keyboard-operable + ARIA (a11y pass).** `#tree` is `role="tree"`; rows
+  (`.tree-row`) and Miller folder cards (`.subfolder-card`) are `role="treeitem"` with a
+  `data-path`, `aria-label`, roving `tabindex` (exactly one row is `tabindex=0` via
+  `initRovingTabindex`, called at the end of `renderTree`), folders carry `aria-expanded`. One
+  delegated `keydown` on `#tree` (`onTreeKeydown`, bound once via `bindTreeKeys`): Enter/Space
+  activate any row in BOTH layouts (`activateTreeItem` clicks then restores focus by `data-path`,
+  since folder activation re-renders via `selectFolder`); single-column also gets Up/Down/Home/End +
+  Left/Right expand-collapse/parent. It bails when `e.target` is an INPUT (don't hijack inline
+  rename/create). A global `:focus-visible` ring lives near the base `button{}` rule.
+- **Delete buttons are de-emphasized at rest.** `button.danger` is neutral (`#3a3d41` / dim-red
+  text) until `:hover`/`:focus-visible` (then full red). The empty page is an **onboarding** state
+  (`.empty-state.onboard`: + New Project / + New Page CTAs, ⌘K hint, "Open the sidebar" nudge when
+  `body.sidebar-hidden`). Inline create (`buildPendingRow`) has visible `✓`/`✕`; **blur now cancels**
+  (was auto-commit) — the `✓`/`✕` `mousedown`-preventDefault so their click lands before blur.
+- **`tests.html` seeds via the namespaced wrappers.** Since `offline.js` keys IndexedDB per server,
+  the offline-reducer tests must seed/read/snapshot/restore through `kvGet/kvSet/kvDel` +
+  `pageGet/pageSet/pageDel` (NOT raw `idbGet/idbSet('kv'|'pages', …)`), or they'd miss the active
+  namespace AND fail to restore the real cache. Keep that contract when adding offline tests.
 - **iOS home-screen PWA top inset:** `body.is-mobile .main` gets `padding-top:env(safe-area-inset-top)`
   + a `#1b1b1b` background (the tab-bar colour) so the tab bar/header clear the Dynamic Island in
   standalone mode (status bar is `black-translucent`, `viewport-fit=cover`). The floating ☰ is
