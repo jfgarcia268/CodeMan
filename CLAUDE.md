@@ -30,7 +30,7 @@ codeman-desktop/  optional macOS desktop wrapper (Electron)
 |------|------|
 | `index.html` | Markup; loads **vendored** Prism (offline), then `version.js`, then the 7 ordered `src/*.js` scripts (via the dynamic loader array — `version.js` is first so `CODEMAN_VERSION` exists before the modules run). Cache-busts CSS/JS with a `?v=` query over http(s); on `file://` the query is skipped (Chromium won't resolve `foo.js?v=…` off disk). The stylesheet is a plain `<link>` whose href gets `?v=` appended by JS — **never** `document.write` (that wipes the document under a `file://` load). |
 | `version.js` | **Single version source of truth.** `self.CODEMAN_VERSION = 'X.Y.Z'` — read by the footer (`init.js`) and `importScripts`-ed by `sw.js` for the cache name. Bump this one file per release (CI also syncs it from the git tag for the packaged desktop build). |
-| `src/core.js` | Languages, global state, the `api()` wrapper (offline-aware) + `apiFetch`, toast, themed modals. `apiFetch` builds a relative `api.php?...` URL, or prefixes `window.CODEMAN_API_BASE` if set (the desktop wrapper sets it; in a browser it's unset → relative). |
+| `src/core.js` | Languages, global state, the `api()` wrapper (offline-aware) + `apiFetch`, toast, `flashCopied`, the `copyText()` clipboard helper (see gotcha), themed modals. `apiFetch` builds a relative `api.php?...` URL, or prefixes `window.CODEMAN_API_BASE` if non-empty — but it's `''` everywhere today (unset in a browser; the desktop preload sets it to `''` so the renderer keeps using the relative, proxied `api.php`), so the URL is effectively always relative. |
 | `src/tree.js` | Sidebar tree (single column) + Miller columns (double, **always exactly 2** — `MILLER_COLS`) + drag-to-sort. `effectiveMode()` forces single-column when `body.is-mobile`, without changing the persisted `sidebarMode` (which **defaults to `double`** on desktop). Project helpers: `pathPrefixes`, `projectChain` (the project-ancestor chain), `isValidProjectParent`; the project-chain banner + color-coded breadcrumb live here. |
 | `src/editor.js` | Page tabs, page/section/block editor, language picker, blocks (code/note/rich/checklist), merge/split/reorder, variables, save (conflict-aware). |
 | `src/features.js` | Trash & history UI, history diff, favorites + recently-copied, tag manager, command palette, quick-paste block palette, find & replace, export/import, `primeOfflineCache`, `rebuildIndex`, and `openMoreMenu` (the sidebar `⋯` overflow menu, reusing the `.mini-menu` pattern). |
@@ -318,6 +318,28 @@ tag once.)
   (`.empty-state.onboard`: + New Project / + New Page CTAs, ⌘K hint, "Open the sidebar" nudge when
   `body.sidebar-hidden`). Inline create (`buildPendingRow`) has visible `✓`/`✕`; **blur now cancels**
   (was auto-commit) — the `✓`/`✕` `mousedown`-preventDefault so their click lands before blur.
+- **Copy uses `copyText()` (core.js), never a bare `navigator.clipboard`.** `navigator.clipboard`
+  is **`undefined` in insecure contexts** (a NAS served over plain `http://…`), so a direct
+  `writeText` throws there → Copy silently fails with no feedback (it only "worked" on localhost /
+  the desktop app / HTTPS). `copyText(text)` uses the async Clipboard API when `window.isSecureContext`,
+  else falls back to a hidden-textarea `document.execCommand('copy')`, and resolves a success
+  boolean. **All** copy sites (code/note/rich/checklist blocks, both copy-as menus, recently-copied,
+  quick-paste) route through it and then show a `flashCopied` bubble / `toast` — "Copied…" on success,
+  "Copy failed" otherwise (~1.8s; `flashCopied` clamps by half-width on BOTH edges so it never spills
+  off-screen). Don't reintroduce a direct `navigator.clipboard.writeText`.
+- **The global `:focus-visible` ring is deliberately excluded from the code editor.** `.code-edit`
+  (the transparent overlay textarea) keeps `outline:none` even on focus — the ring's specificity
+  otherwise drew a stray blue box around the code while editing; the block's editing state (border +
+  Save/Cancel) is the focus affordance. The code textarea also sets `spellcheck=false` +
+  `data-gramm`/`data-gramm_editor`/`data-enable-grammarly="false"` + `autocorrect/autocapitalize/
+  autocomplete="off"` so the browser AND extensions (Grammarly) stop drawing squiggle/underline
+  overlays on code. `.section-header` is `align-items:flex-start` so the title/actions don't float
+  mid-height beside a tall multi-row tag block.
+- **Tag-mutating actions must refresh open tabs.** `applyRename` (tag manager rename/merge/delete)
+  re-fetches every open page after the server write (`get_page` → reset `tab.data`/`tab.baseMtime`,
+  re-render the active page), mirroring what Find & Replace's replace-all already does — otherwise an
+  open tab's stale in-memory `currentPageData` would silently re-save the OLD tag on the next autosave.
+  Any new bulk server-side mutation of page content needs the same open-tab reconciliation.
 - **`tests.html` seeds via the namespaced wrappers.** Since `offline.js` keys IndexedDB per server,
   the offline-reducer tests must seed/read/snapshot/restore through `kvGet/kvSet/kvDel` +
   `pageGet/pageSet/pageDel` (NOT raw `idbGet/idbSet('kv'|'pages', …)`), or they'd miss the active
