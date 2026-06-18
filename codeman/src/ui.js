@@ -156,6 +156,13 @@ function applySidebarWidth(w) {
   backdrop.addEventListener('click', () => setSidebarHidden(true));
   document.body.appendChild(backdrop);
 
+  // Backdrop behind the open in-page outline overlay — tap to close (mobile only;
+  // the outline has no room for a big dismiss and its toggle is in the ⋯ menu it covers).
+  const outlineBackdrop = document.createElement('div');
+  outlineBackdrop.className = 'outline-backdrop';
+  outlineBackdrop.addEventListener('click', () => { if (typeof toggleOutline === 'function') toggleOutline(); });
+  document.body.appendChild(outlineBackdrop);
+
   function apply(matches) {
     document.body.classList.toggle('is-mobile', matches);
     if (matches) {
