@@ -727,6 +727,10 @@ function openMoreMenu(anchor) {
     opt('⟳', 'Rebuild index', () => rebuildIndex(anchor)),
     opt('☁', 'Download for offline', () => primeOfflineCache())
   );
+  // Sign-out — only when a shared-secret token is stored (password gate in use).
+  if (typeof authToken !== 'undefined' && authToken) {
+    menu.append(sep(), opt('⊗', 'Forget password (sign out)', () => signOut()));
+  }
   document.body.appendChild(menu);
   const off = (e) => { if (!menu.contains(e.target) && e.target !== anchor) { menu.remove(); document.removeEventListener('mousedown', off); } };
   setTimeout(() => document.addEventListener('mousedown', off), 0);

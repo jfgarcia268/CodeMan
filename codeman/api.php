@@ -332,7 +332,12 @@ function snapshotHistory($base, $rel, $path) {
     if (!is_dir($hdir)) mkdir($hdir, 0777, true);
     $stamp = @filemtime($path) ?: time();
     $vfile = $hdir . '/' . $stamp . '.json';
-    if (!file_exists($vfile)) file_put_contents($vfile, $old, LOCK_EX);
+    // mtime is second-granularity, so two saves in the same second collide on the
+    // version filename. Bump to the next free integer key (filenames must stay
+    // pure-integer for restore-by-ts) so a concurrent same-second version is still
+    // retained and recoverable instead of being silently dropped.
+    while (file_exists($vfile)) { $stamp++; $vfile = $hdir . '/' . $stamp . '.json'; }
+    file_put_contents($vfile, $old, LOCK_EX);
     $vers = glob($hdir . '/*.json') ?: [];
     if (count($vers) > HISTORY_KEEP) {
         sort($vers); // oldest mtimes first (numeric filenames)
@@ -389,7 +394,13 @@ switch ($action) {
                 if (strpos(str_replace('\\', '/', $file->getPathname()), '/.') !== false) continue;
                 if (substr($file->getFilename(), -5) !== '.json') continue;
                 $content = @file_get_contents($file->getPathname());
-                if ($content !== false && stripos($content, $q) !== false) {
+                if ($content === false) continue;
+                // Decode then re-encode unescaped so a literal UTF-8 query matches
+                // content stored with \uXXXX JSON escaping (search_blocks decodes
+                // too — keep the two search surfaces consistent on Unicode).
+                $decoded = json_decode($content, true);
+                $hay = $decoded === null ? $content : json_encode($decoded, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                if (stripos($hay, $q) !== false) {
                     $rel = ltrim(substr($file->getPathname(), strlen($base)), '/');
                     $matches[] = $rel;
                 }
@@ -577,8 +588,12 @@ switch ($action) {
         $name = safeName($input['name']);
         if ($name === null) jsonError('invalid name');
         $path = safePath($base, ($input['parent'] ?? '') . '/' . $name . '.json');
+        // Parent must exist — otherwise file_put_contents emits a raw PHP warning into
+        // the response body (invalid JSON → the client false-trips offline) yet still
+        // reports ok. Same guard as save_page.
+        if (!is_dir(dirname($path))) jsonError('parent folder does not exist', 404);
         if (!file_exists($path)) {
-            file_put_contents($path, json_encode(['title' => $name, 'sections' => []], JSON_PRETTY_PRINT));
+            if (@file_put_contents($path, json_encode(['title' => $name, 'sections' => []], JSON_PRETTY_PRINT)) === false) jsonError('failed to create page', 500);
         }
         echo json_encode(['ok' => true]);
         break;
@@ -611,8 +626,14 @@ switch ($action) {
         // Strip transient field before persisting.
         $data = $input['data'];
         if (is_array($data)) unset($data['_mtime']);
+        // The parent folder must already exist (created via create_folder/create_page).
+        // Bail with clean JSON rather than letting file_put_contents emit a raw PHP
+        // warning into the response body and still report ok:true.
+        $dir = dirname($path);
+        if (!is_dir($dir)) jsonError('parent folder does not exist', 404);
         snapshotHistory($base, $input['path'], $path); // version the prior content
-        file_put_contents($path, json_encode($data, JSON_PRETTY_PRINT), LOCK_EX);
+        $bytes = @file_put_contents($path, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), LOCK_EX);
+        if ($bytes === false) jsonError('failed to write page', 500);
         clearstatcache(true, $path);
         echo json_encode(['ok' => true, 'mtime' => @filemtime($path)]);
         break;
@@ -722,7 +743,22 @@ switch ($action) {
         if (is_dir($trashDir)) {
             foreach (scandir($trashDir) as $e) {
                 if ($e === '.' || $e === '..') continue;
+                if (substr($e, -5) === '.meta') continue; // handled with its entry
+                // Permanent delete: also drop the item's version history so it can't
+                // accumulate unbounded (or leak stale history onto a future same-named
+                // page). History survives soft-delete/restore — only pruned here.
+                $meta = json_decode(@file_get_contents($trashDir . '/' . $e . '.meta'), true) ?: [];
+                $orig = $meta['origPath'] ?? '';
+                if ($orig !== '') {
+                    // Route through safePath (like restore_trash) — origPath is the RAW
+                    // client path from delete, so a '../'-bearing value would otherwise
+                    // let rrmdir escape .history. safePath strips '..'; guard the empty
+                    // result so we never rrmdir the whole history root.
+                    $hp = safePath($historyDir, $orig); // page: .history/<rel>.json/ · folder: .history/<rel>/ (subtree)
+                    if ($hp !== $historyDir . '/' && is_dir($hp)) rrmdir($hp);
+                }
                 rrmdir($trashDir . '/' . $e);
+                @unlink($trashDir . '/' . $e . '.meta');
             }
         }
         echo json_encode(['ok' => true]);

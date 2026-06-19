@@ -12,6 +12,7 @@
   --muted: #9aa0a8;       /* dim labels/stamps — was an undefined fallback; centralized to pass AA */
   --accent: #0e639c;      /* primary accent (buttons, focus) */
   --accent-2: #094771;    /* accent hover / active row */
+  --radius: 5px;          /* default control radius — keeps peer controls consistent */
 }
 
 * { box-sizing: border-box; }
@@ -128,6 +129,17 @@ body.sidebar-hidden:not(.is-mobile) #showSidebarBtn { display: flex; }
   padding: 8px 8px 0;
 }
 .search-field { position: relative; flex: 1; min-width: 0; }
+/* "showing first N of M — refine" note when a content search is capped (see DEEP_MATCH_CAP) */
+.search-cap-note {
+  margin: 6px 8px 0;
+  padding: 5px 8px;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.search-cap-note[hidden] { display: none; }
 .deep-toggle {
   flex-shrink: 0;
   width: 30px;
@@ -294,7 +306,8 @@ body.sidebar-hidden:not(.is-mobile) #showSidebarBtn { display: flex; }
 .subfolder-card.drop-target { background: var(--accent); outline: 1px solid #1177bb; }
 .sf-icon { font-size: 15px; flex-shrink: 0; }
 .sf-body { flex: 1; min-width: 0; }
-.sf-name { font-size: 14px; font-weight: 600; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sf-name { display: flex; align-items: center; min-width: 0; font-size: 14px; font-weight: 600; color: #fff; }
+.sf-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .sf-meta { font-size: 11px; color: #6fa39a; margin-top: 2px; }
 .sf-meta-row { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .sf-icon, .sf-arrow { margin-top: 1px; } /* nudge to align with the name line */
@@ -333,6 +346,8 @@ body.sidebar-hidden:not(.is-mobile) #showSidebarBtn { display: flex; }
 .subfolder-card.project-card .sf-name::after {
   content: 'PROJECT';
   display: inline-block;
+  flex: none;               /* stays full-size beside the truncating name text */
+  white-space: nowrap;
   margin-left: 7px;
   vertical-align: middle;
   font-size: 8px;
@@ -662,7 +677,7 @@ button {
   background: var(--accent);
   color: #fff;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius);   /* was 4px — converge with the 5px peer controls */
   padding: 5px 10px;
   cursor: pointer;
   font-size: 12px;
@@ -889,6 +904,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .onboard-sub { font-size: 13px; color: var(--muted); max-width: 420px; }
 .onboard-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-top: 6px; }
 .onboard-actions button { font-size: 13px; padding: 8px 16px; }
+/* echo the project=purple / page=blue identity used in the sidebar create group */
+.onboard-actions button.btn-project { background: #6d4ec7; }
+.onboard-actions button.btn-project:hover { background: #8b6ae0; }
+.onboard-actions button.btn-page { background: var(--accent); }
+.onboard-actions button.btn-page:hover { background: #1177bb; }
 .onboard-hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
 .onboard-hint kbd {
   font: 600 11px ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -915,12 +935,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .section-header:hover { background: #2a2d2e; }
 .section-title {
   flex: 1;
+  min-width: 0;             /* allow shrink so the title ellipsizes instead of clipping mid-word */
   font-weight: 600;
   font-size: 14px;
   background: none;
   border: none;
   color: var(--text);
   padding: 2px 4px;
+  text-overflow: ellipsis;  /* native inputs ellipsize when unfocused — better than the hard clip */
 }
 .section-title:focus { background: var(--bg); outline: 1px solid var(--accent); }
 .section-toggle { width: 14px; transition: transform 0.15s; }
@@ -1328,6 +1350,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   padding: 8px 14px;        /* prose padding (NOT the code editor's inline 10px) */
   line-height: 1.5;
   font-size: 13.5px;        /* readable prose size — base .code-view is 13px mono */
+  /* note prose must read as PROSE — the base .code-view sets a monospace family
+     that otherwise cascades into <p>/<li>/<td>; re-scoped <code>/<pre> below
+     restore mono where it belongs. */
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   overflow: visible;
 }
 /* markdown-it emits plain tags (no .md-* classes), so all note-markdown styling is
@@ -1696,7 +1722,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 }
 .panel-row-sub {
   font-size: 11px;
-  color: var(--text-dim);
+  color: var(--muted);   /* was --text-dim (#888, ~3.5:1 on the panel) — --muted passes AA */
   margin-top: 2px;
   white-space: nowrap;
   overflow: hidden;
@@ -1918,7 +1944,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .tree-row .tree-actions,
   .miller-row .miller-actions,
   .subfolder-card .sf-actions { display: flex !important; }
-  .tree-row .tree-del { display: inline !important; opacity: 0.85; }
+  /* tree-del is a <span>, so the button-sizing rule below misses it — give it the
+     same 32px touch footprint as the sibling row-action buttons. */
+  .tree-row .tree-del, .miller-row .tree-del, .subfolder-card .tree-del {
+    display: inline-flex !important; align-items: center; justify-content: center;
+    min-width: 32px; min-height: 32px; opacity: 0.85;
+  }
   .todo-item .todo-remove { opacity: 1 !important; }
 
   /* --- bigger tap targets for icon-only row actions --- */
@@ -2055,4 +2086,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   /* the open drawer covers the bottom-right corner where the sync badge sits;
      hide it while the drawer is open so it can't overlap the Expand/Collapse bar */
   body.is-mobile:not(.sidebar-hidden) .offline-badge { display: none; }
+
+  /* Modal panel rows (Trash / History / Tag manager / Find & Replace): the action
+     buttons are flex-shrink:0, so on a narrow screen they squeeze the name/count
+     until it clips (e.g. the tag usage count "2 pages" → "…"). Let the info take
+     the full row and the buttons wrap onto their own line — no information loss. */
+  .panel-row { flex-wrap: wrap; }
+  .panel-row-info { flex-basis: 100%; }
 }

@@ -9,13 +9,18 @@ let deepSearchSeq = 0;
 
 function runDeepSearch() {
   const q = searchQuery.trim();
-  if (!deepSearch || q.length < 2) { deepMatches = new Set(); return; }
+  if (!deepSearch || q.length < 2) { deepMatches = new Set(); deepMatchTotal = 0; return; }
   const seq = ++deepSearchSeq;
   if (deepSearchTimer) clearTimeout(deepSearchTimer);
   deepSearchTimer = setTimeout(async () => {
     const res = await api('search_content', undefined, 'q=' + encodeURIComponent(q));
     if (seq !== deepSearchSeq) return; // a newer search superseded this one
-    deepMatches = new Set(Array.isArray(res) ? res : []);
+    const all = Array.isArray(res) ? res : [];
+    // Cap how many matches we render: a broad term on a large library can match
+    // thousands of pages, and painting that many tree rows synchronously stalls
+    // the UI (~1.5s at 1200 pages). Keep the full count so the note can say "of N".
+    deepMatchTotal = all.length;
+    deepMatches = new Set(all.slice(0, DEEP_MATCH_CAP));
     renderTree();
   }, 220);
 }
@@ -23,7 +28,7 @@ function runDeepSearch() {
 function updateSearch() {
   searchQuery = searchInput.value;
   document.querySelector('.sidebar-search').classList.toggle('has-text', searchQuery !== '');
-  if (!searchQuery.trim()) deepMatches = new Set();
+  if (!searchQuery.trim()) { deepMatches = new Set(); deepMatchTotal = 0; }
   else runDeepSearch();
   renderTree();
   if (deepSearch) renderPage(); // keep the open page's block filter in sync/locked

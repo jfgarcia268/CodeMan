@@ -20,6 +20,7 @@
   <div class="app"><div class="sidebar">
     <div class="sidebar-search"></div>
     <input id="searchInput"><span id="searchClear"></span><button id="deepSearchToggle"></button>
+    <div id="searchCapNote" hidden></div>
     <div id="treeArea"><div id="tree"></div><div id="pageCol"></div></div>
     <div id="colCount"><div id="colCountOpts"></div></div>
     <button id="expandAllBtn"></button><button id="collapseAllBtn"></button>
@@ -287,6 +288,58 @@
     t('pageToHtml escapes the title', pageToHtml({ title: '<x>', sections: [] }).includes('&lt;x&gt;'), true);
   })();
 
+  // richToPlainText (rich HTML → plain text; must PRESERVE line breaks — detached
+  // innerText loses them, the bug this fixed). Also decodes entities.
+  t('rich→text paragraphs become newlines', richToPlainText('<p>A</p><p>B</p><p>C</p>'), 'A\nB\nC');
+  t('rich→text <br> becomes newline', richToPlainText('one<br>two'), 'one\ntwo');
+  t('rich→text decodes entities', richToPlainText('<p>a &amp; b &lt;tag&gt; &quot;q&quot;</p>'), 'a & b <tag> "q"');
+  t('rich→text collapses 3+ blank lines to one', richToPlainText('<p>A</p><p><br></p><p><br></p><p>B</p>'), 'A\n\nB');
+  t('rich→text list items each on a line', richToPlainText('<ul><li>x</li><li>y</li></ul>'), 'x\ny');
+  t('rich→text trims trailing whitespace', richToPlainText('<p>A</p><p><br></p>'), 'A');
+
+  // blockPlainText per kind
+  t('blockPlainText code', blockPlainText({ type: 'bash', code: 'echo hi' }), 'echo hi');
+  t('blockPlainText note', blockPlainText({ note: true, code: '# h\n\ntext' }), '# h\n\ntext');
+  t('blockPlainText rich preserves lines', blockPlainText({ rich: true, code: '<p>L1</p><p>L2</p>' }), 'L1\nL2');
+  t('blockPlainText checklist', blockPlainText({ checklist: true, items: [{ text: 'a', done: false }, { text: 'b', done: true }] }), '- [ ] a\n- [x] b');
+
+  // convertBlock carries text across kinds (lossless-ish)
+  (function () {
+    const b = { rich: true, type: 'plaintext', code: '<p>alpha</p><p>beta</p><p>gamma</p>' };
+    convertBlock(b, 'checklist');
+    t('rich→checklist splits into items', b.items.map(i => i.text), ['alpha', 'beta', 'gamma']);
+    t('rich→checklist sets checklist flag', !!b.checklist && !b.rich, true);
+    const c = { rich: true, type: 'plaintext', code: '<p>one</p><p>two</p>' };
+    convertBlock(c, 'note');
+    t('rich→note preserves newlines + sets note', [c.note === true, c.code], [true, 'one\ntwo']);
+    const d = { type: 'bash', code: 'line1\nline2' };
+    convertBlock(d, 'note'); convertBlock(d, 'rich'); convertBlock(d, 'code');
+    t('code→note→rich→code keeps 2 lines', d.code, 'line1\nline2');
+    // checklist is a transforming kind: code→checklist→code gains "- [ ]" markers
+    // (the checklist's plain-text form), and code WITH markers round-trips back.
+    const e = { type: 'bash', code: '- [ ] a\n- [x] b' };
+    convertBlock(e, 'checklist');
+    t('code "- [x]" lines parse into checklist items', e.items.map(i => [i.text, i.done]), [['a', false], ['b', true]]);
+  })();
+
+  // Deep-search render cap (DEEP_MATCH_CAP) + the "showing N of M" note
+  (function () {
+    const savedDS = deepSearch, savedDM = deepMatches, savedDT = deepMatchTotal;
+    t('DEEP_MATCH_CAP slices to the cap', new Set(Array.from({ length: 500 }, (_, i) => 'p' + i).slice(0, DEEP_MATCH_CAP)).size, DEEP_MATCH_CAP);
+    const note = document.getElementById('searchCapNote');
+    // capped: total > rendered
+    deepSearch = true; deepMatchTotal = 500; deepMatches = new Set(['a', 'b']);
+    updateSearchCapNote();
+    t('cap note shown + text when capped', [note.hidden, note.textContent], [false, 'Showing first 2 of 500 content matches — refine your search']);
+    // not capped: total == rendered
+    deepMatchTotal = 2; updateSearchCapNote();
+    t('cap note hidden when all matches shown', note.hidden, true);
+    // deep search off → hidden regardless
+    deepSearch = false; deepMatchTotal = 999; updateSearchCapNote();
+    t('cap note hidden when deep search off', note.hidden, true);
+    deepSearch = savedDS; deepMatches = savedDM; deepMatchTotal = savedDT;
+  })();
+
   document.getElementById('summary').innerHTML =
     `<span class="${fail ? 'fail' : 'pass'}">${pass} passed, ${fail} failed</span>`;
   window.__testResult = { pass, fail };
@@ -363,6 +416,21 @@
       ta('restore_history queues a save', syncQueue.some(o => o.action === 'save_page' && o.body.path === TP), true);
 
       await pageDel(TP);
+
+      // openPage dedups concurrent/rapid opens of the SAME path (no duplicate tabs).
+      // (Own try/catch so a render hiccup here can't mislabel the offline tests.)
+      try {
+        const DP = 'zzdedup/A.json';
+        openPages.length = 0;
+        await Promise.all([openPage(DP), openPage(DP), openPage(DP)]);
+        ta('openPage dedups concurrent opens of same path', openPages.filter(t => t.path === DP).length, 1);
+        await openPage(DP); // re-opening an already-open page focuses the existing tab
+        ta('openPage re-open focuses existing tab', openPages.filter(t => t.path === DP).length, 1);
+        openPages.length = 0;
+      } catch (e2) {
+        fail++; const d2 = document.createElement('div'); d2.className = 'row fail';
+        d2.textContent = '✗ openPage dedup test threw: ' + (e2 && e2.message); out.appendChild(d2);
+      }
     } catch (e) {
       fail++;
       const d = document.createElement('div'); d.className = 'row fail';

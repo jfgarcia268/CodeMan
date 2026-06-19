@@ -112,6 +112,16 @@ function promptAuth() {
   return _authPrompt;
 }
 
+// Clear the stored shared-secret token (sign out). promptAuth re-prompts on the
+// next 401, so a stale token self-heals there — this is for explicit/shared-machine
+// sign-out and for recovering when you entered the wrong password without a 401 loop.
+function signOut() {
+  authToken = null;
+  try { localStorage.removeItem('codeman.authToken'); } catch (e) {}
+  toast('Signed out');
+  setTimeout(() => location.reload(), 300); // reload → next request 401s → re-prompt
+}
+
 // Network call to the PHP backend. Throws on network failure (used to detect
 // that the backend is unreachable so we can fall back to local persistence).
 // A 401 means the optional password gate is on: prompt once and retry.
@@ -138,7 +148,13 @@ async function apiFetch(action, body, query) {
     const entered = await promptAuth();
     if (entered) res = await doFetch();          // retry once with the new token
   }
-  if (res.status === 401) throw new Error('authentication required');
+  if (res.status === 401) {
+    // Still 401 after prompting → the entered secret was wrong (or none given).
+    // Don't persist a known-bad token; clearing it makes the next request cleanly
+    // re-prompt instead of replaying the wrong secret forever.
+    authToken = null; try { localStorage.removeItem('codeman.authToken'); } catch (e) {}
+    throw new Error('authentication required');
+  }
   if (res.status >= 500) throw new Error('backend error ' + res.status);
   // A reachable server that returns a 4xx (or a malformed body) is a *server
   // response*, not "offline" — surface it as an app error so we don't false-trip
@@ -146,8 +162,12 @@ async function apiFetch(action, body, query) {
   try {
     return await res.json();
   } catch (e) {
-    if (!res.ok) return { error: 'request failed (' + res.status + ')' };
-    throw e;
+    // We GOT a response, so the server is reachable — a body that won't parse is a
+    // server-side bug (e.g. a PHP notice/warning printed before the JSON), NOT a
+    // connectivity loss. Surface it as an app error rather than throwing, so api()
+    // doesn't false-trip the whole UI offline and a poisoned queued op can't latch
+    // offline forever (it drains as a failed op instead of re-tripping flushQueue).
+    return { error: 'malformed server response (' + res.status + ')' };
   }
 }
 

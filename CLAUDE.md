@@ -44,7 +44,8 @@ docs/images/      README screenshots (generated — see Local dev)
 | `api.php` | Filesystem API: tree, page CRUD, move, reorder, content/block search, metadata index, projects, trash, history, save-conflict detection, find & replace, tag rename, optional password gate. |
 | `vendor/prism/` | Vendored Prism (core + autoloader + grammars + theme) — **no CDN**, works offline. Grammars autoload on demand; an unviewed language won't highlight offline until first rendered. |
 | `vendor/markdown-it/` | Vendored **markdown-it** (v14, single UMD file) — **no CDN**, offline. Backs `renderMarkdown` for **note blocks** (full CommonMark + GFM). Loaded as a static `<script>` before the `src/*.js` modules so `window.markdownit` exists when `editor.js` builds its instance. See the markdown-it gotcha. |
-| `tests.html` | Standalone browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + offline trash/history reducers (snapshots/restores the real IndexedDB cache, safe to run). Open it in a browser; ~82 assertions. |
+| `tests.html` | Standalone **client** browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + `richToPlainText`/`convertBlock` + deep-search cap + offline trash/history reducers (snapshots/restores the real IndexedDB cache, safe to run). Open it in a browser; ~120 assertions, expect `0 failed`. |
+| `tests-api.sh` | Standalone **server** API tests (bash + curl, no deps). Spins a throwaway `php -S` against a temp `CODEMAN_DATA` dir and asserts api.php behavior the browser can't reach: path-traversal confinement, parent-dir guards, unicode `search_content`, same-second history retention, `empty_trash` history-prune + its traversal guard, and the password gate. `bash codeman/tests-api.sh` (exit 0 = green). |
 
 **No build step.** The `src/*.js` files are plain classic scripts sharing one global scope;
 the load order in `index.html` *is* the dependency order. Edit a file, reload the browser.
@@ -241,11 +242,21 @@ version from the tag (`v3.2.0` → `3.2.0`, and `sed` the same version into `cod
 the bundled shell — the version-sync step is `shell: bash` so `sed` works on the Windows runner's
 git-bash) → build → `softprops/action-gh-release` uploads the per-platform glob (`*.dmg` / `*.exe`)
 to the tag's Release (created once, files appended). Unsigned (`CSC_IDENTITY_AUTO_DISCOVERY=false`)
-— macOS needs the `xattr` clear, Windows shows a SmartScreen prompt. Release flow: bump **both**
-`codeman/version.js` (drives the web footer + SW cache for the git-synced web/NAS deployment) and
-`codeman-desktop/package.json`, commit, `git tag vX.Y.Z && git push origin vX.Y.Z`. (Heads-up: a
-repo's very first workflow, added in the same push as a tag, won't fire for that tag — re-push the
-tag once.)
+— macOS needs the `xattr` clear, Windows shows a SmartScreen prompt. Release flow: **(1)** promote
+`CHANGELOG.md`'s `## [Unreleased]` block to a dated `## [X.Y.Z]` heading (see **Release notes**
+below); **(2)** bump **both** `codeman/version.js` (drives the web footer + SW cache for the
+git-synced web/NAS deployment) and `codeman-desktop/package.json`; **(3)** commit, `git tag vX.Y.Z
+&& git push origin vX.Y.Z`. (Heads-up: a repo's very first workflow, added in the same push as a
+tag, won't fire for that tag — re-push the tag once.)
+
+**Release notes** live in `CHANGELOG.md` at the repo root in [Keep a Changelog](https://keepachangelog.com)
+format: keep an `## [Unreleased]` section and append to it (grouped `Added` / `Changed` / `Fixed` /
+`Security`) **as each change lands** — same "update in the same change" discipline as
+`docs/TEST_CASES.md`. At release, rename it to `## [X.Y.Z] — YYYY-MM-DD`; section headings track the
+`vX.Y.Z` semver tags. The **tag-triggered GitHub Release** (published by the workflow above) is the
+user-facing copy — paste that version's section into the Release body, or extend the workflow to
+extract it (`softprops/action-gh-release` `body_path`). Keep the changelog about **user-visible**
+changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md` the QA matrix.
 
 ---
 
@@ -253,7 +264,15 @@ tag once.)
 
 - Serve `codeman/` with any PHP host. Simplest: `cd codeman && php -S localhost:8090` (data falls
   back to `codeman/structures/`, which is gitignored).
-- Run `codeman/tests.html` in a browser for the unit tests.
+- **Testing.** Two automated suites: open `codeman/tests.html` in a browser (client units, expect
+  `0 failed`) and run `bash codeman/tests-api.sh` (server API, exit 0). The **full set of regression
+  test cases lives in [docs/TEST_CASES.md](docs/TEST_CASES.md)**, split into a **Core** tier (run every
+  regression) and an **Extended/release-gate** tier (cross-browser, packaged/Windows builds, CI,
+  real-device, perf-at-scale, desktop native dialogs — run on demand). **Full regression is run by the
+  [senior-qa-engineer](.claude/agents/senior-qa-engineer.md) agent** against that matrix; usability
+  passes by [ui-ux-reviewer](.claude/agents/ui-ux-reviewer.md). **When you add or change behavior,
+  update `docs/TEST_CASES.md` (and the suites) in the same change** — a fix without a case there is an
+  untested fix.
 - **README screenshots** live in `docs/images/` and are referenced by `README.md`. Regenerate
   them against a **throwaway generic dataset** — point `CODEMAN_DATA` at a temp dir, seed
   vendor-neutral demo pages, and serve that on a spare port; **never** screenshot real/private
@@ -467,6 +486,16 @@ tag once.)
   with line numbers on or off). A debounced `window`/`visualViewport` resize listener re-fits open
   editors; the dragged height + autosize state reset on Save/Cancel. Don't reintroduce a CSS-only code
   cap — the gutter-independence requires the JS height.
+- **Deep (content) search renders a capped result set.** `runDeepSearch` (ui.js) keeps the full
+  match count in `deepMatchTotal` but slices `deepMatches` to `DEEP_MATCH_CAP` (200, tree.js) — a
+  broad term on a large library would otherwise paint thousands of sidebar rows synchronously (~1.5s
+  at 1200 pages). `updateSearchCapNote` (tree.js, called from `renderTree`) shows the
+  `#searchCapNote` "Showing first N of M — refine your search" banner when capped, hidden otherwise.
+  It's a render cap, not a server cap (search_content still scans everything) — don't remove it.
+- **`openPage` dedups concurrent/rapid opens.** It's async (awaits `get_page`), so a rapid
+  double-click or N calls in one tick would each pass the "already open?" check before any push and
+  create duplicate tabs. An in-flight `_openingPages` Map (editor.js) makes concurrent opens of the
+  same path reuse one fetch/tab. Don't drop it.
 
 ---
 
@@ -486,7 +515,10 @@ content. **Desktop wrapper:** `settings.json` in the OS user-data dir holds the 
 
 - `safeName()` rejects path separators, `..`, and leading `.` for all create/rename names;
   `safePath` confines file access to the data root. `requireFields()` returns clean `{error}`
-  JSON instead of leaking PHP warnings.
+  JSON instead of leaking PHP warnings. **`empty_trash` runs the stored (raw, client-supplied)
+  `origPath` through `safePath($historyDir, …)` before `rrmdir`-ing the history subtree** — without
+  it a `../`-bearing `origPath` could escape `.history`. Any new path built from a stored/echoed
+  value must be `safePath`'d the same way.
 - **Projects nest only in projects:** `create_project` and `move` reject placing a `.project`
   folder anywhere except the root or inside another project (a parent with its own `.project`
   marker) — also guarded client-side via `isValidProjectParent`.
@@ -494,7 +526,11 @@ content. **Desktop wrapper:** `settings.json` in the OS user-data dir holds the 
   requires it on every request via `hash_equals` (`X-CodeMan-Auth` header or `?token=`). **Off by
   default** (open, trusted-LAN assumption). The client prompts once on a 401, stores the token,
   retries. Page data lives outside the web root and is only reachable through `api.php`, so gating
-  the API protects the data; serve over HTTPS if exposed beyond a trusted network.
+  the API protects the data; serve over HTTPS if exposed beyond a trusted network. **A wrong secret
+  is NOT persisted** — if the retry after the prompt still 401s, `apiFetch` clears the bad token so
+  the next request cleanly re-prompts; a 401 is treated as a server response, never "offline". A
+  **`signOut()`** (the *Forget password* item in the sidebar `⋯` menu, `openMoreMenu`, shown only
+  when `authToken` is set) clears the stored token + reloads.
 
 ---
 

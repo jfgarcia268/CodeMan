@@ -92,6 +92,10 @@ let syncQueue = [];
   try { await migrateLegacy(); } catch (e) {}
   try { syncQueue = (await kvGet('queue')) || []; } catch (e) {}
   updateOfflineBadge();
+  // A queue can survive a reload (writes parked offline, a switched server, a
+  // dropped beacon). setOffline/probeBackend only flush on a state TRANSITION, so
+  // on a cold boot that starts online nothing would ever replay it — flush here.
+  if (!offlineState && syncQueue.length) flushQueue();
 })();
 // Hooks the desktop wrapper calls (main.js) to drive safe server/mode switching.
 if (typeof window !== 'undefined') {

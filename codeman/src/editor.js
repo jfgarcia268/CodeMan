@@ -48,16 +48,29 @@ function nameFromPath(path) {
   return base.replace(/\.json$/, '');
 }
 
+const _openingPages = new Map(); // path → in-flight open Promise — dedups concurrent opens
 async function openPage(path) {
   flushSave();
   let tab = openPages.find(t => t.path === path);
   if (!tab) {
-    const data = await api('get_page', undefined, 'path=' + encodeURIComponent(path));
-    if (!data.sections) data.sections = [];
-    const baseMtime = data._mtime != null ? data._mtime : null;
-    delete data._mtime;
-    tab = { path, title: data.title || nameFromPath(path), data, filter: '', baseMtime };
-    openPages.push(tab);
+    // openPage is async: a rapid double-click (or N calls in one tick) would each pass
+    // the find() above before any push, then push duplicate tabs that race on save.
+    // Track the in-flight fetch per path so concurrent opens reuse the same tab.
+    if (_openingPages.has(path)) {
+      tab = await _openingPages.get(path);
+    } else {
+      const p = (async () => {
+        const data = await api('get_page', undefined, 'path=' + encodeURIComponent(path));
+        if (!data.sections) data.sections = [];
+        const baseMtime = data._mtime != null ? data._mtime : null;
+        delete data._mtime;
+        let t = openPages.find(x => x.path === path); // re-check after the await
+        if (!t) { t = { path, title: data.title || nameFromPath(path), data, filter: '', baseMtime }; openPages.push(t); }
+        return t;
+      })();
+      _openingPages.set(path, p);
+      try { tab = await p; } finally { _openingPages.delete(path); }
+    }
   }
   activateTab(tab);
   expandAncestors(path);
@@ -317,7 +330,7 @@ function renderPageBody() {
     const h = document.createElement('div'); h.className = 'onboard-title'; h.textContent = 'No page open';
     const sub = document.createElement('div'); sub.className = 'onboard-sub'; sub.textContent = 'Create your first snippet page, or pick one from the sidebar.';
     const actions = document.createElement('div'); actions.className = 'onboard-actions';
-    actions.append(mk('+ New Project', '', () => createProjectHere()), mk('+ New Page', '', () => createPageHere()));
+    actions.append(mk('+ New Project', 'btn-project', () => createProjectHere()), mk('+ New Page', 'btn-page', () => createPageHere()));
     if (document.body.classList.contains('sidebar-hidden')) {
       actions.appendChild(mk('☰ Open the sidebar', 'secondary', () => setSidebarHidden(false)));
     }
@@ -737,10 +750,23 @@ function newBlockOfKind(kind) {
   if (kind === 'checklist') return newChecklistBlock();
   return newBlock();
 }
+// HTML → plain text preserving line breaks. Done by mapping block-close tags and
+// <br> to newlines on the markup string (NOT via a detached node's innerText —
+// detached nodes have no layout, so innerText collapses every block boundary and
+// the conversion silently loses all line breaks).
+function richToPlainText(html) {
+  let s = String(html || '');
+  s = s.replace(/<\s*br\s*\/?>/gi, '\n');
+  s = s.replace(/<\/(p|div|li|h[1-6]|blockquote|pre|tr|ul|ol)\s*>/gi, '\n');
+  s = s.replace(/<[^>]+>/g, '');                 // strip remaining tags
+  const ta = document.createElement('textarea'); // decode entities (&amp; &lt; …)
+  ta.innerHTML = s;
+  return ta.value.replace(/\n{3,}/g, '\n\n').replace(/[ \t]+\n/g, '\n').replace(/\s+$/, '');
+}
 // Plain-text view of any block, for lossless-ish conversion between kinds.
 function blockPlainText(block) {
   if (block.checklist) return (block.items || []).map(i => '- [' + (i.done ? 'x' : ' ') + '] ' + i.text).join('\n');
-  if (block.rich) { const d = document.createElement('div'); d.innerHTML = block.code || ''; return d.innerText || ''; }
+  if (block.rich) return richToPlainText(block.code);
   return block.code || '';
 }
 // Parse plain text / markdown task lines into checklist items.
@@ -2338,7 +2364,7 @@ async function savePage() {
 async function handleSaveConflict(path, diskMtime) {
   const tab = openPages.find(t => t.path === path);
   const overwrite = await showConfirm(
-    'This page changed elsewhere since you opened it. Overwrite the version on disk with your changes? (Cancel keeps your edits but reloads the disk version.)',
+    'This page changed elsewhere since you opened it. Overwrite the version on disk with your changes? (Cancel discards your unsaved changes and loads the version from disk.)',
     { okLabel: 'Overwrite', danger: true }
   );
   if (overwrite) {
