@@ -87,6 +87,10 @@
     Prism.plugins.autoloader.languages_path = 'vendor/prism/components/';
   }
 </script>
+<!-- Vendored markdown-it (offline, no CDN) — full CommonMark + GFM for note
+     blocks. Loaded before the app modules so window.markdownit exists when
+     editor.js builds its renderer instance. -->
+<script src="vendor/markdown-it/markdown-it.min.js"></script>
 <!-- App, split into ordered modules. Classic scripts share one global scope, so
      load order is the dependency order (concatenation = the old single app.js).
      Loaded dynamically with a cache-busting query so edits NEVER serve stale JS

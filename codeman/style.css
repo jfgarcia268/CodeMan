@@ -1192,6 +1192,19 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
    from the textarea; the colors from .code-view underneath. They must share font,
    size, line-height, padding and white-space so the caret lands on the right glyph. */
 .code-stack { position: relative; flex: 1; min-width: 0; }
+/* While editing a CODE block, bound the editor to a fraction of the viewport with a
+   manual resize handle. The TRANSPARENT TEXTAREA is the single scroller: while editing,
+   .code-view is also pulled to position:absolute;inset:0 (see below) so BOTH the colored
+   layer and the textarea fill the stack box, and the gutter + stack are stretched to the
+   code-wrap height (align-items:stretch). The textarea (overflow:auto) does the real
+   scrolling — wheeling anywhere over the code scrolls it — and syncScroll mirrors its
+   scrollTop onto the colored layer AND the gutter so all three stay locked + aligned.
+   code-wrap itself never overflows (its children are stretched to its height), so
+   overflow:auto here shows no scrollbar but still enables the resize grip. The dragged
+   inline height is cleared on leaving edit (save/cancel). Notes size their own textarea. */
+.block:not(.note):not(.viewing) .code-wrap {
+  max-height: 60vh; overflow: auto; resize: vertical;
+}
 .code-edit, .code-view {
   margin: 0;
   min-height: 0;            /* fit content — a 1-line block isn't padded to 80px */
@@ -1242,6 +1255,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .line-gutter {
   display: none;
   flex-shrink: 0;
+  overflow: hidden;        /* clipped to the editor height; scrolled in lockstep via syncScroll */
   text-align: right;
   padding: 10px 0;        /* vertical only; horizontal padding lives on .ln so the
                              active highlight can span the full gutter width */
@@ -1261,7 +1275,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 /* editing: slate surface + gutter matching the reference screenshot. The textarea
    is transparent, so the tint goes on the colored layer underneath; the gutter
    shares the same background (seamless) with lighter numbers. */
-.block:not(.viewing) .code-view { background: #303841; }
+/* While editing, the colored layer overlays the stack (inset:0) so it's bounded to the
+   editor height and scrolls in lockstep with the textarea (syncScroll sets its scrollTop).
+   In view mode it stays static and sizes the stack (full code, page scrolls). */
+.block:not(.viewing) .code-view { background: #303841; position: absolute; inset: 0; }
 /* The colored layer sizes the stack from the Prism <pre>, but a <pre> collapses
    its final trailing newline (and an empty block renders no line at all) — so a
    line-numbered block can leave the last gutter row without a matching
@@ -1269,7 +1286,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
    the stack itself so every gutter row has matching fill: the code background in
    view mode, the slate edit surface while editing. Only matters with a gutter. */
 .block.show-lines .code-stack { background: var(--bg); }
-.block.show-lines:not(.viewing) .code-stack { background: #303841; }
+/* slate edit surface — NOT gated on .show-lines, so the editor background stays
+   consistent whether or not line numbers are on (the editor height is JS-driven, so
+   it no longer relies on the gutter being present). */
+.block:not(.viewing) .code-stack { background: #303841; }
 .block:not(.viewing) .line-gutter { background: #303841; color: #848b95; }
 .line-toggle.on { background: var(--accent); color: #fff; }
 .note-toggle.on { background: #7a5cc0; color: #fff; }
@@ -1284,7 +1304,13 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   position: relative;
   inset: auto;
   width: 100%;
-  min-height: 90px;
+  /* Auto-grows to content via JS (autosizeNote); this is just the small starting
+     floor + the screen cap. resize:vertical gives a manual drag handle (the JS
+     respects a dragged floor). Beyond the cap it scrolls. */
+  min-height: 58px;          /* ~3 lines, not a fixed 90px box */
+  max-height: 60vh;
+  resize: vertical;
+  overflow-y: auto;
   color: var(--text);
   caret-color: var(--accent);
   background: var(--bg);
@@ -1304,27 +1330,45 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   font-size: 13.5px;        /* readable prose size — base .code-view is 13px mono */
   overflow: visible;
 }
-.md-h { margin: 12px 0 6px; line-height: 1.3; color: #fff; }
-h1.md-h { font-size: 20px; } h2.md-h { font-size: 17px; } h3.md-h { font-size: 15px; }
-h4.md-h, h5.md-h, h6.md-h { font-size: 13px; }
-.code-view > p { margin: 8px 0; }
-.code-view .md-list { margin: 8px 0; padding-left: 22px; }
-.code-view .md-list li { margin: 3px 0; }
-.md-quote {
+/* markdown-it emits plain tags (no .md-* classes), so all note-markdown styling is
+   scoped to .block.note .code-view — code-block views share .code-view and must
+   stay untouched. */
+.block.note .code-view :is(h1,h2,h3,h4,h5,h6) { margin: 12px 0 6px; line-height: 1.3; color: #fff; }
+.block.note .code-view h1 { font-size: 20px; }
+.block.note .code-view h2 { font-size: 17px; }
+.block.note .code-view h3 { font-size: 15px; }
+.block.note .code-view :is(h4,h5,h6) { font-size: 13px; }
+.block.note .code-view p { margin: 8px 0; }
+.block.note .code-view ul, .block.note .code-view ol { margin: 8px 0; padding-left: 22px; }
+.block.note .code-view li { margin: 3px 0; }
+.block.note .code-view li > ul, .block.note .code-view li > ol { margin: 3px 0; }   /* nested lists */
+.block.note .code-view li.md-task { list-style: none; margin-left: -22px; padding-left: 22px; }
+.block.note .code-view li.md-task input[type="checkbox"] { margin: 0 7px 0 0; vertical-align: middle; }
+.block.note .code-view blockquote {
   margin: 8px 0; padding: 4px 12px;
   border-left: 3px solid var(--accent); color: var(--text-dim); background: var(--bg);
   border-radius: 0 4px 4px 0;
 }
-.md-hr { border: 0; border-top: 1px solid var(--border-2); margin: 12px 0; }
-.code-view p code, .code-view li code, .md-quote code {
+.block.note .code-view hr { border: 0; border-top: 1px solid var(--border-2); margin: 12px 0; }
+.block.note .code-view :is(del, s) { color: var(--text-dim); }
+.block.note .code-view img { max-width: 100%; height: auto; border-radius: 4px; margin: 4px 0; }
+.block.note .code-view :is(p,li,blockquote,td,th) code {
   background: var(--bg); padding: 1px 5px; border-radius: 3px;
   font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12px; color: #e0a060;
 }
-pre.md-code {
+.block.note .code-view pre {
   background: var(--bg); border: 1px solid var(--border); border-radius: 5px;
   padding: 10px 12px; margin: 8px 0; overflow-x: auto;
   font-size: 12.5px; line-height: 1.45;
 }
+.block.note .code-view table {
+  border-collapse: collapse; margin: 10px 0; display: block; max-width: 100%;
+  overflow-x: auto; font-size: 13px;
+}
+.block.note .code-view th, .block.note .code-view td {
+  border: 1px solid var(--border-2); padding: 5px 10px;
+}
+.block.note .code-view th { background: var(--surface, #2d2d30); font-weight: 600; color: #fff; }
 .code-view a { color: #4ea0e0; text-decoration: none; }
 .code-view a:hover { text-decoration: underline; }
 /* cross-page [[wiki-links]] */
@@ -1366,6 +1410,10 @@ pre.md-code {
 }
 .block.rich:not(.viewing) .rich-surface {
   background: #303841; border: 1px solid #3a414b;     /* editing surface, matches code editor */
+  /* contentEditable grows to content on its own; cap it to a fraction of the
+     viewport (scroll past) and allow a manual drag handle. resize needs a
+     non-visible overflow, hence overflow:auto. View mode keeps overflow:visible. */
+  max-height: 60vh; overflow: auto; resize: vertical;
 }
 .block.rich .rich-surface ul { list-style: disc; padding-left: 24px; margin: 6px 0; }
 .block.rich .rich-surface ol { list-style: decimal; padding-left: 24px; margin: 6px 0; }
@@ -1941,6 +1989,12 @@ pre.md-code {
   /* --- 16px inputs so iOS Safari doesn't zoom on focus --- */
   .sidebar-search input, .page-search input, .modal-input, .cmdk-input,
   .todo-text, .section-title, .block-label, .pending-input { font-size: 16px; }
+
+  /* --- editor max-height: smaller on phones, dynamic-viewport so it tracks the
+     browser chrome / on-screen keyboard (dvh); 50vh fallback for old engines --- */
+  .block:not(.note):not(.viewing) .code-wrap,
+  body.is-mobile .block.note .code-edit,
+  body.is-mobile .block.rich:not(.viewing) .rich-surface { max-height: 50vh; max-height: 50dvh; }
 
   /* --- header create group + tools: bigger tap targets --- */
   .sidebar-create button { font-size: 13px; padding: 8px 4px; }

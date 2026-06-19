@@ -1,0 +1,4 @@
+markdown-it 14.1.0
+https://github.com/markdown-it/markdown-it
+Vendored from https://cdn.jsdelivr.net/npm/markdown-it@14.1.0/dist/markdown-it.min.js
+MIT license. Offline, no runtime CDN — bump by re-fetching this URL.

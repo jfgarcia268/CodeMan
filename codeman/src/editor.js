@@ -1317,78 +1317,68 @@ function escapeHtml(s) {
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-// Inline markdown: code spans, [[wiki-links]], [text](url), **bold**, *italic*,
-// `code`. Operates on an already HTML-escaped string. Code spans are extracted
-// first (placeholdered) so their contents aren't touched by other rules.
-function renderInlineMd(text) {
-  const codes = [];
-  let s = text.replace(/`([^`]+)`/g, (_, c) => { codes.push(c); return ' ' + (codes.length - 1) + ' '; });
-  // [[wiki-link]] → resolved internal link (or a dim "broken" span)
-  s = s.replace(/\[\[([^\]]+?)\]\]/g, (_, t) => {
-    const target = t.trim();
+// Full CommonMark + GFM for note blocks, via the vendored markdown-it (tables,
+// strikethrough, emphasis, images, nested lists, autolinks, task lists). It's
+// configured with html:false so raw HTML in note source is escaped — the same
+// escape-first posture the old hand-rolled renderer had. Three local rules layer
+// CodeMan behavior on top: [[wiki-links]], GFM task-list checkboxes, and
+// target/rel on external links. `renderMarkdown`/`renderInlineMd` keep their old
+// names + signatures so every caller (the in-app note view + the HTML export) is
+// untouched. markdown-it.min.js is loaded as a vendored <script> before this file.
+const MD = window.markdownit({ html: false, linkify: true, breaks: true, typographer: false });
+
+// [[wiki-link]] -> resolved internal link, or a dim "broken" span. Emitted as an
+// html_inline token (rendered verbatim even under html:false) with the exact same
+// markup the old renderer produced, so the note view's click wiring still matches.
+MD.inline.ruler.before('link', 'wikilink', (state, silent) => {
+  const src = state.src, start = state.pos;
+  if (src.charCodeAt(start) !== 0x5B /* [ */ || src.charCodeAt(start + 1) !== 0x5B) return false;
+  const close = src.indexOf(']]', start + 2);
+  if (close < 0) return false;
+  const target = src.slice(start + 2, close).trim();
+  if (!target) return false;
+  if (!silent) {
     const r = resolvePageLink(target);
     const label = escapeHtml(target);
-    return r.found
+    const token = state.push('html_inline', '', 0);
+    token.content = r.found
       ? '<a class="xlink" data-xtarget="' + escapeHtml(target) + '" title="Open page">' + label + '</a>'
       : '<span class="xlink broken" title="No matching page">' + label + '</span>';
-  });
-  // [text](url) → external link (http/https/mailto only, to avoid javascript:)
-  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, txt, url) => {
-    if (!/^(https?:|mailto:)/i.test(url)) return txt;
-    return '<a href="' + escapeHtml(url) + '" target="_blank" rel="noopener noreferrer">' + txt + '</a>';
-  });
-  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
-  s = s.replace(/ (\d+) /g, (_, i) => '<code>' + escapeHtml(codes[+i]) + '</code>');
-  return s;
-}
-
-// Minimal, safe Markdown → HTML for note blocks. Line-based block parser:
-// fenced code, ATX headings, unordered/ordered lists, blockquotes, hr, and
-// paragraphs; inline handled by renderInlineMd. Input is escaped first so no
-// raw HTML is injected.
-function renderMarkdown(src) {
-  const lines = String(src || '').replace(/\r\n?/g, '\n').split('\n');
-  const out = [];
-  let i = 0, para = [], listType = null;
-  const flushPara = () => { if (para.length) { out.push('<p>' + renderInlineMd(escapeHtml(para.join('\n')).replace(/\n/g, '<br>')) + '</p>'); para = []; } };
-  const closeList = () => { if (listType) { out.push(listType === 'ul' ? '</ul>' : '</ol>'); listType = null; } };
-  while (i < lines.length) {
-    const line = lines[i];
-    // fenced code block ```lang
-    const fence = line.match(/^```(.*)$/);
-    if (fence) {
-      flushPara(); closeList();
-      const lang = fence[1].trim();
-      const buf = []; i++;
-      while (i < lines.length && !/^```/.test(lines[i])) { buf.push(lines[i]); i++; }
-      i++; // skip closing fence
-      const cls = lang ? ' class="language-' + escapeHtml(langPrism(lang)) + '"' : '';
-      out.push('<pre class="md-code"><code' + cls + '>' + escapeHtml(buf.join('\n')) + '</code></pre>');
-      continue;
-    }
-    const heading = line.match(/^(#{1,6})\s+(.*)$/);
-    if (heading) { flushPara(); closeList(); const n = heading[1].length; out.push('<h' + n + ' class="md-h">' + renderInlineMd(escapeHtml(heading[2])) + '</h' + n + '>'); i++; continue; }
-    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) { flushPara(); closeList(); out.push('<hr class="md-hr">'); i++; continue; }
-    const ul = line.match(/^\s*[-*+]\s+(.*)$/);
-    const ol = line.match(/^\s*\d+[.)]\s+(.*)$/);
-    if (ul || ol) {
-      flushPara();
-      const want = ul ? 'ul' : 'ol';
-      if (listType && listType !== want) closeList();
-      if (!listType) { out.push(want === 'ul' ? '<ul class="md-list">' : '<ol class="md-list">'); listType = want; }
-      out.push('<li>' + renderInlineMd(escapeHtml((ul || ol)[1])) + '</li>');
-      i++; continue;
-    }
-    const quote = line.match(/^\s*>\s?(.*)$/);
-    if (quote) { flushPara(); closeList(); out.push('<blockquote class="md-quote">' + renderInlineMd(escapeHtml(quote[1])) + '</blockquote>'); i++; continue; }
-    if (line.trim() === '') { flushPara(); closeList(); i++; continue; }
-    closeList();
-    para.push(line); i++;
   }
-  flushPara(); closeList();
-  return out.join('\n');
-}
+  state.pos = close + 2;
+  return true;
+});
+
+// GFM task lists: a list item whose text starts with "[ ]" / "[x]" becomes a
+// disabled checkbox (read-only in the rendered note; editing the text re-renders).
+MD.core.ruler.after('inline', 'task-lists', (state) => {
+  const tokens = state.tokens;
+  for (let i = 2; i < tokens.length; i++) {
+    if (tokens[i].type !== 'inline' || tokens[i - 1].type !== 'paragraph_open'
+        || tokens[i - 2].type !== 'list_item_open') continue;
+    const first = tokens[i].children && tokens[i].children[0];
+    if (!first || first.type !== 'text') continue;
+    const m = /^\[([ xX])\]\s+/.exec(first.content);
+    if (!m) continue;
+    first.content = first.content.slice(m[0].length);
+    const box = new state.Token('html_inline', '', 0);
+    box.content = '<input type="checkbox" disabled' + (m[1] === ' ' ? '' : ' checked') + '> ';
+    tokens[i].children.unshift(box);
+    tokens[i - 2].attrJoin('class', 'md-task');
+  }
+});
+
+// External links open in a new tab; leave internal .xlink wiki anchors (no href) alone.
+const baseLinkOpen = MD.renderer.rules.link_open
+  || ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options));
+MD.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+  const href = tokens[idx].attrGet('href') || '';
+  if (/^https?:/i.test(href)) { tokens[idx].attrSet('target', '_blank'); tokens[idx].attrSet('rel', 'noopener noreferrer'); }
+  return baseLinkOpen(tokens, idx, options, env, self);
+};
+
+function renderMarkdown(src) { return MD.render(String(src || '')); }
+function renderInlineMd(text) { return MD.renderInline(String(text || '')); }
 
 // sectionVarValues: when the parent section owns the variables, its values object
 // is passed in. The block then substitutes with it (no own toggle/panel) — the
@@ -1824,6 +1814,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     updatePreview();   // show the raw template (with markers) while editing
     refreshRevertLabel();
     textarea.focus();
+    if (block.note) autosizeNote(); else autosizeCode();   // fit the editor to its content on edit-enter
   }
   const editBtn = mkBtn('Edit', enterEdit);
   editBtn.className = 'secondary block-edit';
@@ -1832,6 +1823,8 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
   const saveBtn = mkBtn('Save', () => {
     blockBackups.delete(block); // commit: end the edit session
     el.classList.add('viewing');
+    if (block.note) { userMin = 0; textarea.style.height = ''; }  // reset note autosize for next edit
+    else { codeWrap.style.height = ''; userCodeH = 0; }   // drop any manual code-editor resize on exit
     updateActiveLine();         // clear the caret-line highlight (now viewing)
     renderVarsPanel();          // refresh block-level var fields for added/removed _V_…_V_
     refreshSectionVars();       // …and the section variables panel, if section-owned
@@ -1860,6 +1853,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
       block.code = backup;
       textarea.value = backup;
       el.classList.remove('viewing');
+      if (block.note) autosizeNote();   // re-fit to the reverted content
       updateGutter();
       renderVarsPanel();          // code reverted → refresh var fields
       refreshSectionVars();
@@ -1872,6 +1866,8 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
       // cancel: just leave edit mode
       blockBackups.delete(block);
       el.classList.add('viewing');
+      if (block.note) { userMin = 0; textarea.style.height = ''; }  // reset note autosize
+      else { codeWrap.style.height = ''; userCodeH = 0; }   // drop any manual code-editor resize on exit
       renderVarsPanel();
       updatePreview();
     }
@@ -2116,18 +2112,67 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
   // The textarea is transparent and overlays the colored layer; keep the layer
   // scrolled in lockstep so the visible colors track the caret.
   function syncScroll() {
+    // The textarea is the single scroller; keep the colored layer AND the line-number
+    // gutter locked to it (both are bounded + overflow:hidden while editing) so all three
+    // layers move together and stay aligned when the editor is capped/resized.
     view.scrollTop = textarea.scrollTop;
     view.scrollLeft = textarea.scrollLeft;
+    gutter.scrollTop = textarea.scrollTop;
   }
   textarea.addEventListener('input', () => {
     block.code = textarea.value;
     updateGutter();
     updatePreview();   // re-highlight the layer live so colors follow your typing
     syncScroll();
+    if (block.note) autosizeNote(); else autosizeCode();   // re-fit as you type (both capped)
     refreshRevertLabel();
     scheduleSave();
   });
   textarea.addEventListener('scroll', syncScroll);
+
+  // ----- Note auto-grow ---------------------------------------------------------
+  // Code/rich editors grow on their own (the Prism view sizes the code stack;
+  // contentEditable expands) and are capped purely in CSS. A <textarea> does NOT
+  // grow to its content, so notes size here: set height to the content height,
+  // which CSS `max-height` caps (then it scrolls). A manual drag of the
+  // `resize:vertical` handle records a floor (`userMin`) the autosizer respects, so
+  // typing still grows past a drag but the dragged size isn't lost. Reset on leaving
+  // edit (Save/Cancel) so the next session re-fits.
+  let userMin = 0, lastAutoH = 0;
+  function autosizeNote() {
+    if (!block.note) return;
+    textarea.style.height = 'auto';
+    lastAutoH = Math.max(textarea.scrollHeight, userMin);
+    textarea.style.height = lastAutoH + 'px';
+  }
+  textarea._autosize = autosizeNote;   // let the global resize listener re-fit open notes
+  textarea.addEventListener('mouseup', () => {   // end of a manual resize-handle drag
+    if (block.note && textarea.offsetHeight > lastAutoH + 2) userMin = textarea.offsetHeight;
+  });
+
+  // ----- Code editor sizing (JS-driven, so it NEVER depends on the gutter) ----------
+  // The editor height = content height (line count), clamped to a fraction of the
+  // viewport — OR a height the user dragged via the resize handle. We set it on
+  // .code-wrap; align-items:stretch propagates it to the gutter + stack, and the
+  // inset:0 .code-view / .code-edit fill it. The textarea (overflow:auto) is the real
+  // scroller (so the wheel scrolls anywhere over the code), with the colored layer and
+  // gutter synced via syncScroll. Driving the height here (not from the gutter's
+  // in-flow line-number rows) keeps it correct whether line numbers are on or off.
+  let userCodeH = 0, lastCodeH = 0;
+  function autosizeCode() {
+    if (block.note) return;
+    const lines = (textarea.value || '').split('\n').length || 1;
+    const oneLine = edLineH + 2 * ED_PAD;
+    const contentH = lines * edLineH + 2 * ED_PAD;
+    const cap = editorCapPx();
+    const h = userCodeH ? Math.min(userCodeH, cap) : Math.min(contentH, cap);
+    lastCodeH = Math.max(h, oneLine);
+    codeWrap.style.height = lastCodeH + 'px';
+  }
+  codeWrap._autosize = autosizeCode;   // global resize listener re-fits open code editors
+  codeWrap.addEventListener('mouseup', () => {   // end of a manual resize-handle drag
+    if (!block.note && Math.abs(codeWrap.offsetHeight - lastCodeH) > 2) userCodeH = codeWrap.offsetHeight;
+  });
   // keep the active-line highlight in step with the caret
   ['keyup', 'click', 'focus', 'select'].forEach(ev => textarea.addEventListener(ev, updateActiveLine));
   // Sticky editing: clicking away from the block no longer exits edit mode — the
@@ -2178,7 +2223,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
       const showVars = varsActive() && el.classList.contains('viewing');
       const md = showVars ? substituteVars(block.code, varValuesNow()) : (block.code || '');
       view.innerHTML = renderMarkdown(md);
-      view.querySelectorAll('pre.md-code code[class*="language-"]').forEach(c => Prism.highlightElement(c));
+      view.querySelectorAll('pre code[class*="language-"]').forEach(c => Prism.highlightElement(c));
       wireNoteLinks();
       return;
     }
@@ -2217,8 +2262,35 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
   stack.append(view, textarea);
   codeWrap.append(gutter, stack);
   el.append(toolbar, varsPanel, codeWrap);
+  // If this block re-rendered while mid-edit (a backup exists → not 'viewing'),
+  // fit the editor once it's in the DOM (scrollHeight is 0 until attached).
+  if (!el.classList.contains('viewing')) requestAnimationFrame(() => { if (block.note) autosizeNote(); else autosizeCode(); });
   return el;
 }
+
+// Viewport-relative editor cap in pixels (matches the CSS 60vh desktop / 50dvh mobile).
+// Used by the JS code-editor sizer so its content-fit clamp tracks the live viewport.
+function editorCapPx() {
+  const vh = (window.visualViewport && window.visualViewport.height) || window.innerHeight;
+  return Math.round(vh * (document.body.classList.contains('is-mobile') ? 0.5 : 0.6));
+}
+
+// Re-fit any editor that's currently in edit mode when the viewport changes (window
+// resize, desktop-app window resize, mobile rotate / keyboard). Debounced; bound once.
+(function () {
+  let t;
+  const refit = () => {
+    clearTimeout(t);
+    t = setTimeout(() => {
+      document.querySelectorAll('.block.note:not(.viewing) .code-edit')
+        .forEach(ta => { if (ta._autosize) ta._autosize(); });
+      document.querySelectorAll('.block:not(.note):not(.viewing) .code-wrap')
+        .forEach(cw => { if (cw._autosize) cw._autosize(); });
+    }, 120);
+  };
+  window.addEventListener('resize', refit);
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', refit);
+})();
 
 /* ---------- SAVE ---------- */
 

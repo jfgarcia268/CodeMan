@@ -39,6 +39,8 @@
     return { ok:true };
   }});
 </script>
+<!-- Real markdown-it (note-block renderer) — must load before editor.js builds its instance -->
+<script src="vendor/markdown-it/markdown-it.min.js"></script>
 <script src="src/core.js"></script>
 <script src="src/tree.js"></script>
 <script src="src/editor.js"></script>
@@ -178,6 +180,20 @@
   t('md fenced code carries lang class', renderMarkdown('```sql\nSELECT 1\n```').includes('language-sql'), true);
   t('md escapes raw html', renderMarkdown('<b>x</b>').includes('&lt;b&gt;'), true);
   t('md broken wikilink → dim span', renderInlineMd('see [[NoSuchPage]]').includes('xlink broken'), true);
+  // full CommonMark + GFM (via vendored markdown-it)
+  t('md renders GFM table', /<table[\s\S]*<th[\s\S]*<td/.test(renderMarkdown('| a | b |\n| :--- | ---: |\n| 1 | 2 |')), true);
+  t('md table alignment', renderMarkdown('| a |\n| :-: |\n| 1 |').includes('text-align:center'), true);
+  t('md lone pipe line stays paragraph', renderMarkdown('| not | a table |').includes('<table'), false);
+  t('md strikethrough', renderInlineMd('~~gone~~').includes('<s>gone</s>'), true);
+  t('md underscore italic', renderInlineMd('an _em_ word').includes('<em>em</em>'), true);
+  t('md intra-word underscore stays literal', renderInlineMd('my_var_name').includes('<em>'), false);
+  t('md underscore strong', renderInlineMd('__bold__').includes('<strong>bold</strong>'), true);
+  t('md autolinks bare url', renderInlineMd('see https://example.com here').includes('<a href="https://example.com"'), true);
+  t('md renders image', renderInlineMd('![alt](https://x.test/i.png)').includes('<img'), true);
+  t('md task list checked', /<input type="checkbox"[^>]*checked/.test(renderMarkdown('- [x] done')), true);
+  t('md task list unchecked', renderMarkdown('- [ ] todo').includes('<input type="checkbox" disabled>'), true);
+  t('md nested list', /<li>a[\s\S]*<ul>[\s\S]*<li>b/.test(renderMarkdown('- a\n  - b')), true);
+  t('md external link gets target', renderInlineMd('[x](https://example.com)').includes('target="_blank"'), true);
 
   // resolvePageLink (cross-page links) against a stub tree
   (function () {
