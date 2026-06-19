@@ -1,8 +1,9 @@
 # macOS
 .DS_Store
 
-# Claude Code local tooling (preview launch config, local settings) — not project code
-.claude/
+# Claude Code: track shared agents + skills (project tooling), ignore machine-local config.
+.claude/settings.local.json
+.claude/launch.json
 
 # Local-only private context (deployment specifics, data provenance) — auto-loaded
 # by Claude Code, never committed. Keep private notes here, not in CLAUDE.md.

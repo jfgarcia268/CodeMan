@@ -52,7 +52,10 @@ function saveMillerColScroll() {
 }
 function millerEffCount() { return MILLER_COLS; }
 let deepSearch = localStorage.getItem('codeman.deepSearch') === '1'; // search inside page content
-let deepMatches = new Set();  // page paths whose content matched (deep search)
+let deepMatches = new Set();  // page paths whose content matched (deep search), capped for render
+const DEEP_MATCH_CAP = 200;   // render at most this many content matches — a term matching most of
+                              // a large library would otherwise paint thousands of rows (~1.5s jank)
+let deepMatchTotal = 0;       // total content matches before the cap, for the "refine your search" note
 
 // Returns a pruned copy of the tree containing only pages whose name matches
 // the query, plus the folders needed to reach them.
@@ -429,10 +432,10 @@ function renderMillerColumn(parentPath, depth, isLast) {
     col.appendChild(card);
   };
   const addPage = p => {
-    const node = renderTreeNode(p);                // rich page card
-    const row = node.querySelector('.tree-row');
-    if (row) attachColumnReorder(row, p, parentPath, false);
-    col.appendChild(node);
+    // renderTreeNode already wires the page row's drag/drop (attachColumnReorder at
+    // its end). Re-wiring here added a SECOND drop handler whose clearDndOn nulled
+    // dndZone before the first read it → "before" drops silently landed "after".
+    col.appendChild(renderTreeNode(p));            // rich page card (drag wired inside)
   };
 
   if (pref && pref.field) {
@@ -594,7 +597,9 @@ function renderMillerFolderCard(node, depth, selected) {
 
   const icon = document.createElement('span'); icon.className = 'sf-icon'; icon.textContent = node.project ? '\u{1F4E6}' : '\u{1F4C1}';
   const body = document.createElement('div'); body.className = 'sf-body';
-  const name = document.createElement('div'); name.className = 'sf-name'; name.textContent = node.name; name.title = node.name;
+  const name = document.createElement('div'); name.className = 'sf-name'; name.title = node.name;
+  const nameText = document.createElement('span'); nameText.className = 'sf-name-text'; nameText.textContent = node.name;
+  name.appendChild(nameText); // text truncates; the PROJECT ::after badge stays visible beside it
   const meta = document.createElement('div'); meta.className = 'sf-meta';
   const parts = [];
   if (c.folders) parts.push(c.folders + (c.folders > 1 ? ' folders' : ' folder'));
@@ -757,6 +762,7 @@ function renderTree() {
   document.body.classList.toggle('mode-double', effectiveMode() === 'double');
   updateLayoutToggle();
   renderSingleProjectBanner();
+  updateSearchCapNote();
   const q = searchQuery.trim().toLowerCase();
 
   if (effectiveMode() === 'double') {
@@ -781,6 +787,21 @@ function renderTree() {
   attachRootDrop(container);
   container.scrollTop = prevScrollTop;
   initRovingTabindex(container);
+}
+
+// Non-silent truncation: when a content search matches more pages than we render,
+// tell the user how many are shown vs found and to refine — never silently drop matches.
+function updateSearchCapNote() {
+  const note = document.getElementById('searchCapNote');
+  if (!note) return;
+  const capped = deepSearch && deepMatchTotal > deepMatches.size;
+  if (capped) {
+    note.textContent = 'Showing first ' + deepMatches.size + ' of ' + deepMatchTotal + ' content matches — refine your search';
+    note.hidden = false;
+  } else {
+    note.hidden = true;
+    note.textContent = '';
+  }
 }
 
 function updateLayoutToggle() {
@@ -838,7 +859,7 @@ function renderTreeNode(node, opts) {
   row.setAttribute('role', 'treeitem');
   row.tabIndex = -1; // roving: initRovingTabindex() promotes one row to 0 each render
   row.dataset.path = node.path;
-  row.setAttribute('aria-label', node.name + (node.type === 'folder' ? ' folder' : ' page'));
+  row.setAttribute('aria-label', node.name + (node.type === 'folder' ? (node.project ? ' project' : ' folder') : ' page'));
   if (node.type === 'page' && node.path === currentPagePath) { row.classList.add('active'); row.setAttribute('aria-selected', 'true'); }
 
   const chevron = document.createElement('span');
@@ -1203,7 +1224,7 @@ function startInlineRename(node, label, row) {
 }
 
 async function deleteItem(node) {
-  if (!await showConfirm(`Delete "${node.name}"? This cannot be undone.`)) return;
+  if (!await showConfirm(`Delete "${node.name}"? It moves to Trash — restore it from the ⋯ menu.`)) return;
   await api('delete', { path: node.path });
   closeUnder(node.path);
   loadTree();

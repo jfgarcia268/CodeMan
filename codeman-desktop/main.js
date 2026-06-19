@@ -122,12 +122,16 @@ async function applySwitch(body) {
   }
 
   const plural = q === 1 ? '' : 's';
+  const isAre = q === 1 ? 'is' : 'are';   // verb/pronoun agreement so "1 change" reads correctly
+  const them = q === 1 ? 'it' : 'them';
+  const they = q === 1 ? 'it' : 'they';
+  const stay = q === 1 ? 'stays' : 'stay';
   const oldLocal = (oldUrl === '');
 
   if (oldLocal && !toOffline) {             // Local-only → Server, with local work
     const choice = await askBox({
-      message: q + ' local change' + plural + ' are only on this Mac.',
-      detail: 'Push them up to ' + hostOf(newUrl) + ', or keep them on this Mac (they stay available if you switch back to offline)?',
+      message: q + ' local change' + plural + ' ' + isAre + ' only on this Mac.',
+      detail: 'Push ' + them + ' up to ' + hostOf(newUrl) + ', or keep ' + them + ' on this Mac (' + they + ' ' + stay + ' available if you switch back to offline)?',
       buttons: ['Push to ' + hostOf(newUrl), 'Keep on this Mac', 'Cancel'],
     });
     if (choice === 2) return { ok: false, cancelled: true };
@@ -140,8 +144,8 @@ async function applySwitch(body) {
 
   if (!oldLocal && toOffline) {             // Server → Local-only, with unsynced work
     const choice = await askBox({
-      message: q + ' change' + plural + ' not yet synced to ' + hostOf(oldUrl) + '.',
-      detail: 'Sync them now before going offline-only, or switch anyway (they stay safe and sync when you reconnect to ' + hostOf(oldUrl) + ')?',
+      message: q + ' change' + plural + ' ' + isAre + ' not yet synced to ' + hostOf(oldUrl) + '.',
+      detail: 'Sync ' + them + ' now before going offline-only, or switch anyway (' + they + ' ' + stay + ' safe and sync when you reconnect to ' + hostOf(oldUrl) + ')?',
       buttons: ['Sync now', 'Switch anyway', 'Cancel'],
     });
     if (choice === 2) return { ok: false, cancelled: true };
@@ -153,8 +157,8 @@ async function applySwitch(body) {
   // Server A → Server B, with unsynced work for A. NEVER replay A's queue into B.
   const choice = await askBox({
     message: q + ' unsynced change' + plural + ' for ' + hostOf(oldUrl) + '.',
-    detail: 'Sync them to ' + hostOf(oldUrl) + ' first, or switch to ' + hostOf(newUrl)
-      + ' anyway? Unsynced changes stay safe and sync when you return to ' + hostOf(oldUrl) + '.',
+    detail: 'Sync ' + them + ' to ' + hostOf(oldUrl) + ' first, or switch to ' + hostOf(newUrl)
+      + ' anyway? Unsynced change' + plural + ' ' + stay + ' safe and sync when you return to ' + hostOf(oldUrl) + '.',
     buttons: ['Sync to ' + hostOf(oldUrl) + ' first', 'Switch anyway', 'Cancel'],
   });
   if (choice === 2) return { ok: false, cancelled: true };

@@ -1,6 +1,6 @@
 {
   "name": "codeman-desktop",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "CodeMan desktop wrapper — opens offline, syncs to the NAS when reachable.",
   "main": "main.js",
   "author": "Juan Felipe Garcia",
@@ -19,8 +19,14 @@
     "appId": "com.jfgarcia.codeman",
     "productName": "CodeMan",
     "artifactName": "${productName}-${version}-${arch}.${ext}",
-    "directories": { "output": "dist" },
-    "files": ["main.js", "config.js", "preload.js"],
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "config.js",
+      "preload.js"
+    ],
     "extraResources": [
       {
         "from": "../codeman",
@@ -35,7 +41,15 @@
       }
     ],
     "mac": {
-      "target": [{ "target": "dmg", "arch": ["arm64", "x64"] }],
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
       "icon": "build/icon.icns",
       "category": "public.app-category.developer-tools",
       "identity": null,
@@ -44,7 +58,14 @@
       }
     },
     "win": {
-      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "icon": "build/icon.ico"
     },
     "nsis": {
