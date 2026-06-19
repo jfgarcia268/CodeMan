@@ -29,7 +29,7 @@ docs/images/      README screenshots (generated — see Local dev)
 
 | File | Role |
 |------|------|
-| `index.html` | Markup; loads **vendored** Prism (offline), then `version.js`, then the 7 ordered `src/*.js` scripts (via the dynamic loader array — `version.js` is first so `CODEMAN_VERSION` exists before the modules run). Cache-busts CSS/JS with a `?v=` query over http(s); on `file://` the query is skipped (Chromium won't resolve `foo.js?v=…` off disk). The stylesheet is a plain `<link>` whose href gets `?v=` appended by JS — **never** `document.write` (that wipes the document under a `file://` load). |
+| `index.html` | Markup; loads **vendored** Prism + **markdown-it** (offline), then `version.js`, then the 7 ordered `src/*.js` scripts (via the dynamic loader array — `version.js` is first so `CODEMAN_VERSION` exists before the modules run). Cache-busts CSS/JS with a `?v=` query over http(s); on `file://` the query is skipped (Chromium won't resolve `foo.js?v=…` off disk). The stylesheet is a plain `<link>` whose href gets `?v=` appended by JS — **never** `document.write` (that wipes the document under a `file://` load). |
 | `version.js` | **Single version source of truth.** `self.CODEMAN_VERSION = 'X.Y.Z'` — read by the footer (`init.js`) and `importScripts`-ed by `sw.js` for the cache name. Bump this one file per release (CI also syncs it from the git tag for the packaged desktop build). |
 | `src/core.js` | Languages, global state, the `api()` wrapper (offline-aware) + `apiFetch`, toast, `flashCopied`, the `copyText()` clipboard helper (see gotcha), themed modals. `apiFetch` builds a relative `api.php?...` URL, or prefixes `window.CODEMAN_API_BASE` if non-empty — but it's `''` everywhere today (unset in a browser; the desktop preload sets it to `''` so the renderer keeps using the relative, proxied `api.php`), so the URL is effectively always relative. |
 | `src/tree.js` | Sidebar tree (single column) + Miller columns (double, **always exactly 2** — `MILLER_COLS`) + drag-to-sort. `effectiveMode()` forces single-column when `body.is-mobile`, without changing the persisted `sidebarMode` (which **defaults to `double`** on desktop). Project helpers: `pathPrefixes`, `projectChain` (the project-ancestor chain), `isValidProjectParent`; the project-chain banner + color-coded breadcrumb live here. |
@@ -43,6 +43,7 @@ docs/images/      README screenshots (generated — see Local dev)
 | `style.css` | All styling. Palette lives in `:root` **design tokens** (dark-only — light theme was intentionally dropped; don't add a theme toggle). Hidden-sidebar desktop **rail** (`.sidebar-rail`). One `@media (max-width:768px)` block at the end makes the UI mobile-responsive — see the **Mobile** gotchas below (drawer sidebar, always-visible row actions on touch, 16px inputs + viewport zoom-lock, **icon-only block toolbars** with a `⋯` overflow menu, **count-button tag menus**, a compact page header, and an aligned **40px top band**). |
 | `api.php` | Filesystem API: tree, page CRUD, move, reorder, content/block search, metadata index, projects, trash, history, save-conflict detection, find & replace, tag rename, optional password gate. |
 | `vendor/prism/` | Vendored Prism (core + autoloader + grammars + theme) — **no CDN**, works offline. Grammars autoload on demand; an unviewed language won't highlight offline until first rendered. |
+| `vendor/markdown-it/` | Vendored **markdown-it** (v14, single UMD file) — **no CDN**, offline. Backs `renderMarkdown` for **note blocks** (full CommonMark + GFM). Loaded as a static `<script>` before the `src/*.js` modules so `window.markdownit` exists when `editor.js` builds its instance. See the markdown-it gotcha. |
 | `tests.html` | Standalone browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + offline trash/history reducers (snapshots/restores the real IndexedDB cache, safe to run). Open it in a browser; ~82 assertions. |
 
 **No build step.** The `src/*.js` files are plain classic scripts sharing one global scope;
@@ -135,8 +136,11 @@ N px/line and can't drift (don't rely on `style.css` alone — see gotchas). Per
 (unified across blocks + subsections), **⇅ Reorder** (sections + blocks). In-page block filter,
 in-page outline, themed confirm modals.
 
-**Notes & links** — Markdown note blocks (`renderMarkdown`, escape-first, no dependency);
-cross-page `[[links]]` (`resolvePageLink` matches the tree) and `[text](http…)` external links.
+**Notes & links** — Markdown note blocks rendered by **vendored markdown-it** (full CommonMark +
+GFM: tables, strikethrough, task lists, nested lists, autolinks, images) via `renderMarkdown`/
+`renderInlineMd` (thin wrappers over a configured `markdownit` instance, `html:false` so raw HTML
+stays escaped). Cross-page `[[links]]` (`resolvePageLink` matches the tree, custom inline rule),
+GFM task-list checkboxes, and external links open in a new tab — see the markdown-it gotcha.
 
 **Data safety** — **Trash** (soft delete, restore/empty), **History** (every save snapshots
 the prior content, last 20, restore + diff via `lineDiff`), **save-conflict detection**
@@ -434,6 +438,35 @@ tag once.)
   `offline.js`). An active sort renders a **flat, intermixed** list (no folders/pages `.miller-divider`);
   no pref = today's folders-first + divider + `.order.json` order. **Dragging an item (`dropReorder`)
   clears the column's sort** (drag = "I want manual order"). Single-column layout is unaffected.
+- **Note Markdown is rendered by vendored markdown-it, not a hand-rolled parser.** `renderMarkdown(src)`
+  = `MD.render(src)` and `renderInlineMd(t)` = `MD.renderInline(t)` over one module-scope instance
+  `MD = markdownit({ html:false, linkify:true, breaks:true })` in `editor.js`. **`html:false` is the
+  security boundary** — raw HTML in note source is escaped, same posture as the old escape-first
+  renderer; don't enable `html`. Three custom rules layer CodeMan behavior on top: a `[[wiki]]` inline
+  rule that emits the **exact** `<a class="xlink" data-xtarget>` / broken-span markup the note-view
+  click wiring expects (`editor.js` `wireNoteLinks`); a GFM **task-list** core rule (`- [ ]`/`- [x]`
+  → disabled checkbox, `li.md-task`); and a `link_open` override adding `target/rel` to external
+  `http(s)` links (leaves wiki `.xlink` alone). markdown-it emits **plain tags** (no `.md-*` classes),
+  so all note CSS is scoped under `.block.note .code-view <tag>` (and mirrored into `pageToHtml`'s
+  embedded export CSS). The vendored file is in the SW precache + a static `<script>` in `index.html`
+  (before the modules). Strikethrough renders as `<s>`, not `<del>`.
+- **Block editors auto-size to content while editing, capped to the viewport, with a resize handle.**
+  All three editable kinds bound the *editing surface* (view mode is unbounded — long content reads
+  fully). The cap is **60vh desktop/desktop-app, 50dvh mobile** (CSS + JS `editorCapPx()`); editors
+  scroll past it. **Note** (`<textarea>`): `autosizeNote()` sets height to content (`scrollHeight`),
+  `resize:vertical` handle, a manual drag records a `userMin` floor the autosizer respects. **Rich**
+  (`contentEditable`): grows natively; CSS adds `max-height`/`overflow:auto`/`resize:vertical` while
+  editing. **Code** is the subtle one: the transparent textarea overlays the Prism `.code-view`, and
+  the editor **height is JS-driven** (`autosizeCode()` sets `.code-wrap` height = min(content, cap) or
+  a dragged `userCodeH`) — **independent of the line-number gutter** (a CSS-only approach collapsed
+  when line numbers were off, since the gutter was the only in-flow sizer). While editing, `.code-view`
+  goes `position:absolute; inset:0` (overlay) and **the textarea `.code-edit` is the single scroller**
+  (overflow:auto); `syncScroll` mirrors its `scrollTop` onto `.code-view` + `.line-gutter` (both
+  `overflow:hidden`) so all layers stay aligned. `.code-wrap` (`align-items:stretch`) never itself
+  scrolls. The slate edit background (`#303841`) is **not** gated on `.show-lines` (so it's consistent
+  with line numbers on or off). A debounced `window`/`visualViewport` resize listener re-fits open
+  editors; the dragged height + autosize state reset on Save/Cancel. Don't reintroduce a CSS-only code
+  cap — the gutter-independence requires the JS height.
 
 ---
 

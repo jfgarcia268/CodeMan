@@ -40,6 +40,7 @@ const SHELL = [
   'vendor/prism/themes/prism-tomorrow.min.css',
   'vendor/prism/components/prism-core.min.js',
   'vendor/prism/plugins/autoloader/prism-autoloader.min.js',
+  'vendor/markdown-it/markdown-it.min.js',
 ];
 
 self.addEventListener('install', (e) => {
