@@ -21,6 +21,12 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
   counts show a warning banner above a best-effort table. CSV blocks export to a Markdown table
   (Markdown export) and an HTML `<table>` (HTML export), and convert to/from the other block
   kinds like any other.
+- **JSON tree block** — a new block kind. Edit it as raw JSON; when not editing it renders as a
+  collapsible, syntax-colored tree. Click any key or array index to copy its JS-accessor path
+  (e.g. `root.records[0].Id`), collapse/expand nodes to navigate large payloads, and use
+  **Format** to pretty-print. Invalid JSON never breaks the view — it shows a clear error plus
+  the raw text. JSON blocks export to a pretty-printed code block (Markdown / HTML) and convert
+  to/from the other block kinds.
 
 ## [1.8.0] — 2026-06-19
 

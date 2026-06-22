@@ -25,6 +25,35 @@ docs/images/      README screenshots (generated — see Local dev)
 
 ---
 
+## Ways of working — roles & seniority bar
+
+Every piece of work is performed at a **senior** bar, by the matching **role agent**. These
+roles are real subagents in [.claude/agents/](.claude/agents/), each with a defined
+**handoff-in / handoff-out contract** so that when work passes between them nothing is lost —
+the receiving role gets a complete, self-contained brief and never has to re-derive intent.
+**Delegate to the agent for the phase** (don't just "act in the spirit" of the role):
+
+| Phase | Agent | Produces (handoff) |
+|-------|-------|--------------------|
+| **Solutioning** — the *what* & *why* | [senior-solution-architect](.claude/agents/senior-solution-architect.md) | a **Solution Brief**: problem, options + trade-offs, recommendation, scope, non-goals, risks, acceptance criteria |
+| **Technical design** — the *how* | [senior-technical-architect](.claude/agents/senior-technical-architect.md) | a **Technical Design**: data shapes, file-by-file change map, edge cases, gotchas honored, test strategy |
+| **Development** — code, tests, docs | [senior-developer](.claude/agents/senior-developer.md) | a verified **Completion Report**: changes, tests/docs, suite + live-preview evidence |
+| **QA** — full regression | [senior-qa-engineer](.claude/agents/senior-qa-engineer.md) | a pass/fail report with repro + suspected `file:line` |
+| **Usability / visual** — UX review | [ui-ux-reviewer](.claude/agents/ui-ux-reviewer.md) | prioritized usability/UI findings with evidence |
+
+**The chain:** Solution Brief → Technical Design → Completion Report → QA + UX review. Each
+agent's output is the *only* context the next one receives, so it must be complete and
+self-contained (that's the point of the handoff contracts — a role is never half-defined).
+
+**Right-sizing:** this is a quality bar, not mandatory ceremony for every keystroke. Trivial
+changes (a typo, a one-line fix, a rename) don't need the full chain. But for any **new
+feature or non-trivial change**, run the phases explicitly and in order — solutioning and
+design get confirmed *before* development — and use the agents so the handoffs are real, not
+implied. A new block kind, a new `api.php` action, or anything touching the data model / offline
+story is squarely "non-trivial."
+
+---
+
 ## Stack & files (under `codeman/`)
 
 | File | Role |
@@ -44,7 +73,7 @@ docs/images/      README screenshots (generated — see Local dev)
 | `api.php` | Filesystem API: tree, page CRUD, move, reorder, content/block search, metadata index, projects, trash, history, save-conflict detection, find & replace, tag rename, optional password gate. |
 | `vendor/prism/` | Vendored Prism (core + autoloader + grammars + theme) — **no CDN**, works offline. Grammars autoload on demand; an unviewed language won't highlight offline until first rendered. |
 | `vendor/markdown-it/` | Vendored **markdown-it** (v14, single UMD file) — **no CDN**, offline. Backs `renderMarkdown` for **note blocks** (full CommonMark + GFM). Loaded as a static `<script>` before the `src/*.js` modules so `window.markdownit` exists when `editor.js` builds its instance. See the markdown-it gotcha. |
-| `tests.html` | Standalone **client** browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + `richToPlainText`/`convertBlock`/`parseCsv` + deep-search cap + offline trash/history reducers (snapshots/restores the real IndexedDB cache, safe to run). Open it in a browser; ~140 assertions, expect `0 failed`. |
+| `tests.html` | Standalone **client** browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + `richToPlainText`/`convertBlock`/`parseCsv`/`parseJsonSafe`/`jsonPath` + deep-search cap + offline trash/history reducers (snapshots/restores the real IndexedDB cache, safe to run). Open it in a browser; ~155 assertions, expect `0 failed`. |
 | `tests-api.sh` | Standalone **server** API tests (bash + curl, no deps). Spins a throwaway `php -S` against a temp `CODEMAN_DATA` dir and asserts api.php behavior the browser can't reach: path-traversal confinement, parent-dir guards, unicode `search_content`, same-second history retention, `empty_trash` history-prune + its traversal guard, and the password gate. `bash codeman/tests-api.sh` (exit 0 = green). |
 
 **No build step.** The `src/*.js` files are plain classic scripts sharing one global scope;
@@ -81,8 +110,10 @@ the load order in `index.html` *is* the dependency order. Edit a file, reload th
   default; `type` = language), **note** (`note:true`, Markdown prose in `code`), **rich**
   (`rich:true`, sanitized WYSIWYG HTML in `code`), **checklist** (`checklist:true`,
   `items:[{text,done}]`), **csv** (`csv:true`, raw CSV text in `code` rendered as a table in
-  view mode — `parseCsv`/`renderCsvBlock` in `editor.js`). `blockKind()` derives the kind;
-  `convertBlock()` switches a block to any other kind carrying text across.
+  view mode — `parseCsv`/`renderCsvBlock` in `editor.js`), **json** (`json:true`, raw JSON text
+  in `code` rendered as a collapsible copy-path tree in view mode — `parseJsonSafe`/
+  `renderJsonBlock` in `editor.js`). `blockKind()` derives the kind; `convertBlock()` switches a
+  block to any other kind carrying text across.
 - **Legacy shape:** older sections wrapped content in `tabs:[{name,blocks,subsections}]`.
   The tabs feature was removed, but `sectionContent(section)` transparently reads both
   shapes. **New sections are written flat — don't reintroduce `.tabs`.**
@@ -358,6 +389,19 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   `unterminated` for an open quote; the view pads ragged rows and shows a `.csv-warn` banner for
   unterminated/ragged input rather than breaking. Cells are filled via `textContent` (no XSS). The
   exports reuse `parseCsv`: `pageToMarkdown` emits a GFM table, `pageToHtml` a `<table class="csv">`.
+- **JSON block = CSV pattern, tree view instead of table.** `renderJsonBlock` clones the CSV
+  block's edit/view split (raw JSON in `block.code`, `.json-edit` textarea + live `.json-view`,
+  `viewing` via `blockBackups`, Edit/Save/Revert/Copy/Dup/⋯/Delete). **`parseJsonSafe` (editor.js)
+  is the single parse path and must never throw** — standard `JSON.parse` in a try/catch returning
+  `{ok,value,error}` (no JSON5/comment leniency on purpose: invalid input should warn). On parse
+  failure the view shows a `.json-warn` banner + a `.json-raw` `<pre>` of the raw text (never a
+  blank block). `buildJsonTree` recurses into `<details>/<summary>` collapsibles (open by default),
+  typed-colored leaf values, and **clickable keys that copy a JS-accessor path** via `jsonPath()`
+  (`root.records[0].Id`, bracket-quoting non-identifier keys) — the whole tree is built with
+  `textContent`/DOM, never `innerHTML` of data (no XSS). The ⋯ menu adds **Format** (pretty-print
+  via `formatJson` = `JSON.stringify(…,2)`). Exports: `pageToMarkdown` emits a pretty ```json fence,
+  `pageToHtml` a highlighted `<pre>` (static — no interactive tree in export). `jsonPath`/
+  `parseJsonSafe`/`formatJson` are pure → unit-tested in `tests.html`.
 - **Sidebar tree is keyboard-operable + ARIA (a11y pass).** `#tree` is `role="tree"`; rows
   (`.tree-row`) and Miller folder cards (`.subfolder-card`) are `role="treeitem"` with a
   `data-path`, `aria-label`, roving `tabindex` (exactly one row is `tabindex=0` via

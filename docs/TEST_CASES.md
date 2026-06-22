@@ -106,10 +106,27 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
 - TC-csv-05 (E): export — Markdown export emits a GFM table; HTML export emits `<table class="csv">`;
   round-trips on import (raw CSV preserved in `block.code`).
 
+### TC-json — JSON tree block
+- TC-json-01 (P): add a JSON block; paste a nested object/array → view mode renders a collapsible,
+  typed-colored tree (strings/numbers/booleans/null); Edit shows the textarea + live tree preview;
+  Save/Cancel/Revert, Copy (copies **raw JSON**), Duplicate, Delete behave like other blocks.
+- TC-json-02 (P): **copy-path-on-click** — clicking a key/index copies its JS-accessor path
+  (`root.records[0].Id`; non-identifier keys bracket-quoted: `root["odd key"]`); collapse/expand
+  nodes via the ▸/▾ toggle. **[auto: tests.html jsonPath]**
+- TC-json-03 (A): **invalid JSON never breaks the view** — malformed input shows a `.json-warn`
+  banner with the parse error + the raw text in a `.json-raw` `<pre>` (no throw, no blank block);
+  empty input shows the placeholder. `parseJsonSafe` never throws. **[auto: tests.html parseJsonSafe]**
+- TC-json-04 (E): tree is built with `textContent`/DOM — a string value containing HTML/`<script>`
+  renders as literal text (no XSS).
+- TC-json-05 (E): **Format** (⋯ menu) pretty-prints with 2-space indent (no-op + toast on invalid);
+  export — Markdown emits a pretty ` ```json ` fence, HTML a highlighted `<pre>` (raw fallback when
+  unparseable); raw JSON preserved in `block.code` on import. **[auto: tests.html formatJson]**
+
 ### TC-convert — Block-kind conversion
-- TC-convert-01 (P): code→note→rich→checklist→csv→code carries text; rich→other **preserves line
-  breaks** (regression: detached-innerText newline loss); entities decode; code↔csv round-trips raw
-  text losslessly. **[auto: tests.html richToPlainText/convertBlock/parseCsv]**
+- TC-convert-01 (P): code→note→rich→checklist→csv→json→code carries text; rich→other **preserves
+  line breaks** (regression: detached-innerText newline loss); entities decode; code↔csv and
+  code↔json round-trip raw text losslessly.
+  **[auto: tests.html richToPlainText/convertBlock/parseCsv/parseJsonSafe]**
 
 ### TC-vars — Variables / copy-as
 - TC-vars-01 (P): `_V_NAME_V_` fill-ins block- or section-level (mutually exclusive); toggle on/off.

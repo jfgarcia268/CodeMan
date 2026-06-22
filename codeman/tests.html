@@ -328,6 +328,36 @@
     t('csv→code keeps text + drops flag', [!!f.csv, f.code], [false, 'a,b\n1,2']);
     t('blockPlainText csv returns raw', blockPlainText({ csv: true, code: 'x,y\n1,2' }), 'x,y\n1,2');
     t('blockKind detects csv', blockKind({ csv: true }), 'csv');
+    // JSON is a text-backed kind too: code↔json round-trips the raw text losslessly
+    const g = { type: 'bash', code: '{"a":1}' };
+    convertBlock(g, 'json');
+    t('code→json sets flag + keeps text', [g.json === true, g.type, g.code], [true, 'json', '{"a":1}']);
+    convertBlock(g, 'code');
+    t('json→code keeps text + drops flag', [!!g.json, g.code], [false, '{"a":1}']);
+    t('blockKind detects json', blockKind({ json: true }), 'json');
+  })();
+
+  // parseJsonSafe: tolerant JSON parse — never throws; { ok, value, error }.
+  (function () {
+    t('parseJsonSafe valid object', parseJsonSafe('{"a":1,"b":[2,3]}').value, { a: 1, b: [2, 3] });
+    t('parseJsonSafe valid → ok true', parseJsonSafe('[1,2]').ok, true);
+    t('parseJsonSafe null value', [parseJsonSafe('null').ok, parseJsonSafe('null').value], [true, null]);
+    t('parseJsonSafe empty string → not ok, no error', [parseJsonSafe('   ').ok, parseJsonSafe('   ').error], [false, '']);
+    const bad = parseJsonSafe('{a:1,}');
+    t('parseJsonSafe malformed → ok false', bad.ok, false);
+    t('parseJsonSafe malformed → has error msg', typeof bad.error === 'string' && bad.error.length > 0, true);
+    t('parseJsonSafe never throws on garbage', parseJsonSafe('}{[,').ok, false);
+    // formatJson pretty-prints with 2-space indent
+    t('formatJson 2-space indent', formatJson({ a: 1 }), '{\n  "a": 1\n}');
+  })();
+
+  // jsonPath: JS-accessor path builder for copy-path-on-click.
+  (function () {
+    t('jsonPath identifier keys', jsonPath(['records', 'Id']), 'root.records.Id');
+    t('jsonPath array indices', jsonPath(['records', 0, 'Id']), 'root.records[0].Id');
+    t('jsonPath non-identifier key bracket-quoted', jsonPath(['odd key']), 'root["odd key"]');
+    t('jsonPath key starting with digit bracket-quoted', jsonPath(['3d']), 'root["3d"]');
+    t('jsonPath empty → root', jsonPath([]), 'root');
   })();
 
   // parseCsv: tolerant RFC-4180-ish parser (quoting, escapes, embedded newlines,

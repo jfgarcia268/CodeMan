@@ -1864,6 +1864,55 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   font-size: 12px; padding: 5px 10px; margin: 0 0 8px;
 }
 
+/* ---- JSON (tree-viewer) block ---- */
+.block.json .json-edit {
+  display: block; box-sizing: border-box;
+  margin: 8px 14px; width: calc(100% - 28px);
+  background: #303841; color: var(--text);
+  border: 1px solid var(--border-2); border-radius: 6px;
+  padding: 8px 10px; font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 13px; line-height: 1.5; resize: vertical;
+  max-height: 60vh; overflow: auto; tab-size: 2;
+}
+.block.json.viewing .json-edit { display: none; }
+.block.json .json-view { padding: 6px 14px 12px; }
+.block.json:not(.viewing) .json-view { padding-top: 0; opacity: .92; }   /* live preview while editing */
+.json-tree {
+  font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; line-height: 1.55;
+  overflow-x: auto;
+}
+.json-node { display: block; }
+.json-summary { cursor: pointer; list-style: none; color: var(--text-dim); user-select: none; }
+.json-summary::-webkit-details-marker { display: none; }
+.json-summary::before { content: '▾'; display: inline-block; width: 1em; color: var(--text-dim); font-size: 10px; }
+.json-node:not([open]) > .json-summary::before { content: '▸'; }
+.json-node:not([open]) > .json-summary .json-meta { opacity: .85; }
+.json-meta { color: var(--text-dim); }
+.json-children { padding-left: 16px; border-left: 1px solid var(--border); margin-left: 4px; }
+.json-row { display: flex; align-items: baseline; gap: 4px; flex-wrap: wrap; }
+.json-key {
+  color: #9cdcfe; cursor: pointer; border-radius: 3px; padding: 0 2px;
+  white-space: pre; flex: 0 0 auto;
+}
+.json-key:hover { background: var(--accent-2); color: #fff; }
+.json-colon { color: var(--text-dim); }
+.json-val { white-space: pre-wrap; word-break: break-word; }
+.json-string { color: #ce9178; }
+.json-number { color: #b5cea8; }
+.json-boolean { color: #569cd6; }
+.json-null { color: #808080; font-style: italic; }
+.json-empty { color: var(--text-dim); font-size: 13px; font-style: italic; padding: 4px 0; }
+.json-raw {
+  font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; line-height: 1.5;
+  background: #303841; border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px 10px; overflow-x: auto; white-space: pre; color: var(--text);
+}
+.json-warn {
+  color: #e7b35c; background: rgba(231,179,92,.1);
+  border: 1px solid rgba(231,179,92,.35); border-radius: 5px;
+  font-size: 12px; padding: 5px 10px; margin: 0 0 8px;
+}
+
 /* the per-block type switch */
 .block-toolbar .type-menu { font-size: 11px; }
 
@@ -2049,13 +2098,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
   /* --- 16px inputs so iOS Safari doesn't zoom on focus --- */
   .sidebar-search input, .page-search input, .modal-input, .cmdk-input,
-  .todo-text, .section-title, .block-label, .pending-input, .csv-edit { font-size: 16px; }
+  .todo-text, .section-title, .block-label, .pending-input, .csv-edit, .json-edit { font-size: 16px; }
 
   /* --- editor max-height: smaller on phones, dynamic-viewport so it tracks the
      browser chrome / on-screen keyboard (dvh); 50vh fallback for old engines --- */
   .block:not(.note):not(.viewing) .code-wrap,
   body.is-mobile .block.note .code-edit,
   body.is-mobile .block.csv .csv-edit,
+  body.is-mobile .block.json .json-edit,
   body.is-mobile .block.rich:not(.viewing) .rich-surface { max-height: 50vh; max-height: 50dvh; }
 
   /* --- header create group + tools: bigger tap targets --- */

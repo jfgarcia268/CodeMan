@@ -359,8 +359,8 @@ function openBlockPalette() {
       const row = document.createElement('div'); row.className = 'cmdk-row block-row' + (i === active ? ' active' : '');
       const nm = document.createElement('div'); nm.className = 'cmdk-name';
       const badge = document.createElement('span'); badge.className = 'lang-badge';
-      badge.style.background = b.note ? '#7a5cc0' : b.csv ? '#3a7a5c' : langColor(b.type);
-      badge.textContent = b.note ? 'Note' : b.csv ? 'CSV' : langLabel(b.type);
+      badge.style.background = b.note ? '#7a5cc0' : b.csv ? '#3a7a5c' : b.json ? '#3a5c7a' : langColor(b.type);
+      badge.textContent = b.note ? 'Note' : b.csv ? 'CSV' : b.json ? 'JSON' : langLabel(b.type);
       const txt = document.createElement('span'); txt.textContent = ' ' + firstLine(b);
       nm.append(badge, txt);
       const sub = document.createElement('div'); sub.className = 'cmdk-sub'; sub.textContent = b.trail || b.path;
@@ -592,6 +592,12 @@ function pageToMarkdown(data) {
             for (let r = 1; r < rows.length; r++) out.push(fmt(rows[r]));
             out.push('');
           }
+        } else if (b.json) {
+          // pretty-print into a fenced json block; fall back to raw text if it won't parse
+          const { ok, value } = parseJsonSafe(b.code || '');
+          out.push('```json');
+          out.push(ok ? formatJson(value) : (b.code || ''));
+          out.push('```', '');
         } else if (b.rich) {
           // rich-text blocks hold HTML — emit the plain text for Markdown
           const tmp = document.createElement('div'); tmp.innerHTML = b.code || '';
@@ -638,6 +644,16 @@ function pageToHtml(data) {
       const body = [];
       for (let r = 1; r < rows.length; r++) body.push('<tr>' + cells(rows[r], 'td') + '</tr>');
       parts.push('<div class="csv-wrap"><table class="csv"><thead><tr>' + cells(rows[0] || [], 'th') + '</tr></thead><tbody>' + body.join('') + '</tbody></table></div>');
+      return;
+    }
+    if (b.json) {
+      // pretty-printed, JSON-highlighted <pre> (a static tree is out of scope for export)
+      const { ok, value } = parseJsonSafe(b.code || '');
+      const pretty = ok ? formatJson(value) : (b.code || '');
+      let html;
+      try { const g = Prism.languages.json; html = g ? Prism.highlight(pretty, g, 'json') : esc(pretty); }
+      catch (e) { html = esc(pretty); }
+      parts.push('<pre class="code"><code>' + html + '</code></pre>');
       return;
     }
     const lang = langPrism(b.type);
