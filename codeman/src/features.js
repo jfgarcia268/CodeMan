@@ -359,8 +359,8 @@ function openBlockPalette() {
       const row = document.createElement('div'); row.className = 'cmdk-row block-row' + (i === active ? ' active' : '');
       const nm = document.createElement('div'); nm.className = 'cmdk-name';
       const badge = document.createElement('span'); badge.className = 'lang-badge';
-      badge.style.background = b.note ? '#7a5cc0' : langColor(b.type);
-      badge.textContent = b.note ? 'Note' : langLabel(b.type);
+      badge.style.background = b.note ? '#7a5cc0' : b.csv ? '#3a7a5c' : langColor(b.type);
+      badge.textContent = b.note ? 'Note' : b.csv ? 'CSV' : langLabel(b.type);
       const txt = document.createElement('span'); txt.textContent = ' ' + firstLine(b);
       nm.append(badge, txt);
       const sub = document.createElement('div'); sub.className = 'cmdk-sub'; sub.textContent = b.trail || b.path;
@@ -580,6 +580,18 @@ function pageToMarkdown(data) {
         if (b.checklist) {
           (b.items || []).forEach(it => out.push('- [' + (it.done ? 'x' : ' ') + '] ' + (it.text || '')));
           out.push('');
+        } else if (b.csv) {
+          // emit a GitHub-flavoured Markdown table (first row = header)
+          const { rows } = parseCsv(b.code || '');
+          const cols = rows.reduce((m, r) => Math.max(m, r.length), 0);
+          if (cols) {
+            const cell = (v) => String(v == null ? '' : v).replace(/\|/g, '\\|').replace(/\n/g, ' ');
+            const fmt = (r) => '| ' + Array.from({ length: cols }, (_, c) => cell(r[c])).join(' | ') + ' |';
+            out.push(fmt(rows[0] || []));
+            out.push('| ' + Array.from({ length: cols }, () => '---').join(' | ') + ' |');
+            for (let r = 1; r < rows.length; r++) out.push(fmt(rows[r]));
+            out.push('');
+          }
         } else if (b.rich) {
           // rich-text blocks hold HTML — emit the plain text for Markdown
           const tmp = document.createElement('div'); tmp.innerHTML = b.code || '';
@@ -618,6 +630,16 @@ function pageToHtml(data) {
     }
     if (b.rich) { parts.push('<div class="rich">' + sanitizeRichHtml(b.code || '') + '</div>'); return; }
     if (b.note) { parts.push('<div class="note">' + renderMarkdown(code) + '</div>'); return; }
+    if (b.csv) {
+      const { rows } = parseCsv(b.code || '');
+      const cols = rows.reduce((m, r) => Math.max(m, r.length), 0);
+      if (!cols) { parts.push('<div class="csv-empty">(empty table)</div>'); return; }
+      const cells = (r, tag) => Array.from({ length: cols }, (_, c) => '<' + tag + '>' + esc(r[c] == null ? '' : r[c]) + '</' + tag + '>').join('');
+      const body = [];
+      for (let r = 1; r < rows.length; r++) body.push('<tr>' + cells(rows[r], 'td') + '</tr>');
+      parts.push('<div class="csv-wrap"><table class="csv"><thead><tr>' + cells(rows[0] || [], 'th') + '</tr></thead><tbody>' + body.join('') + '</tbody></table></div>');
+      return;
+    }
     const lang = langPrism(b.type);
     let html;
     try { const g = Prism.languages[lang]; html = g ? Prism.highlight(code, g, lang) : esc(code); }
@@ -659,6 +681,12 @@ function pageToHtml(data) {
     '.rich blockquote{border-left:3px solid #0e639c;margin:8px 0;padding:4px 12px;color:#aaa}',
     '.rich a{color:#4ea0e0}',
     'ul.todo{list-style:none;padding-left:4px;margin:8px 0}ul.todo li{margin:4px 0}ul.todo li.done{color:#777;text-decoration:line-through}ul.todo input{margin-right:8px}',
+    '.csv-wrap{overflow-x:auto;border:1px solid #333;border-radius:6px;margin:8px 0}',
+    'table.csv{border-collapse:collapse;width:100%;font-size:13px}',
+    'table.csv th,table.csv td{border:1px solid #3a3d41;padding:5px 10px;text-align:left;vertical-align:top;white-space:pre-wrap}',
+    'table.csv thead th{background:#2d2d30;color:#fff;font-weight:600}',
+    'table.csv tbody tr:nth-child(even) td{background:rgba(255,255,255,.02)}',
+    '.csv-empty{color:#888;font-style:italic}',
     '.xlink{color:#8a7bd8}',
     'a{color:#4ea0e0}',
     // prism-tomorrow token colors (compact subset)

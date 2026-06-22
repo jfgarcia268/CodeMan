@@ -78,7 +78,7 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
 - TC-tabs-03 (A): rapid double-click / concurrent open of the **same** page opens **one** tab
   (in-flight opens are deduped — regression: `openPage` TOCTOU race made duplicate tabs).
 
-### TC-editor — Editor & blocks (code / note / rich / checklist)
+### TC-editor — Editor & blocks (code / note / rich / checklist / csv)
 - TC-editor-01 (P): Edit/Save, Cancel→Revert, Copy, Duplicate, Delete per block; section collapse.
 - TC-editor-02 (E): **input round-trip** — type, save, reopen → byte-identical (trailing whitespace,
   tabs vs spaces, blank lines, emoji, large paste).
@@ -91,9 +91,25 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
 - TC-editor-06 (A): paste `<script>`/HTML into **note** (markdown, `html:false`) and **rich**
   (sanitizer strips script/handlers/`javascript:`) — escaping holds (security boundary).
 
+### TC-csv — CSV / table block
+- TC-csv-01 (P): add a CSV block; enter `name,age\nAda,36` → view mode renders a table with the
+  first row as the `<thead>` header; Edit shows the textarea + a live preview; Save/Cancel/Revert,
+  Copy (copies **raw CSV**), Duplicate, Delete all behave like other blocks.
+- TC-csv-02 (E): quoting/escapes — `"Doe, John"` is one cell; `""` → a literal `"`; a newline inside
+  quotes stays in one cell; CRLF input parses; `;`- and tab-delimited input auto-detect.
+  **[auto: tests.html parseCsv]**
+- TC-csv-03 (A): **malformed CSV never breaks the view** — an unterminated quote and rows with
+  differing column counts both render a best-effort padded table under a `.csv-warn` banner (no
+  throw, no blank block). Empty CSV shows the empty-table placeholder. **[auto-ish: tests.html parseCsv]**
+- TC-csv-04 (E): CSV cell content is inserted via `textContent` — `<script>`/HTML in a cell renders
+  as literal text (no XSS).
+- TC-csv-05 (E): export — Markdown export emits a GFM table; HTML export emits `<table class="csv">`;
+  round-trips on import (raw CSV preserved in `block.code`).
+
 ### TC-convert — Block-kind conversion
-- TC-convert-01 (P): code→note→rich→checklist→code carries text; rich→other **preserves line
-  breaks** (regression: detached-innerText newline loss); entities decode. **[auto: tests.html richToPlainText/convertBlock]**
+- TC-convert-01 (P): code→note→rich→checklist→csv→code carries text; rich→other **preserves line
+  breaks** (regression: detached-innerText newline loss); entities decode; code↔csv round-trips raw
+  text losslessly. **[auto: tests.html richToPlainText/convertBlock/parseCsv]**
 
 ### TC-vars — Variables / copy-as
 - TC-vars-01 (P): `_V_NAME_V_` fill-ins block- or section-level (mutually exclusive); toggle on/off.

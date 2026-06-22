@@ -13,6 +13,15 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
 
 ## [Unreleased]
 
+### Added
+- **CSV / table block** — a new block kind. Edit it as plain CSV text (the first row is the
+  header); when not editing it renders as a clean table. The parser handles quoted fields,
+  `""` escapes, embedded newlines, and auto-detects comma / semicolon / tab delimiters.
+  Malformed input never breaks the view — an unterminated quote or rows with differing column
+  counts show a warning banner above a best-effort table. CSV blocks export to a Markdown table
+  (Markdown export) and an HTML `<table>` (HTML export), and convert to/from the other block
+  kinds like any other.
+
 ## [1.8.0] — 2026-06-19
 
 ### Added

@@ -44,7 +44,7 @@ docs/images/      README screenshots (generated — see Local dev)
 | `api.php` | Filesystem API: tree, page CRUD, move, reorder, content/block search, metadata index, projects, trash, history, save-conflict detection, find & replace, tag rename, optional password gate. |
 | `vendor/prism/` | Vendored Prism (core + autoloader + grammars + theme) — **no CDN**, works offline. Grammars autoload on demand; an unviewed language won't highlight offline until first rendered. |
 | `vendor/markdown-it/` | Vendored **markdown-it** (v14, single UMD file) — **no CDN**, offline. Backs `renderMarkdown` for **note blocks** (full CommonMark + GFM). Loaded as a static `<script>` before the `src/*.js` modules so `window.markdownit` exists when `editor.js` builds its instance. See the markdown-it gotcha. |
-| `tests.html` | Standalone **client** browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + `richToPlainText`/`convertBlock` + deep-search cap + offline trash/history reducers (snapshots/restores the real IndexedDB cache, safe to run). Open it in a browser; ~120 assertions, expect `0 failed`. |
+| `tests.html` | Standalone **client** browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + `richToPlainText`/`convertBlock`/`parseCsv` + deep-search cap + offline trash/history reducers (snapshots/restores the real IndexedDB cache, safe to run). Open it in a browser; ~140 assertions, expect `0 failed`. |
 | `tests-api.sh` | Standalone **server** API tests (bash + curl, no deps). Spins a throwaway `php -S` against a temp `CODEMAN_DATA` dir and asserts api.php behavior the browser can't reach: path-traversal confinement, parent-dir guards, unicode `search_content`, same-second history retention, `empty_trash` history-prune + its traversal guard, and the password gate. `bash codeman/tests-api.sh` (exit 0 = green). |
 
 **No build step.** The `src/*.js` files are plain classic scripts sharing one global scope;
@@ -80,8 +80,9 @@ the load order in `index.html` *is* the dependency order. Edit a file, reload th
 - **Block kinds** (one per block; `BLOCK_KINDS` in `editor.js`): **code** (highlighted,
   default; `type` = language), **note** (`note:true`, Markdown prose in `code`), **rich**
   (`rich:true`, sanitized WYSIWYG HTML in `code`), **checklist** (`checklist:true`,
-  `items:[{text,done}]`). `blockKind()` derives the kind; `convertBlock()` switches a block
-  to any other kind carrying text across.
+  `items:[{text,done}]`), **csv** (`csv:true`, raw CSV text in `code` rendered as a table in
+  view mode — `parseCsv`/`renderCsvBlock` in `editor.js`). `blockKind()` derives the kind;
+  `convertBlock()` switches a block to any other kind carrying text across.
 - **Legacy shape:** older sections wrapped content in `tabs:[{name,blocks,subsections}]`.
   The tabs feature was removed, but `sectionContent(section)` transparently reads both
   shapes. **New sections are written flat — don't reintroduce `.tabs`.**
@@ -347,6 +348,16 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   those buttons, so without a `⋯` they'd be unreachable. Rich's convert syncs `surface.innerHTML`
   into `block.code` first. Shared marker classes (`.block-copy`/`.block-dup`/`.block-clear`) drive
   the CSS hide + icon sizing.
+- **CSV block edit/view split + tolerant parse.** `renderCsvBlock` mirrors the rich/checklist
+  pattern (own render path, `viewing` toggled via `blockBackups`, Edit/Save/Revert). Raw CSV lives
+  in `block.code`; the `.csv-edit` textarea is the source, `.csv-view` holds the rendered
+  `.csv-table`. While editing, the textarea AND a **live preview** table both show (CSS hides only
+  `.csv-edit` when `.viewing`); in view mode only the table. **`parseCsv` (editor.js) is the single
+  parse path and must never throw** — it's RFC-4180-ish (quoted fields, `""` escapes, embedded
+  newlines), auto-detects the delimiter (`,`/`;`/tab) via `detectCsvDelimiter`, and flags
+  `unterminated` for an open quote; the view pads ragged rows and shows a `.csv-warn` banner for
+  unterminated/ragged input rather than breaking. Cells are filled via `textContent` (no XSS). The
+  exports reuse `parseCsv`: `pageToMarkdown` emits a GFM table, `pageToHtml` a `<table class="csv">`.
 - **Sidebar tree is keyboard-operable + ARIA (a11y pass).** `#tree` is `role="tree"`; rows
   (`.tree-row`) and Miller folder cards (`.subfolder-card`) are `role="treeitem"` with a
   `data-path`, `aria-label`, roving `tabindex` (exactly one row is `tabindex=0` via

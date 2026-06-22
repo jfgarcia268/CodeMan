@@ -729,6 +729,56 @@ function newChecklistBlock() {
   return { type: 'checklist', label: '', checklist: true, items: [{ text: '', done: false }] };
 }
 
+// A CSV (table) block: raw CSV text lives in block.code; view mode renders it as a
+// table. First row is the header.
+function newCsvBlock() {
+  return { type: 'csv', label: '', code: '', csv: true };
+}
+
+// Auto-detect the field delimiter from the first non-empty line (outside quotes):
+// comma, semicolon or tab. Defaults to comma when none stands out.
+function detectCsvDelimiter(text) {
+  const firstLine = String(text || '').split(/\r?\n/).find(l => l.trim().length) || '';
+  const counts = { ',': 0, ';': 0, '\t': 0 };
+  let q = false;
+  for (const ch of firstLine) {
+    if (ch === '"') q = !q;
+    else if (!q && Object.prototype.hasOwnProperty.call(counts, ch)) counts[ch]++;
+  }
+  let best = ',', n = 0;
+  for (const d of [',', ';', '\t']) if (counts[d] > n) { n = counts[d]; best = d; }
+  return n > 0 ? best : ',';
+}
+
+// Tolerant CSV parser (RFC-4180-ish): handles quoted fields, "" escapes, and
+// delimiters/newlines inside quotes. It NEVER throws — malformed input (e.g. an
+// unterminated quote) still yields rows, with `unterminated` flagged so the view
+// can warn instead of breaking. Returns { rows, delim, unterminated }.
+function parseCsv(text, delim) {
+  const s = String(text == null ? '' : text);
+  const d = delim || detectCsvDelimiter(s);
+  const rows = []; let row = [], field = '', inQ = false, i = 0;
+  while (i < s.length) {
+    const c = s[i];
+    if (inQ) {
+      if (c === '"') {
+        if (s[i + 1] === '"') { field += '"'; i += 2; continue; }  // escaped quote
+        inQ = false; i++; continue;
+      }
+      field += c; i++; continue;
+    }
+    if (c === '"') { inQ = true; i++; continue; }
+    if (c === d) { row.push(field); field = ''; i++; continue; }
+    if (c === '\r') { i++; continue; }                              // swallow CR (CRLF)
+    if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; i++; continue; }
+    field += c; i++;
+  }
+  row.push(field); rows.push(row);
+  // a trailing newline yields a final empty row — drop it (but keep a lone empty row)
+  if (rows.length > 1) { const last = rows[rows.length - 1]; if (last.length === 1 && last[0] === '') rows.pop(); }
+  return { rows, delim: d, unterminated: inQ };
+}
+
 /* ---------- BLOCK KINDS (unified create + convert) ---------- */
 // Every block is exactly one kind. Centralising this keeps the create menu and
 // the per-block "type" switch in sync, and means a new kind is one row here.
@@ -737,17 +787,20 @@ const BLOCK_KINDS = [
   { kind: 'note', icon: '¶', label: 'Note (MD)' },
   { kind: 'rich', icon: 'T', label: 'Rich Text' },
   { kind: 'checklist', icon: '☑', label: 'Checklist' },
+  { kind: 'csv', icon: '▦', label: 'Table (CSV)' },
 ];
 function blockKind(block) {
   if (block.checklist) return 'checklist';
   if (block.rich) return 'rich';
   if (block.note) return 'note';
+  if (block.csv) return 'csv';
   return 'code';
 }
 function newBlockOfKind(kind) {
   if (kind === 'note') return newNoteBlock();
   if (kind === 'rich') return newRichBlock();
   if (kind === 'checklist') return newChecklistBlock();
+  if (kind === 'csv') return newCsvBlock();
   return newBlock();
 }
 // HTML → plain text preserving line breaks. Done by mapping block-close tags and
@@ -783,10 +836,11 @@ function textToChecklistItems(text) {
 function convertBlock(block, kind) {
   if (blockKind(block) === kind) return;
   const text = blockPlainText(block);
-  delete block.note; delete block.rich; delete block.checklist; delete block.items;
+  delete block.note; delete block.rich; delete block.checklist; delete block.items; delete block.csv;
   if (kind === 'note') { block.note = true; block.type = 'markdown'; block.code = text; }
   else if (kind === 'rich') { block.rich = true; block.type = 'plaintext'; block.code = textToRichHtml(text); }
   else if (kind === 'checklist') { block.checklist = true; block.type = 'checklist'; block.items = textToChecklistItems(text); block.code = ''; }
+  else if (kind === 'csv') { block.csv = true; block.type = 'csv'; block.code = text; }
   else { block.type = 'plaintext'; block.code = text; }   // code
 }
 
@@ -1042,7 +1096,7 @@ function renderSection(section, parentArray, idx, isSub, parentBlocks) {
       onClick: () => { content.blocks.push(newBlockOfKind(k.kind)); renderPage(); scheduleSave(); },
     })));
   });
-  addMenuBtn.title = 'Add a block (Code, Note, Rich Text, Checklist)';
+  addMenuBtn.title = 'Add a block (Code, Note, Rich Text, Checklist, Table/CSV)';
   const addSubBtn = mkBtn('+ Subsection', () => {
     content.subsections.push(newSection());
     renderPage();
@@ -1747,11 +1801,188 @@ function renderRichBlock(block, parentArray, idx) {
   return el;
 }
 
+// CSV (table) block: a textarea of raw CSV while editing (with a live table
+// preview underneath), a rendered table while viewing. Malformed CSV never breaks
+// the view — parseCsv is tolerant and the view shows a warning banner for
+// unterminated quotes or ragged rows. First row is treated as the header.
+function renderCsvBlock(block, parentArray, idx) {
+  const isMobile = document.body.classList.contains('is-mobile');
+  const el = document.createElement('div');
+  el.className = 'block csv' + (blockBackups.has(block) ? '' : ' viewing');
+
+  const toolbar = document.createElement('div');
+  toolbar.className = 'block-toolbar';
+
+  const labelInput = document.createElement('input');
+  labelInput.className = 'block-label';
+  labelInput.placeholder = 'Label (optional)';
+  labelInput.value = block.label || '';
+  labelInput.addEventListener('input', () => { block.label = labelInput.value; scheduleSave(); });
+
+  const spacer = document.createElement('span');
+  spacer.className = 'spacer';
+
+  // The CSV source editor (visible only while editing, via CSS).
+  const textarea = document.createElement('textarea');
+  textarea.className = 'csv-edit';
+  textarea.value = block.code || '';
+  textarea.spellcheck = false;
+  textarea.setAttribute('autocapitalize', 'off');
+  textarea.setAttribute('autocorrect', 'off');
+  textarea.placeholder = 'Enter CSV — the first row is the header.\nname,age,city\nAda,36,London';
+
+  // The rendered table / preview (visible while viewing; also shown live while editing).
+  const view = document.createElement('div');
+  view.className = 'csv-view';
+
+  function autosize() {
+    textarea.style.height = 'auto';
+    textarea.style.height = Math.min(textarea.scrollHeight + 2, editorCapPx()) + 'px';
+  }
+  textarea._autosize = autosize;
+
+  function renderTable() {
+    view.innerHTML = '';
+    const raw = block.code || '';
+    if (!raw.trim()) {
+      const empty = document.createElement('div');
+      empty.className = 'csv-empty';
+      empty.textContent = 'Empty table — edit and enter comma-separated values (first row = header).';
+      view.appendChild(empty);
+      return;
+    }
+    const { rows, unterminated } = parseCsv(raw);
+    const cols = rows.reduce((m, r) => Math.max(m, r.length), 0);
+    const ragged = rows.some(r => r.length !== cols);
+    if (unterminated || ragged) {
+      const warn = document.createElement('div');
+      warn.className = 'csv-warn';
+      warn.textContent = unterminated
+        ? '⚠ Unterminated quote (") in the CSV — showing a best-effort parse.'
+        : '⚠ Rows have differing column counts — short rows were padded. Check the CSV.';
+      view.appendChild(warn);
+    }
+    const wrap = document.createElement('div'); wrap.className = 'csv-table-wrap';
+    const table = document.createElement('table'); table.className = 'csv-table';
+    const header = rows[0] || [];
+    const thead = document.createElement('thead');
+    const htr = document.createElement('tr');
+    for (let c = 0; c < cols; c++) {
+      const th = document.createElement('th');
+      th.textContent = header[c] != null ? header[c] : '';
+      htr.appendChild(th);
+    }
+    thead.appendChild(htr); table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    for (let r = 1; r < rows.length; r++) {
+      const tr = document.createElement('tr');
+      for (let c = 0; c < cols; c++) {
+        const td = document.createElement('td');
+        const v = rows[r][c];
+        if (v == null) td.className = 'csv-pad';            // padded (missing) cell
+        else td.textContent = v;
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody); wrap.appendChild(table); view.appendChild(wrap);
+  }
+
+  const typeBtn = makeTypeMenuButton(block);
+  // sync the textarea into block.code before any convert reads it
+  typeBtn.addEventListener('mousedown', () => { block.code = textarea.value; }, true);
+
+  function refreshRevertLabel() {
+    const backup = blockBackups.has(block) ? blockBackups.get(block) : (block.code || '');
+    const dirty = (block.code || '') !== backup;
+    revertBtn.textContent = dirty ? 'Revert' : 'Cancel';
+    revertBtn.title = dirty ? 'Undo changes made since you started editing' : 'Exit edit mode (no changes)';
+  }
+
+  textarea.addEventListener('input', () => {
+    block.code = textarea.value; renderTable(); autosize(); scheduleSave(); refreshRevertLabel();
+  });
+
+  function enterEdit() {
+    blockBackups.set(block, block.code || '');
+    el.classList.remove('viewing');
+    refreshRevertLabel();
+    requestAnimationFrame(() => { autosize(); textarea.focus(); });
+  }
+  const editBtn = mkBtn('Edit', enterEdit);
+  editBtn.className = 'secondary block-edit';
+  if (isMobile) { editBtn.textContent = '✎'; editBtn.title = 'Edit'; }
+
+  const saveBtn = mkBtn('Save', () => {
+    block.code = textarea.value;
+    blockBackups.delete(block);
+    el.classList.add('viewing');
+    renderTable();
+    savePage();
+    toast('Saved');
+  });
+  saveBtn.className = 'block-save';
+  if (isMobile) { saveBtn.textContent = '✓'; saveBtn.title = 'Save'; }
+
+  const revertBtn = mkBtn('Cancel', () => {
+    const backup = blockBackups.has(block) ? blockBackups.get(block) : (block.code || '');
+    if ((block.code || '') !== backup) {
+      block.code = backup; textarea.value = backup;
+      el.classList.remove('viewing');
+      renderTable(); autosize(); savePage(); refreshRevertLabel(); textarea.focus();
+      toast('Reverted');
+    } else {
+      blockBackups.delete(block);
+      el.classList.add('viewing');
+    }
+  });
+  revertBtn.className = 'secondary block-revert';
+
+  const copyBtn = mkBtn('Copy', () => {
+    copyText(block.code || '').then(ok => { if (ok) recordCopy(block); flashCopied(copyBtn, ok ? 'Copied to clipboard' : 'Copy failed'); });
+  });
+  copyBtn.className = 'secondary block-copy';
+  copyBtn.title = 'Copy raw CSV to clipboard';
+  if (isMobile) copyBtn.textContent = '⧉';
+
+  const dupBtn = mkBtn('Duplicate', () => {
+    parentArray.push(JSON.parse(JSON.stringify(block)));
+    renderPage();
+    scheduleSave();
+    toast('Block duplicated');
+  });
+  dupBtn.className = 'secondary block-dup';
+
+  const overflowBtn = mkBtn('⋯', () => {
+    showMiniMenu(overflowBtn, [
+      { icon: '⧉', label: 'Duplicate', onClick: () => dupBtn.click() },
+      { divider: true },
+      ...BLOCK_KINDS.map(k => ({
+        icon: k.icon, label: k.label, active: blockKind(block) === k.kind,
+        onClick: () => { block.code = textarea.value; convertBlock(block, k.kind); renderPage(); scheduleSave(); },
+      })),
+    ]);
+  });
+  overflowBtn.className = 'secondary block-overflow';
+  overflowBtn.title = 'More actions';
+
+  const delBtn = mkBtn('Delete', () => { parentArray.splice(idx, 1); renderPage(); scheduleSave(); });
+  delBtn.className = 'danger';
+  if (isMobile) { delBtn.textContent = '✕'; delBtn.title = 'Delete'; }
+
+  toolbar.append(labelInput, spacer, typeBtn, editBtn, saveBtn, revertBtn, copyBtn, dupBtn, overflowBtn, delBtn);
+  el.append(toolbar, textarea, view);
+  renderTable();
+  if (!el.classList.contains('viewing')) requestAnimationFrame(autosize);
+  return el;
+}
+
 function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh, subsectionsArray) {
   // Rich-text and checklist blocks aren't code/markdown surfaces — render them
   // via their own paths (no gutter, lang picker, variables, etc.).
   if (block.checklist) return renderChecklistBlock(block, parentArray, idx);
   if (block.rich) return renderRichBlock(block, parentArray, idx);
+  if (block.csv) return renderCsvBlock(block, parentArray, idx);
 
   const el = document.createElement('div');
   // stay in edit mode if an edit session backup exists for this block
@@ -2312,6 +2543,8 @@ function editorCapPx() {
         .forEach(ta => { if (ta._autosize) ta._autosize(); });
       document.querySelectorAll('.block:not(.note):not(.viewing) .code-wrap')
         .forEach(cw => { if (cw._autosize) cw._autosize(); });
+      document.querySelectorAll('.block.csv:not(.viewing) .csv-edit')
+        .forEach(ta => { if (ta._autosize) ta._autosize(); });
     }, 120);
   };
   window.addEventListener('resize', refit);

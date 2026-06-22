@@ -320,6 +320,34 @@
     const e = { type: 'bash', code: '- [ ] a\n- [x] b' };
     convertBlock(e, 'checklist');
     t('code "- [x]" lines parse into checklist items', e.items.map(i => [i.text, i.done]), [['a', false], ['b', true]]);
+    // CSV is a text-backed kind: code↔csv round-trips the raw text losslessly
+    const f = { type: 'bash', code: 'a,b\n1,2' };
+    convertBlock(f, 'csv');
+    t('code→csv sets flag + keeps text', [f.csv === true, f.type, f.code], [true, 'csv', 'a,b\n1,2']);
+    convertBlock(f, 'code');
+    t('csv→code keeps text + drops flag', [!!f.csv, f.code], [false, 'a,b\n1,2']);
+    t('blockPlainText csv returns raw', blockPlainText({ csv: true, code: 'x,y\n1,2' }), 'x,y\n1,2');
+    t('blockKind detects csv', blockKind({ csv: true }), 'csv');
+  })();
+
+  // parseCsv: tolerant RFC-4180-ish parser (quoting, escapes, embedded newlines,
+  // delimiter detection, and graceful handling of malformed input).
+  (function () {
+    t('parseCsv simple rows', parseCsv('a,b,c\n1,2,3').rows, [['a', 'b', 'c'], ['1', '2', '3']]);
+    t('parseCsv trailing newline dropped', parseCsv('a,b\n1,2\n').rows, [['a', 'b'], ['1', '2']]);
+    t('parseCsv quoted comma stays one field', parseCsv('name,note\n"Doe, John",hi').rows, [['name', 'note'], ['Doe, John', 'hi']]);
+    t('parseCsv escaped quote ""', parseCsv('q\n"she said ""hi"""').rows, [['q'], ['she said "hi"']]);
+    t('parseCsv embedded newline in quotes', parseCsv('a\n"l1\nl2"').rows, [['a'], ['l1\nl2']]);
+    t('parseCsv CRLF handled', parseCsv('a,b\r\n1,2').rows, [['a', 'b'], ['1', '2']]);
+    t('parseCsv semicolon auto-detected', parseCsv('a;b;c\n1;2;3').delim, ';');
+    t('parseCsv tab auto-detected', parseCsv('a\tb\n1\t2').delim, '\t');
+    // malformed: unterminated quote is flagged, never throws, still yields rows
+    const u = parseCsv('a,b\n"oops,1');
+    t('parseCsv unterminated quote flagged', u.unterminated, true);
+    t('parseCsv unterminated still parses best-effort', u.rows[0], ['a', 'b']);
+    // ragged rows are preserved as-is (the view pads them for display)
+    t('parseCsv ragged rows preserved', parseCsv('a,b,c\n1,2').rows, [['a', 'b', 'c'], ['1', '2']]);
+    t('parseCsv empty string → one empty row', parseCsv('').rows, [['']]);
   })();
 
   // Deep-search render cap (DEEP_MATCH_CAP) + the "showing N of M" note

@@ -1834,6 +1834,36 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   cursor: pointer; transition: background .12s ease, border-color .12s ease;
 }
 .todo-add:hover { background: #3a3a3d; border-color: var(--accent); }
+
+/* ---- CSV (table) block ---- */
+.block.csv .csv-edit {
+  display: block; width: 100%; box-sizing: border-box;
+  margin: 8px 14px; width: calc(100% - 28px);
+  background: #303841; color: var(--text);
+  border: 1px solid var(--border-2); border-radius: 6px;
+  padding: 8px 10px; font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 13px; line-height: 1.5; resize: vertical;
+  max-height: 60vh; overflow: auto; tab-size: 4;
+}
+.block.csv.viewing .csv-edit { display: none; }
+.block.csv .csv-view { padding: 6px 14px 12px; }
+.block.csv:not(.viewing) .csv-view { padding-top: 0; opacity: .92; }   /* live preview while editing */
+.csv-table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; }
+.csv-table { border-collapse: collapse; width: 100%; font-size: 13px; }
+.csv-table th, .csv-table td {
+  border: 1px solid var(--border-2); padding: 5px 10px; text-align: left;
+  vertical-align: top; white-space: pre-wrap; word-break: break-word;
+}
+.csv-table thead th { background: var(--panel-2); color: #fff; font-weight: 600; position: sticky; top: 0; }
+.csv-table tbody tr:nth-child(even) td { background: rgba(255,255,255,.02); }
+.csv-table td.csv-pad { background: rgba(255,255,255,.015); }
+.csv-empty { color: var(--text-dim); font-size: 13px; font-style: italic; padding: 4px 0; }
+.csv-warn {
+  color: #e7b35c; background: rgba(231,179,92,.1);
+  border: 1px solid rgba(231,179,92,.35); border-radius: 5px;
+  font-size: 12px; padding: 5px 10px; margin: 0 0 8px;
+}
+
 /* the per-block type switch */
 .block-toolbar .type-menu { font-size: 11px; }
 
@@ -2019,12 +2049,13 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
   /* --- 16px inputs so iOS Safari doesn't zoom on focus --- */
   .sidebar-search input, .page-search input, .modal-input, .cmdk-input,
-  .todo-text, .section-title, .block-label, .pending-input { font-size: 16px; }
+  .todo-text, .section-title, .block-label, .pending-input, .csv-edit { font-size: 16px; }
 
   /* --- editor max-height: smaller on phones, dynamic-viewport so it tracks the
      browser chrome / on-screen keyboard (dvh); 50vh fallback for old engines --- */
   .block:not(.note):not(.viewing) .code-wrap,
   body.is-mobile .block.note .code-edit,
+  body.is-mobile .block.csv .csv-edit,
   body.is-mobile .block.rich:not(.viewing) .rich-surface { max-height: 50vh; max-height: 50dvh; }
 
   /* --- header create group + tools: bigger tap targets --- */
