@@ -13,6 +13,8 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
 
 ## [Unreleased]
 
+## [1.9.0] — 2026-06-23
+
 ### Added
 - **CSV / table block** — a new block kind. Edit it as plain CSV text (the first row is the
   header); when not editing it renders as a clean table. The parser handles quoted fields,
@@ -36,6 +38,8 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
   wrap prose instead (so a long paragraph stays readable while editing).
 - Wide content in **Note (Markdown)** and **Rich-text** blocks now scrolls horizontally in view mode:
   fenced code blocks and tables get their own horizontal scrollbar instead of spilling/clipping.
+- A two-finger sideways trackpad swipe over a horizontally-scrolling editor no longer triggers the
+  browser's back/forward navigation (overscroll is contained at the page root).
 
 ## [1.8.0] — 2026-06-19
 
