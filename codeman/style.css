@@ -19,6 +19,13 @@
 }
 
 * { box-sizing: border-box; }
+html, body {
+  /* Contain horizontal overscroll at the root so a two-finger sideways swipe (esp. over
+     the now horizontally-scrollable code/CSV/JSON editors) can't escape into the browser's
+     back/forward navigation gesture — this is a single-page app; swipe-back would wipe nav
+     state. `contain` stops the chain to the browser but keeps normal in-page scrolling. */
+  overscroll-behavior-x: contain;
+}
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
