@@ -91,6 +91,23 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
 - TC-editor-06 (A): paste `<script>`/HTML into **note** (markdown, `html:false`) and **rich**
   (sanitizer strips script/handlers/`javascript:`) — escaping holds (security boundary).
 
+### TC-hscroll — Source-editor horizontal scroll
+- TC-hscroll-01 (P): code **edit mode** — a block with a >200-char single line; the colored layer
+  tracks the caret as you scroll right, and **keeps tracking while typing** (no snap-back to clipped
+  on each keystroke — the `max-content` `<pre>` width is set inline in `updatePreview`).
+- TC-hscroll-02 (P): code **view mode** — a >200-char line scrolls horizontally; `.code-view` is
+  `overflow-x:auto` and shows **no vertical scrollbar** (height is content-driven).
+- TC-hscroll-03 (A): line numbers **ON and OFF** — gutter rows stay aligned with code rows while
+  scrolled, and a scrolled-right line never exposes an unpainted right-edge background gap.
+- TC-hscroll-04 (A): the editor **resize handle** still works (drag-to-resize unaffected).
+- TC-hscroll-05 (P): **CSV / JSON** long lines scroll horizontally in their source editors. **Note**
+  (Markdown) editors **wrap** instead (`white-space: pre-wrap`) — prose stays readable; a long unbroken
+  string soft-wraps in the textarea (no horizontal scroll), which is correct for prose, not source.
+- TC-hscroll-06 (P): the **thin dark themed scrollbar** appears only when content overflows
+  (macOS overlay bars unaffected).
+- TC-hscroll-07 (E): **Windows / Firefox** scrollbar theming (`scrollbar-width`/`scrollbar-color`
+  vs `::-webkit-scrollbar`) and **mobile touch** horizontal scroll.
+
 ### TC-csv — CSV / table block
 - TC-csv-01 (P): add a CSV block; enter `name,age\nAda,36` → view mode renders a table with the
   first row as the `<thead>` header; Edit shows the textarea + a live preview; Save/Cancel/Revert,
@@ -112,7 +129,7 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
   Save/Cancel/Revert, Copy (copies **raw JSON**), Duplicate, Delete behave like other blocks.
 - TC-json-02 (P): **copy-path-on-click** — clicking a key/index copies its JS-accessor path
   (`root.records[0].Id`; non-identifier keys bracket-quoted: `root["odd key"]`); collapse/expand
-  nodes via the ▸/▾ toggle. **[auto: tests.html jsonPath]**
+  individual nodes via the ▸/▾ toggle. **[auto: tests.html jsonPath]**
 - TC-json-03 (A): **invalid JSON never breaks the view** — malformed input shows a `.json-warn`
   banner with the parse error + the raw text in a `.json-raw` `<pre>` (no throw, no blank block);
   empty input shows the placeholder. `parseJsonSafe` never throws. **[auto: tests.html parseJsonSafe]**
@@ -121,6 +138,11 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
 - TC-json-05 (E): **Format** (⋯ menu) pretty-prints with 2-space indent (no-op + toast on invalid);
   export — Markdown emits a pretty ` ```json ` fence, HTML a highlighted `<pre>` (raw fallback when
   unparseable); raw JSON preserved in `block.code` on import. **[auto: tests.html formatJson]**
+- TC-json-06 (P): **collapse-all / expand-all toggle** — the toolbar `⊟`/`⊞` button folds/unfolds
+  EVERY node at once; the glyph reflects the live `<details>` state (`⊟` when any open, `⊞` when all
+  closed, and it updates when a single node is toggled by hand). **[auto: tests.html makeTreeToggleBtn]**
+- TC-json-07 (A): the toggle is **hidden** (`display:none`) when the view has no container nodes —
+  a scalar value, an empty block, or an invalid-parse warning. **[auto: tests.html makeTreeToggleBtn]**
 
 ### TC-convert — Block-kind conversion
 - TC-convert-01 (P): code→note→rich→checklist→csv→json→code carries text; rich→other **preserves

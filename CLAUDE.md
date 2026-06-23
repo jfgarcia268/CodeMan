@@ -112,8 +112,8 @@ the load order in `index.html` *is* the dependency order. Edit a file, reload th
   `items:[{text,done}]`), **csv** (`csv:true`, raw CSV text in `code` rendered as a table in
   view mode — `parseCsv`/`renderCsvBlock` in `editor.js`), **json** (`json:true`, raw JSON text
   in `code` rendered as a collapsible copy-path tree in view mode — `parseJsonSafe`/
-  `renderJsonBlock` in `editor.js`). `blockKind()` derives the kind; `convertBlock()` switches a
-  block to any other kind carrying text across.
+  `renderJsonBlock` in `editor.js`). `blockKind()` derives the kind;
+  `convertBlock()` switches a block to any other kind carrying text across.
 - **Legacy shape:** older sections wrapped content in `tabs:[{name,blocks,subsections}]`.
   The tabs feature was removed, but `sectionContent(section)` transparently reads both
   shapes. **New sections are written flat — don't reintroduce `.tabs`.**
@@ -402,6 +402,15 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   via `formatJson` = `JSON.stringify(…,2)`). Exports: `pageToMarkdown` emits a pretty ```json fence,
   `pageToHtml` a highlighted `<pre>` (static — no interactive tree in export). `jsonPath`/
   `parseJsonSafe`/`formatJson` are pure → unit-tested in `tests.html`.
+- **`buildJsonTree` cycle guard = a DFS ancestor-set with pop-on-exit.** It takes a 4th
+  `seen` Set: a value already on the current path renders a `.json-circular` `[circular]` leaf (no
+  infinite recursion), and **`seen.delete(value)` on exit** means only true *ancestors* count — a
+  shared-but-acyclic ref (same object via two sibling keys) renders fully in both branches.
+- **JSON tree collapse/expand toggle.** `makeTreeToggleBtn(view)` + `syncTreeToggle(btn, view)` (JSON
+  block only) read the **live** `<details>.json-node` state at click/sync time — `⊟` collapses-all /
+  `⊞` expands-all (NOT the per-node ▾/▸ markers). The button **hides** when the view has no container
+  nodes (scalar/empty/invalid). A capture-phase `toggle` listener on the view re-syncs the glyph when a
+  single node is hand-toggled; `renderTree()` calls `syncTreeToggle` at its end.
 - **Sidebar tree is keyboard-operable + ARIA (a11y pass).** `#tree` is `role="tree"`; rows
   (`.tree-row`) and Miller folder cards (`.subfolder-card`) are `role="treeitem"` with a
   `data-path`, `aria-label`, roving `tabindex` (exactly one row is `tabindex=0` via
@@ -541,6 +550,19 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   with line numbers on or off). A debounced `window`/`visualViewport` resize listener re-fits open
   editors; the dragged height + autosize state reset on Save/Cancel. Don't reintroduce a CSS-only code
   cap — the gutter-independence requires the JS height.
+- **Code-view horizontal scroll range comes from a `max-content`-wide `<pre>` set INLINE.**
+  `updatePreview()` (editor.js) rebuilds the Prism `<pre>`'s `cssText` on **every keystroke**, so the
+  `width:max-content;min-width:100%` that gives `.code-view` a real horizontal scroll range MUST be in
+  that inline string (a `style.css` width rule would be overridden each re-highlight → the colored
+  layer snaps back to clipped while typing). The static-view `<pre>` rule in `style.css` carries the
+  same values as belt-and-suspenders (inline wins where both apply). The scrolling itself: **edit
+  mode** = `syncScroll` mirrors `view.scrollLeft = textarea.scrollLeft` (the textarea is the single
+  scroller; `.code-view` stays `overflow:hidden`); **view mode** = `.block.viewing .code-view {
+  overflow-x:auto }` (overflow-x only — view height is content-driven, no vertical bar). Backgrounds
+  live on the scroll containers (`.code-view` / `.code-stack`), so a line scrolled right never exposes
+  an unpainted right-edge gap. A **thin dark themed scrollbar** (`scrollbar-width:thin` +
+  `::-webkit-scrollbar` 8px, `--border-2` thumb) is scoped to the source editors (code/note/csv/json
+  edit + their scrollable views) — NOT `.block.note .code-view` (wrapped prose, never scrolls).
 - **Deep (content) search renders a capped result set.** `runDeepSearch` (ui.js) keeps the full
   match count in `deepMatchTotal` but slices `deepMatches` to `DEEP_MATCH_CAP` (200, tree.js) — a
   broad term on a large library would otherwise paint thousands of sidebar rows synchronously (~1.5s

@@ -7,6 +7,9 @@
   --panel-2: #2d2d30;     /* raised surface (menus, hovers) */
   --border: #333;         /* hairline borders */
   --border-2: #444;       /* stronger borders */
+  --scrollbar-thumb: #5f656d;        /* editor scrollbar thumb — brighter than a border so
+                                        the thin bar is actually discoverable on slate */
+  --scrollbar-thumb-hover: #727983;
   --text: #ddd;           /* primary text */
   --text-dim: #888;       /* secondary text */
   --muted: #9aa0a8;       /* dim labels/stamps — was an undefined fallback; centralized to pass AA */
@@ -1266,6 +1269,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
    wrapper supplies the 10px padding that matches the gutter's top padding). */
 .code-view pre,
 .code-view pre[class*="language-"] { margin: 0; padding: 0; line-height: 19px; background: none; white-space: pre; }
+/* The horizontal-scroll width (max-content) for a CODE block's colored layer is applied
+   INLINE in updatePreview() (it must survive the per-keystroke re-highlight). It is NOT a
+   CSS rule here on purpose — a `.code-view pre { width:max-content }` rule would also hit a
+   NOTE block's fenced-code <pre> (notes share .code-view) and make it overflow the container
+   instead of scrolling inside its own overflow-x:auto. Keep code-pre width inline-only. */
 .code-view code,
 .code-view code[class*="language-"] {
   line-height: 19px;
@@ -1301,6 +1309,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
    editor height and scrolls in lockstep with the textarea (syncScroll sets its scrollTop).
    In view mode it stays static and sizes the stack (full code, page scrolls). */
 .block:not(.viewing) .code-view { background: #303841; position: absolute; inset: 0; }
+/* View mode (no overlay textarea): the colored layer scrolls long lines directly.
+   overflow-x only — view height is content-driven, so no vertical scrollbar appears. */
+.block.viewing .code-view { overflow-x: auto; }
 /* The colored layer sizes the stack from the Prism <pre>, but a <pre> collapses
    its final trailing newline (and an empty block renders no line at all) — so a
    line-numbered block can leave the last gutter row without a matching
@@ -1317,6 +1328,34 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .note-toggle.on { background: #7a5cc0; color: #fff; }
 .copy-as { padding-left: 7px; padding-right: 7px; }
 
+/* ---------- Thin dark scrollbar for source editors (Win/Linux/desktop-app) ---------- */
+.code-edit, .code-view,
+.csv-edit, .json-edit, .csv-table-wrap, .json-tree, .json-raw,
+.block.note .code-edit {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+.code-edit::-webkit-scrollbar, .code-view::-webkit-scrollbar,
+.csv-edit::-webkit-scrollbar, .json-edit::-webkit-scrollbar,
+.csv-table-wrap::-webkit-scrollbar, .json-tree::-webkit-scrollbar, .json-raw::-webkit-scrollbar,
+.block.note .code-edit::-webkit-scrollbar { width: 8px; height: 8px; }
+.code-edit::-webkit-scrollbar-track, .code-view::-webkit-scrollbar-track,
+.csv-edit::-webkit-scrollbar-track, .json-edit::-webkit-scrollbar-track,
+.csv-table-wrap::-webkit-scrollbar-track, .json-tree::-webkit-scrollbar-track, .json-raw::-webkit-scrollbar-track,
+.block.note .code-edit::-webkit-scrollbar-track { background: transparent; }
+.code-edit::-webkit-scrollbar-thumb, .code-view::-webkit-scrollbar-thumb,
+.csv-edit::-webkit-scrollbar-thumb, .json-edit::-webkit-scrollbar-thumb,
+.csv-table-wrap::-webkit-scrollbar-thumb, .json-tree::-webkit-scrollbar-thumb, .json-raw::-webkit-scrollbar-thumb,
+.block.note .code-edit::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 4px; }
+.code-edit::-webkit-scrollbar-thumb:hover, .code-view::-webkit-scrollbar-thumb:hover,
+.csv-edit::-webkit-scrollbar-thumb:hover, .json-edit::-webkit-scrollbar-thumb:hover,
+.csv-table-wrap::-webkit-scrollbar-thumb:hover, .json-tree::-webkit-scrollbar-thumb:hover, .json-raw::-webkit-scrollbar-thumb:hover,
+.block.note .code-edit::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
+.code-edit::-webkit-scrollbar-corner, .code-view::-webkit-scrollbar-corner,
+.csv-edit::-webkit-scrollbar-corner, .json-edit::-webkit-scrollbar-corner,
+.csv-table-wrap::-webkit-scrollbar-corner, .json-tree::-webkit-scrollbar-corner, .json-raw::-webkit-scrollbar-corner,
+.block.note .code-edit::-webkit-scrollbar-corner { background: transparent; }
+
 /* ---------- NOTE BLOCKS (rendered Markdown) ---------- */
 /* In note mode the textarea is the editor (opaque, normal text) and the view is
    the rendered prose — they swap on edit/view instead of overlaying. */
@@ -1332,10 +1371,13 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   min-height: 58px;          /* ~3 lines, not a fixed 90px box */
   max-height: 60vh;
   resize: vertical;
-  overflow-y: auto;
+  overflow: auto;            /* prose wraps (pre-wrap); a long UNBROKEN token still scrolls x */
   color: var(--text);
   caret-color: var(--accent);
   background: var(--bg);
+  /* Notes are PROSE, not source — wrap normal paragraphs so a sentence stays readable while
+     editing; but with overflow-wrap left at `normal`, a long unbroken string (URL/base64/code)
+     doesn't wrap and scrolls horizontally instead. Code/CSV/JSON editors stay `pre` (no wrap). */
   white-space: pre-wrap;
   border: 1px solid var(--border-2);
   border-radius: 4px;
@@ -1456,6 +1498,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .block.rich .rich-surface h3 { font-size: 1.15em; margin: 8px 0 4px; }
 .block.rich .rich-surface blockquote { border-left: 3px solid var(--accent); margin: 8px 0; padding: 2px 12px; color: #b9c0c9; }
 .block.rich .rich-surface a { color: #4ea0e0; }
+/* Wide non-wrapping content in a rich block (a <pre> code chunk, a pasted table) must
+   scroll horizontally rather than spill/clip in view mode — the surface itself stays
+   overflow:visible (prose wraps via overflow-wrap:anywhere); only these inner blocks scroll.
+   Mirrors the note-view <pre>/<table> pattern. */
+.block.rich .rich-surface pre { max-width: 100%; overflow-x: auto; white-space: pre; }
+.block.rich .rich-surface table { display: block; max-width: 100%; overflow-x: auto; }
 
 /* tiny "Copied to clipboard" bubble that pops next to the Copy button */
 .copy-pop {
@@ -1844,6 +1892,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   padding: 8px 10px; font-family: "SF Mono", Menlo, Consolas, monospace;
   font-size: 13px; line-height: 1.5; resize: vertical;
   max-height: 60vh; overflow: auto; tab-size: 4;
+  white-space: pre;          /* no soft-wrap — long CSV lines scroll horizontally */
 }
 .block.csv.viewing .csv-edit { display: none; }
 .block.csv .csv-view { padding: 6px 14px 12px; }
@@ -1873,6 +1922,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   padding: 8px 10px; font-family: "SF Mono", Menlo, Consolas, monospace;
   font-size: 13px; line-height: 1.5; resize: vertical;
   max-height: 60vh; overflow: auto; tab-size: 2;
+  white-space: pre;          /* no soft-wrap — long JSON lines scroll horizontally */
 }
 .block.json.viewing .json-edit { display: none; }
 .block.json .json-view { padding: 6px 14px 12px; }
@@ -1901,6 +1951,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .json-number { color: #b5cea8; }
 .json-boolean { color: #569cd6; }
 .json-null { color: #808080; font-style: italic; }
+.json-circular { color: var(--text-dim); font-style: italic; }
 .json-empty { color: var(--text-dim); font-size: 13px; font-style: italic; padding: 4px 0; }
 .json-raw {
   font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; line-height: 1.5;
@@ -2060,6 +2111,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   body.is-mobile .block-toolbar .block-save,
   body.is-mobile .block-toolbar .block-copy,
   body.is-mobile .block-toolbar .block-overflow,
+  body.is-mobile .block-toolbar .tree-toggle,
   body.is-mobile .block-toolbar .danger {
     min-width: 34px; justify-content: center; padding: 5px 6px;
   }

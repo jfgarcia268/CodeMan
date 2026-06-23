@@ -2015,7 +2015,11 @@ function renderCsvBlock(block, parentArray, idx) {
 // Build the collapsible tree DOM for a parsed JSON value. Pure DOM (textContent only,
 // never innerHTML of data) so arbitrary string values can't inject markup. Each key/index
 // is clickable → copies its JS-accessor path. `path` is the accessor key list to here.
-function buildJsonTree(value, path, onCopyPath) {
+// `seen` is a DFS ancestor-set (pop-on-exit) that guards reference cycles: a value already
+// on the current path renders `[circular]` instead of recursing forever, but
+// shared-but-acyclic refs (the same object reached via two sibling keys) render fully in
+// both places.
+function buildJsonTree(value, path, onCopyPath, seen) {
   const type = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
 
   // Leaf (string / number / boolean / null) — a single typed value span.
@@ -2025,6 +2029,15 @@ function buildJsonTree(value, path, onCopyPath) {
     v.textContent = type === 'string' ? JSON.stringify(value) : String(value);
     return v;
   }
+
+  seen = seen || new Set();
+  if (seen.has(value)) {
+    const c = document.createElement('span');
+    c.className = 'json-val json-circular';
+    c.textContent = '[circular]';
+    return c;
+  }
+  seen.add(value);
 
   const entries = type === 'array'
     ? value.map((v, i) => [i, v])
@@ -2055,11 +2068,37 @@ function buildJsonTree(value, path, onCopyPath) {
     key.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); onCopyPath(childPath, key); });
     const colon = document.createElement('span');
     colon.className = 'json-colon'; colon.textContent = ':';
-    row.append(key, colon, buildJsonTree(v, childPath, onCopyPath));
+    row.append(key, colon, buildJsonTree(v, childPath, onCopyPath, seen));
     kids.appendChild(row);
   });
   details.appendChild(kids);
+  seen.delete(value);                                   // pop on exit — only ancestors count
   return details;
+}
+
+// Icon-only collapse-all / expand-all toggle for a tree view. Reads the LIVE <details>
+// state of the node container at click time (`makeTreeToggleBtn`) and reflects it
+// (`syncTreeToggle`): ⊟ = the next click collapses all, ⊞ = the next click expands all
+// (NOT ▾/▸ — those are the per-node markers). Hidden when the view has no container nodes
+// (a scalar / empty / invalid tree has nothing to fold). Used by the JSON block.
+function makeTreeToggleBtn(view) {
+  const btn = mkBtn('⊟', () => {
+    const nodes = view.querySelectorAll('details.json-node');
+    if (!nodes.length) return;
+    const anyOpen = Array.prototype.some.call(nodes, n => n.open);
+    nodes.forEach(n => n.open = !anyOpen);
+    syncTreeToggle(btn, view);
+  });
+  btn.className = 'secondary tree-toggle';
+  return btn;
+}
+function syncTreeToggle(btn, view) {
+  const nodes = view.querySelectorAll('details.json-node');
+  btn.style.display = nodes.length ? '' : 'none';
+  if (!nodes.length) return;
+  const anyOpen = Array.prototype.some.call(nodes, n => n.open);
+  btn.textContent = anyOpen ? '⊟' : '⊞';
+  btn.title = anyOpen ? 'Collapse all' : 'Expand all';
 }
 
 // JSON (tree-viewer) block: a textarea of raw JSON while editing (with a live tree
@@ -2096,6 +2135,11 @@ function renderJsonBlock(block, parentArray, idx) {
   const view = document.createElement('div');
   view.className = 'json-view';
 
+  // Shared collapse-all/expand-all toggle. Re-synced after every render + on per-node
+  // <details> toggles (capture listener) so its glyph always reflects the live state.
+  const treeToggleBtn = makeTreeToggleBtn(view);
+  view.addEventListener('toggle', () => syncTreeToggle(treeToggleBtn, view), true);
+
   function autosize() {
     textarea.style.height = 'auto';
     textarea.style.height = Math.min(textarea.scrollHeight + 2, editorCapPx()) + 'px';
@@ -2114,6 +2158,7 @@ function renderJsonBlock(block, parentArray, idx) {
       empty.className = 'json-empty';
       empty.textContent = 'Empty — edit and paste JSON to see it as a tree.';
       view.appendChild(empty);
+      syncTreeToggle(treeToggleBtn, view);
       return;
     }
     const { ok, value, error } = parseJsonSafe(raw);
@@ -2125,12 +2170,14 @@ function renderJsonBlock(block, parentArray, idx) {
       pre.className = 'json-raw';
       pre.textContent = raw;                              // raw text fallback (still readable)
       view.append(warn, pre);
+      syncTreeToggle(treeToggleBtn, view);
       return;
     }
     const tree = document.createElement('div');
     tree.className = 'json-tree';
     tree.appendChild(buildJsonTree(value, [], copyPath));
     view.appendChild(tree);
+    syncTreeToggle(treeToggleBtn, view);
   }
 
   const typeBtn = makeTypeMenuButton(block);
@@ -2230,7 +2277,7 @@ function renderJsonBlock(block, parentArray, idx) {
   delBtn.className = 'danger';
   if (isMobile) { delBtn.textContent = '✕'; delBtn.title = 'Delete'; }
 
-  toolbar.append(labelInput, spacer, typeBtn, editBtn, saveBtn, revertBtn, copyBtn, dupBtn, overflowBtn, delBtn);
+  toolbar.append(labelInput, spacer, typeBtn, editBtn, saveBtn, revertBtn, treeToggleBtn, copyBtn, dupBtn, overflowBtn, delBtn);
   el.append(toolbar, textarea, view);
   renderTree();
   if (!el.classList.contains('viewing')) requestAnimationFrame(autosize);
@@ -2749,7 +2796,13 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     const pre = document.createElement('pre');
     // Inline metrics override the Prism theme (padding:1em; line-height:1.5),
     // which would otherwise make code taller than the gutter and drift.
+    // width:max-content + min-width:100% make the colored <pre> grow to the widest line so
+    // .code-view gains a real horizontal scroll range (syncScroll mirrors the textarea's
+    // scrollLeft onto it). These MUST be inline: updatePreview rebuilds this cssText on every
+    // keystroke (re-highlight), so a style.css width rule would be overridden and the layer
+    // would snap back to clipped while typing.
     pre.style.cssText = 'margin:0;padding:0;background:none;white-space:pre;' +
+      'width:max-content;min-width:100%;' +
       'line-height:' + edLineH + 'px;font-size:' + edFont + 'px;font-family:' + ED_FONT + ';';
     const code = document.createElement('code');
     code.className = 'language-' + lang;

@@ -351,6 +351,37 @@
     t('formatJson 2-space indent', formatJson({ a: 1 }), '{\n  "a": 1\n}');
   })();
 
+  // buildJsonTree cycle guard: a DFS ancestor-set renders genuine cycles as [circular]
+  // (no infinite recursion) but renders shared-but-acyclic refs fully in both branches.
+  (function () {
+    const o = {}; o.self = o;
+    const el = buildJsonTree(o, [], () => {});   // must return, not hang
+    t('buildJsonTree self-ref → [circular] node', !!el.querySelector('.json-circular'), true);
+    const s = { x: 1 };
+    const shared = buildJsonTree({ a: s, b: s }, [], () => {});
+    t('buildJsonTree shared-acyclic → no [circular]', shared.querySelector('.json-circular'), null);
+    const xKeys = Array.prototype.filter.call(shared.querySelectorAll('.json-key'), k => k.textContent === '"x"');
+    t('buildJsonTree shared-acyclic → renders both branches', xKeys.length, 2);
+  })();
+
+  // makeTreeToggleBtn / syncTreeToggle: collapse-all/expand-all reads live <details> state,
+  // hides when the view has no container nodes (scalar/empty/invalid).
+  (function () {
+    const view = document.createElement('div');
+    const tree = document.createElement('div'); tree.className = 'json-tree';
+    tree.appendChild(buildJsonTree({ a: { b: 1 }, c: [1, 2] }, [], () => {}));
+    view.appendChild(tree);
+    const b = makeTreeToggleBtn(view); syncTreeToggle(b, view);
+    t('treeToggle visible when nodes open', [b.style.display, b.textContent], ['', '⊟']);
+    b.click();
+    const nodes = view.querySelectorAll('details.json-node');
+    t('treeToggle click collapses all', Array.prototype.every.call(nodes, n => n.open === false), true);
+    t('treeToggle glyph flips to ⊞', b.textContent, '⊞');
+    const empty = document.createElement('div');
+    const eb = makeTreeToggleBtn(empty); syncTreeToggle(eb, empty);
+    t('treeToggle hidden when no nodes', eb.style.display, 'none');
+  })();
+
   // jsonPath: JS-accessor path builder for copy-path-on-click.
   (function () {
     t('jsonPath identifier keys', jsonPath(['records', 'Id']), 'root.records.Id');
