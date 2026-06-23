@@ -729,6 +729,87 @@ function newChecklistBlock() {
   return { type: 'checklist', label: '', checklist: true, items: [{ text: '', done: false }] };
 }
 
+// A CSV (table) block: raw CSV text lives in block.code; view mode renders it as a
+// table. First row is the header.
+function newCsvBlock() {
+  return { type: 'csv', label: '', code: '', csv: true };
+}
+
+// Auto-detect the field delimiter from the first non-empty line (outside quotes):
+// comma, semicolon or tab. Defaults to comma when none stands out.
+function detectCsvDelimiter(text) {
+  const firstLine = String(text || '').split(/\r?\n/).find(l => l.trim().length) || '';
+  const counts = { ',': 0, ';': 0, '\t': 0 };
+  let q = false;
+  for (const ch of firstLine) {
+    if (ch === '"') q = !q;
+    else if (!q && Object.prototype.hasOwnProperty.call(counts, ch)) counts[ch]++;
+  }
+  let best = ',', n = 0;
+  for (const d of [',', ';', '\t']) if (counts[d] > n) { n = counts[d]; best = d; }
+  return n > 0 ? best : ',';
+}
+
+// Tolerant CSV parser (RFC-4180-ish): handles quoted fields, "" escapes, and
+// delimiters/newlines inside quotes. It NEVER throws — malformed input (e.g. an
+// unterminated quote) still yields rows, with `unterminated` flagged so the view
+// can warn instead of breaking. Returns { rows, delim, unterminated }.
+function parseCsv(text, delim) {
+  const s = String(text == null ? '' : text);
+  const d = delim || detectCsvDelimiter(s);
+  const rows = []; let row = [], field = '', inQ = false, i = 0;
+  while (i < s.length) {
+    const c = s[i];
+    if (inQ) {
+      if (c === '"') {
+        if (s[i + 1] === '"') { field += '"'; i += 2; continue; }  // escaped quote
+        inQ = false; i++; continue;
+      }
+      field += c; i++; continue;
+    }
+    if (c === '"') { inQ = true; i++; continue; }
+    if (c === d) { row.push(field); field = ''; i++; continue; }
+    if (c === '\r') { i++; continue; }                              // swallow CR (CRLF)
+    if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; i++; continue; }
+    field += c; i++;
+  }
+  row.push(field); rows.push(row);
+  // a trailing newline yields a final empty row — drop it (but keep a lone empty row)
+  if (rows.length > 1) { const last = rows[rows.length - 1]; if (last.length === 1 && last[0] === '') rows.pop(); }
+  return { rows, delim: d, unterminated: inQ };
+}
+
+// A JSON (tree-viewer) block: raw JSON text lives in block.code; view mode renders it
+// as a collapsible, typed, copy-path tree. Edit mode is a plain textarea.
+function newJsonBlock() {
+  return { type: 'json', label: '', code: '', json: true };
+}
+
+// Tolerant JSON parse — NEVER throws. Returns { ok, value, error }. Standard JSON.parse
+// (no JSON5/comment leniency on purpose: malformed input should surface its error in the
+// view, the same way the CSV block warns on an unterminated quote).
+function parseJsonSafe(text) {
+  const s = String(text == null ? '' : text);
+  if (!s.trim()) return { ok: false, value: undefined, error: '' };   // empty = no tree, no warning
+  try { return { ok: true, value: JSON.parse(s), error: '' }; }
+  catch (e) { return { ok: false, value: undefined, error: (e && e.message) || 'Invalid JSON' }; }
+}
+
+// Pretty-print a parsed value (2-space indent), used by the Format action + exports.
+function formatJson(value) { return JSON.stringify(value, null, 2); }
+
+// Build a JS-accessor path string from a list of keys/indices, for copy-path-on-click.
+// Numbers → `[0]`; identifier-safe strings → `.name`; everything else → `["odd key"]`.
+function jsonPath(keys) {
+  let out = 'root';
+  for (const k of (keys || [])) {
+    if (typeof k === 'number') out += '[' + k + ']';
+    else if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(k)) out += '.' + k;
+    else out += '[' + JSON.stringify(String(k)) + ']';
+  }
+  return out;
+}
+
 /* ---------- BLOCK KINDS (unified create + convert) ---------- */
 // Every block is exactly one kind. Centralising this keeps the create menu and
 // the per-block "type" switch in sync, and means a new kind is one row here.
@@ -737,17 +818,23 @@ const BLOCK_KINDS = [
   { kind: 'note', icon: '¶', label: 'Note (MD)' },
   { kind: 'rich', icon: 'T', label: 'Rich Text' },
   { kind: 'checklist', icon: '☑', label: 'Checklist' },
+  { kind: 'csv', icon: '▦', label: 'Table (CSV)' },
+  { kind: 'json', icon: '{}', label: 'JSON tree' },
 ];
 function blockKind(block) {
   if (block.checklist) return 'checklist';
   if (block.rich) return 'rich';
   if (block.note) return 'note';
+  if (block.csv) return 'csv';
+  if (block.json) return 'json';
   return 'code';
 }
 function newBlockOfKind(kind) {
   if (kind === 'note') return newNoteBlock();
   if (kind === 'rich') return newRichBlock();
   if (kind === 'checklist') return newChecklistBlock();
+  if (kind === 'csv') return newCsvBlock();
+  if (kind === 'json') return newJsonBlock();
   return newBlock();
 }
 // HTML → plain text preserving line breaks. Done by mapping block-close tags and
@@ -783,10 +870,12 @@ function textToChecklistItems(text) {
 function convertBlock(block, kind) {
   if (blockKind(block) === kind) return;
   const text = blockPlainText(block);
-  delete block.note; delete block.rich; delete block.checklist; delete block.items;
+  delete block.note; delete block.rich; delete block.checklist; delete block.items; delete block.csv; delete block.json;
   if (kind === 'note') { block.note = true; block.type = 'markdown'; block.code = text; }
   else if (kind === 'rich') { block.rich = true; block.type = 'plaintext'; block.code = textToRichHtml(text); }
   else if (kind === 'checklist') { block.checklist = true; block.type = 'checklist'; block.items = textToChecklistItems(text); block.code = ''; }
+  else if (kind === 'csv') { block.csv = true; block.type = 'csv'; block.code = text; }
+  else if (kind === 'json') { block.json = true; block.type = 'json'; block.code = text; }
   else { block.type = 'plaintext'; block.code = text; }   // code
 }
 
@@ -1042,7 +1131,7 @@ function renderSection(section, parentArray, idx, isSub, parentBlocks) {
       onClick: () => { content.blocks.push(newBlockOfKind(k.kind)); renderPage(); scheduleSave(); },
     })));
   });
-  addMenuBtn.title = 'Add a block (Code, Note, Rich Text, Checklist)';
+  addMenuBtn.title = 'Add a block (Code, Note, Rich Text, Checklist, Table/CSV, JSON tree)';
   const addSubBtn = mkBtn('+ Subsection', () => {
     content.subsections.push(newSection());
     renderPage();
@@ -1747,11 +1836,461 @@ function renderRichBlock(block, parentArray, idx) {
   return el;
 }
 
+// CSV (table) block: a textarea of raw CSV while editing (with a live table
+// preview underneath), a rendered table while viewing. Malformed CSV never breaks
+// the view — parseCsv is tolerant and the view shows a warning banner for
+// unterminated quotes or ragged rows. First row is treated as the header.
+function renderCsvBlock(block, parentArray, idx) {
+  const isMobile = document.body.classList.contains('is-mobile');
+  const el = document.createElement('div');
+  el.className = 'block csv' + (blockBackups.has(block) ? '' : ' viewing');
+
+  const toolbar = document.createElement('div');
+  toolbar.className = 'block-toolbar';
+
+  const labelInput = document.createElement('input');
+  labelInput.className = 'block-label';
+  labelInput.placeholder = 'Label (optional)';
+  labelInput.value = block.label || '';
+  labelInput.addEventListener('input', () => { block.label = labelInput.value; scheduleSave(); });
+
+  const spacer = document.createElement('span');
+  spacer.className = 'spacer';
+
+  // The CSV source editor (visible only while editing, via CSS).
+  const textarea = document.createElement('textarea');
+  textarea.className = 'csv-edit';
+  textarea.value = block.code || '';
+  textarea.spellcheck = false;
+  textarea.setAttribute('autocapitalize', 'off');
+  textarea.setAttribute('autocorrect', 'off');
+  textarea.placeholder = 'Enter CSV — the first row is the header.\nname,age,city\nAda,36,London';
+
+  // The rendered table / preview (visible while viewing; also shown live while editing).
+  const view = document.createElement('div');
+  view.className = 'csv-view';
+
+  function autosize() {
+    textarea.style.height = 'auto';
+    textarea.style.height = Math.min(textarea.scrollHeight + 2, editorCapPx()) + 'px';
+  }
+  textarea._autosize = autosize;
+
+  function renderTable() {
+    view.innerHTML = '';
+    const raw = block.code || '';
+    if (!raw.trim()) {
+      const empty = document.createElement('div');
+      empty.className = 'csv-empty';
+      empty.textContent = 'Empty table — edit and enter comma-separated values (first row = header).';
+      view.appendChild(empty);
+      return;
+    }
+    const { rows, unterminated } = parseCsv(raw);
+    const cols = rows.reduce((m, r) => Math.max(m, r.length), 0);
+    const ragged = rows.some(r => r.length !== cols);
+    if (unterminated || ragged) {
+      const warn = document.createElement('div');
+      warn.className = 'csv-warn';
+      warn.textContent = unterminated
+        ? '⚠ Unterminated quote (") in the CSV — showing a best-effort parse.'
+        : '⚠ Rows have differing column counts — short rows were padded. Check the CSV.';
+      view.appendChild(warn);
+    }
+    const wrap = document.createElement('div'); wrap.className = 'csv-table-wrap';
+    const table = document.createElement('table'); table.className = 'csv-table';
+    const header = rows[0] || [];
+    const thead = document.createElement('thead');
+    const htr = document.createElement('tr');
+    for (let c = 0; c < cols; c++) {
+      const th = document.createElement('th');
+      th.textContent = header[c] != null ? header[c] : '';
+      htr.appendChild(th);
+    }
+    thead.appendChild(htr); table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    for (let r = 1; r < rows.length; r++) {
+      const tr = document.createElement('tr');
+      for (let c = 0; c < cols; c++) {
+        const td = document.createElement('td');
+        const v = rows[r][c];
+        if (v == null) td.className = 'csv-pad';            // padded (missing) cell
+        else td.textContent = v;
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody); wrap.appendChild(table); view.appendChild(wrap);
+  }
+
+  const typeBtn = makeTypeMenuButton(block);
+  // sync the textarea into block.code before any convert reads it
+  typeBtn.addEventListener('mousedown', () => { block.code = textarea.value; }, true);
+
+  function refreshRevertLabel() {
+    const backup = blockBackups.has(block) ? blockBackups.get(block) : (block.code || '');
+    const dirty = (block.code || '') !== backup;
+    revertBtn.textContent = dirty ? 'Revert' : 'Cancel';
+    revertBtn.title = dirty ? 'Undo changes made since you started editing' : 'Exit edit mode (no changes)';
+  }
+
+  textarea.addEventListener('input', () => {
+    block.code = textarea.value; renderTable(); autosize(); scheduleSave(); refreshRevertLabel();
+  });
+
+  function enterEdit() {
+    blockBackups.set(block, block.code || '');
+    el.classList.remove('viewing');
+    refreshRevertLabel();
+    requestAnimationFrame(() => { autosize(); textarea.focus(); });
+  }
+  const editBtn = mkBtn('Edit', enterEdit);
+  editBtn.className = 'secondary block-edit';
+  if (isMobile) { editBtn.textContent = '✎'; editBtn.title = 'Edit'; }
+
+  const saveBtn = mkBtn('Save', () => {
+    block.code = textarea.value;
+    blockBackups.delete(block);
+    el.classList.add('viewing');
+    renderTable();
+    savePage();
+    toast('Saved');
+  });
+  saveBtn.className = 'block-save';
+  if (isMobile) { saveBtn.textContent = '✓'; saveBtn.title = 'Save'; }
+
+  const revertBtn = mkBtn('Cancel', () => {
+    const backup = blockBackups.has(block) ? blockBackups.get(block) : (block.code || '');
+    if ((block.code || '') !== backup) {
+      block.code = backup; textarea.value = backup;
+      el.classList.remove('viewing');
+      renderTable(); autosize(); savePage(); refreshRevertLabel(); textarea.focus();
+      toast('Reverted');
+    } else {
+      blockBackups.delete(block);
+      el.classList.add('viewing');
+    }
+  });
+  revertBtn.className = 'secondary block-revert';
+
+  const copyBtn = mkBtn('Copy', () => {
+    copyText(block.code || '').then(ok => { if (ok) recordCopy(block); flashCopied(copyBtn, ok ? 'Copied to clipboard' : 'Copy failed'); });
+  });
+  copyBtn.className = 'secondary block-copy';
+  copyBtn.title = 'Copy raw CSV to clipboard';
+  if (isMobile) copyBtn.textContent = '⧉';
+
+  const dupBtn = mkBtn('Duplicate', () => {
+    parentArray.push(JSON.parse(JSON.stringify(block)));
+    renderPage();
+    scheduleSave();
+    toast('Block duplicated');
+  });
+  dupBtn.className = 'secondary block-dup';
+
+  const overflowBtn = mkBtn('⋯', () => {
+    showMiniMenu(overflowBtn, [
+      { icon: '⧉', label: 'Duplicate', onClick: () => dupBtn.click() },
+      { divider: true },
+      ...BLOCK_KINDS.map(k => ({
+        icon: k.icon, label: k.label, active: blockKind(block) === k.kind,
+        onClick: () => { block.code = textarea.value; convertBlock(block, k.kind); renderPage(); scheduleSave(); },
+      })),
+    ]);
+  });
+  overflowBtn.className = 'secondary block-overflow';
+  overflowBtn.title = 'More actions';
+
+  const delBtn = mkBtn('Delete', () => { parentArray.splice(idx, 1); renderPage(); scheduleSave(); });
+  delBtn.className = 'danger';
+  if (isMobile) { delBtn.textContent = '✕'; delBtn.title = 'Delete'; }
+
+  toolbar.append(labelInput, spacer, typeBtn, editBtn, saveBtn, revertBtn, copyBtn, dupBtn, overflowBtn, delBtn);
+  el.append(toolbar, textarea, view);
+  renderTable();
+  if (!el.classList.contains('viewing')) requestAnimationFrame(autosize);
+  return el;
+}
+
+// Build the collapsible tree DOM for a parsed JSON value. Pure DOM (textContent only,
+// never innerHTML of data) so arbitrary string values can't inject markup. Each key/index
+// is clickable → copies its JS-accessor path. `path` is the accessor key list to here.
+// `seen` is a DFS ancestor-set (pop-on-exit) that guards reference cycles: a value already
+// on the current path renders `[circular]` instead of recursing forever, but
+// shared-but-acyclic refs (the same object reached via two sibling keys) render fully in
+// both places.
+function buildJsonTree(value, path, onCopyPath, seen) {
+  const type = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+
+  // Leaf (string / number / boolean / null) — a single typed value span.
+  if (type !== 'object' && type !== 'array') {
+    const v = document.createElement('span');
+    v.className = 'json-val json-' + type;
+    v.textContent = type === 'string' ? JSON.stringify(value) : String(value);
+    return v;
+  }
+
+  seen = seen || new Set();
+  if (seen.has(value)) {
+    const c = document.createElement('span');
+    c.className = 'json-val json-circular';
+    c.textContent = '[circular]';
+    return c;
+  }
+  seen.add(value);
+
+  const entries = type === 'array'
+    ? value.map((v, i) => [i, v])
+    : Object.keys(value).map(k => [k, value[k]]);
+
+  const details = document.createElement('details');
+  details.className = 'json-node';
+  details.open = true;                                  // fully expanded by default
+  const summary = document.createElement('summary');
+  summary.className = 'json-summary';
+  const brace = type === 'array' ? ['[', ']'] : ['{', '}'];
+  const meta = document.createElement('span');
+  meta.className = 'json-meta';
+  meta.textContent = brace[0] + (entries.length ? ' ' + entries.length + (entries.length === 1 ? ' item' : ' items') + ' ' : '') + brace[1];
+  summary.appendChild(meta);
+  details.appendChild(summary);
+
+  const kids = document.createElement('div');
+  kids.className = 'json-children';
+  entries.forEach(([k, v]) => {
+    const row = document.createElement('div');
+    row.className = 'json-row';
+    const childPath = path.concat([k]);
+    const key = document.createElement('span');
+    key.className = 'json-key';
+    key.textContent = type === 'array' ? '[' + k + ']' : JSON.stringify(String(k));
+    key.title = 'Copy path: ' + jsonPath(childPath);
+    key.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); onCopyPath(childPath, key); });
+    const colon = document.createElement('span');
+    colon.className = 'json-colon'; colon.textContent = ':';
+    row.append(key, colon, buildJsonTree(v, childPath, onCopyPath, seen));
+    kids.appendChild(row);
+  });
+  details.appendChild(kids);
+  seen.delete(value);                                   // pop on exit — only ancestors count
+  return details;
+}
+
+// Icon-only collapse-all / expand-all toggle for a tree view. Reads the LIVE <details>
+// state of the node container at click time (`makeTreeToggleBtn`) and reflects it
+// (`syncTreeToggle`): ⊟ = the next click collapses all, ⊞ = the next click expands all
+// (NOT ▾/▸ — those are the per-node markers). Hidden when the view has no container nodes
+// (a scalar / empty / invalid tree has nothing to fold). Used by the JSON block.
+function makeTreeToggleBtn(view) {
+  const btn = mkBtn('⊟', () => {
+    const nodes = view.querySelectorAll('details.json-node');
+    if (!nodes.length) return;
+    const anyOpen = Array.prototype.some.call(nodes, n => n.open);
+    nodes.forEach(n => n.open = !anyOpen);
+    syncTreeToggle(btn, view);
+  });
+  btn.className = 'secondary tree-toggle';
+  return btn;
+}
+function syncTreeToggle(btn, view) {
+  const nodes = view.querySelectorAll('details.json-node');
+  btn.style.display = nodes.length ? '' : 'none';
+  if (!nodes.length) return;
+  const anyOpen = Array.prototype.some.call(nodes, n => n.open);
+  btn.textContent = anyOpen ? '⊟' : '⊞';
+  btn.title = anyOpen ? 'Collapse all' : 'Expand all';
+}
+
+// JSON (tree-viewer) block: a textarea of raw JSON while editing (with a live tree
+// preview underneath), a collapsible typed tree while viewing. Malformed JSON never
+// breaks the view — parseJsonSafe is tolerant and the view shows a warning banner plus
+// the raw text. Click any key/index to copy its JS-accessor path. (Mirrors the CSV block.)
+function renderJsonBlock(block, parentArray, idx) {
+  const isMobile = document.body.classList.contains('is-mobile');
+  const el = document.createElement('div');
+  el.className = 'block json' + (blockBackups.has(block) ? '' : ' viewing');
+
+  const toolbar = document.createElement('div');
+  toolbar.className = 'block-toolbar';
+
+  const labelInput = document.createElement('input');
+  labelInput.className = 'block-label';
+  labelInput.placeholder = 'Label (optional)';
+  labelInput.value = block.label || '';
+  labelInput.addEventListener('input', () => { block.label = labelInput.value; scheduleSave(); });
+
+  const spacer = document.createElement('span');
+  spacer.className = 'spacer';
+
+  // The JSON source editor (visible only while editing, via CSS).
+  const textarea = document.createElement('textarea');
+  textarea.className = 'json-edit';
+  textarea.value = block.code || '';
+  textarea.spellcheck = false;
+  textarea.setAttribute('autocapitalize', 'off');
+  textarea.setAttribute('autocorrect', 'off');
+  textarea.placeholder = 'Paste JSON — view mode renders a collapsible tree.\n{ "name": "Ada", "tags": ["a", "b"] }';
+
+  // The rendered tree / preview (visible while viewing; also shown live while editing).
+  const view = document.createElement('div');
+  view.className = 'json-view';
+
+  // Shared collapse-all/expand-all toggle. Re-synced after every render + on per-node
+  // <details> toggles (capture listener) so its glyph always reflects the live state.
+  const treeToggleBtn = makeTreeToggleBtn(view);
+  view.addEventListener('toggle', () => syncTreeToggle(treeToggleBtn, view), true);
+
+  function autosize() {
+    textarea.style.height = 'auto';
+    textarea.style.height = Math.min(textarea.scrollHeight + 2, editorCapPx()) + 'px';
+  }
+  textarea._autosize = autosize;
+
+  const copyPath = (keys, anchor) => {
+    copyText(jsonPath(keys)).then(ok => flashCopied(anchor, ok ? 'Copied ' + jsonPath(keys) : 'Copy failed'));
+  };
+
+  function renderTree() {
+    view.innerHTML = '';
+    const raw = block.code || '';
+    if (!raw.trim()) {
+      const empty = document.createElement('div');
+      empty.className = 'json-empty';
+      empty.textContent = 'Empty — edit and paste JSON to see it as a tree.';
+      view.appendChild(empty);
+      syncTreeToggle(treeToggleBtn, view);
+      return;
+    }
+    const { ok, value, error } = parseJsonSafe(raw);
+    if (!ok) {
+      const warn = document.createElement('div');
+      warn.className = 'json-warn';
+      warn.textContent = '⚠ Invalid JSON — ' + error;
+      const pre = document.createElement('pre');
+      pre.className = 'json-raw';
+      pre.textContent = raw;                              // raw text fallback (still readable)
+      view.append(warn, pre);
+      syncTreeToggle(treeToggleBtn, view);
+      return;
+    }
+    const tree = document.createElement('div');
+    tree.className = 'json-tree';
+    tree.appendChild(buildJsonTree(value, [], copyPath));
+    view.appendChild(tree);
+    syncTreeToggle(treeToggleBtn, view);
+  }
+
+  const typeBtn = makeTypeMenuButton(block);
+  // sync the textarea into block.code before any convert reads it
+  typeBtn.addEventListener('mousedown', () => { block.code = textarea.value; }, true);
+
+  function refreshRevertLabel() {
+    const backup = blockBackups.has(block) ? blockBackups.get(block) : (block.code || '');
+    const dirty = (block.code || '') !== backup;
+    revertBtn.textContent = dirty ? 'Revert' : 'Cancel';
+    revertBtn.title = dirty ? 'Undo changes made since you started editing' : 'Exit edit mode (no changes)';
+  }
+
+  textarea.addEventListener('input', () => {
+    block.code = textarea.value; renderTree(); autosize(); scheduleSave(); refreshRevertLabel();
+  });
+
+  function enterEdit() {
+    blockBackups.set(block, block.code || '');
+    el.classList.remove('viewing');
+    refreshRevertLabel();
+    requestAnimationFrame(() => { autosize(); textarea.focus(); });
+  }
+  const editBtn = mkBtn('Edit', enterEdit);
+  editBtn.className = 'secondary block-edit';
+  if (isMobile) { editBtn.textContent = '✎'; editBtn.title = 'Edit'; }
+
+  const saveBtn = mkBtn('Save', () => {
+    block.code = textarea.value;
+    blockBackups.delete(block);
+    el.classList.add('viewing');
+    renderTree();
+    savePage();
+    toast('Saved');
+  });
+  saveBtn.className = 'block-save';
+  if (isMobile) { saveBtn.textContent = '✓'; saveBtn.title = 'Save'; }
+
+  const revertBtn = mkBtn('Cancel', () => {
+    const backup = blockBackups.has(block) ? blockBackups.get(block) : (block.code || '');
+    if ((block.code || '') !== backup) {
+      block.code = backup; textarea.value = backup;
+      el.classList.remove('viewing');
+      renderTree(); autosize(); savePage(); refreshRevertLabel(); textarea.focus();
+      toast('Reverted');
+    } else {
+      blockBackups.delete(block);
+      el.classList.add('viewing');
+    }
+  });
+  revertBtn.className = 'secondary block-revert';
+
+  const copyBtn = mkBtn('Copy', () => {
+    copyText(block.code || '').then(ok => { if (ok) recordCopy(block); flashCopied(copyBtn, ok ? 'Copied to clipboard' : 'Copy failed'); });
+  });
+  copyBtn.className = 'secondary block-copy';
+  copyBtn.title = 'Copy raw JSON to clipboard';
+  if (isMobile) copyBtn.textContent = '⧉';
+
+  const dupBtn = mkBtn('Duplicate', () => {
+    parentArray.push(JSON.parse(JSON.stringify(block)));
+    renderPage();
+    scheduleSave();
+    toast('Block duplicated');
+  });
+  dupBtn.className = 'secondary block-dup';
+
+  // Pretty-print the JSON (2-space indent), into the textarea + block.code, and re-render.
+  // No-op (with a toast) when the JSON is invalid — can't format what won't parse.
+  const formatJsonBlock = () => {
+    const src = (el.classList.contains('viewing') ? block.code : textarea.value) || '';
+    const { ok, value } = parseJsonSafe(src);
+    if (!ok) { toast('Can’t format — invalid JSON'); return; }
+    block.code = formatJson(value);
+    textarea.value = block.code;
+    renderTree();
+    if (!el.classList.contains('viewing')) autosize();
+    scheduleSave();
+    toast('Formatted');
+  };
+
+  const overflowBtn = mkBtn('⋯', () => {
+    showMiniMenu(overflowBtn, [
+      { icon: '⧉', label: 'Duplicate', onClick: () => dupBtn.click() },
+      { icon: '{ }', label: 'Format (pretty-print)', onClick: () => formatJsonBlock() },
+      { divider: true },
+      ...BLOCK_KINDS.map(k => ({
+        icon: k.icon, label: k.label, active: blockKind(block) === k.kind,
+        onClick: () => { block.code = textarea.value; convertBlock(block, k.kind); renderPage(); scheduleSave(); },
+      })),
+    ]);
+  });
+  overflowBtn.className = 'secondary block-overflow';
+  overflowBtn.title = 'More actions';
+
+  const delBtn = mkBtn('Delete', () => { parentArray.splice(idx, 1); renderPage(); scheduleSave(); });
+  delBtn.className = 'danger';
+  if (isMobile) { delBtn.textContent = '✕'; delBtn.title = 'Delete'; }
+
+  toolbar.append(labelInput, spacer, typeBtn, editBtn, saveBtn, revertBtn, treeToggleBtn, copyBtn, dupBtn, overflowBtn, delBtn);
+  el.append(toolbar, textarea, view);
+  renderTree();
+  if (!el.classList.contains('viewing')) requestAnimationFrame(autosize);
+  return el;
+}
+
 function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh, subsectionsArray) {
   // Rich-text and checklist blocks aren't code/markdown surfaces — render them
   // via their own paths (no gutter, lang picker, variables, etc.).
   if (block.checklist) return renderChecklistBlock(block, parentArray, idx);
   if (block.rich) return renderRichBlock(block, parentArray, idx);
+  if (block.csv) return renderCsvBlock(block, parentArray, idx);
+  if (block.json) return renderJsonBlock(block, parentArray, idx);
 
   const el = document.createElement('div');
   // stay in edit mode if an edit session backup exists for this block
@@ -2257,7 +2796,13 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     const pre = document.createElement('pre');
     // Inline metrics override the Prism theme (padding:1em; line-height:1.5),
     // which would otherwise make code taller than the gutter and drift.
+    // width:max-content + min-width:100% make the colored <pre> grow to the widest line so
+    // .code-view gains a real horizontal scroll range (syncScroll mirrors the textarea's
+    // scrollLeft onto it). These MUST be inline: updatePreview rebuilds this cssText on every
+    // keystroke (re-highlight), so a style.css width rule would be overridden and the layer
+    // would snap back to clipped while typing.
     pre.style.cssText = 'margin:0;padding:0;background:none;white-space:pre;' +
+      'width:max-content;min-width:100%;' +
       'line-height:' + edLineH + 'px;font-size:' + edFont + 'px;font-family:' + ED_FONT + ';';
     const code = document.createElement('code');
     code.className = 'language-' + lang;
@@ -2312,6 +2857,8 @@ function editorCapPx() {
         .forEach(ta => { if (ta._autosize) ta._autosize(); });
       document.querySelectorAll('.block:not(.note):not(.viewing) .code-wrap')
         .forEach(cw => { if (cw._autosize) cw._autosize(); });
+      document.querySelectorAll('.block.csv:not(.viewing) .csv-edit, .block.json:not(.viewing) .json-edit')
+        .forEach(ta => { if (ta._autosize) ta._autosize(); });
     }, 120);
   };
   window.addEventListener('resize', refit);

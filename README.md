@@ -2,7 +2,7 @@
 
 A self-hosted **code-snippet manager**. Organize your snippets in a folder tree of
 "pages"; each page holds collapsible sections; each section holds **code, note, rich-text,
-and checklist** blocks with syntax highlighting, tags, search, trash & history, and a
+checklist, table (CSV), and JSON-tree** blocks with syntax highlighting, tags, search, trash & history, and a
 quick-paste palette. Plain static files plus a small PHP API — **no build step, no
 database, no external services.** Works offline, and optionally as a native desktop app.
 
@@ -33,7 +33,7 @@ database, no external services.** Works offline, and optionally as a native desk
 CodeMan is a personal knowledge base built specifically for **code and command snippets**.
 You browse a tree of folders and pages — much like Finder — and every page is a living
 document made of collapsible **sections** and **subsections**. Inside a section you drop
-**blocks**: syntax-highlighted code, Markdown notes, rich text, or checklists. Tag anything,
+**blocks**: syntax-highlighted code, Markdown notes, rich text, checklists, CSV tables, or JSON trees. Tag anything,
 search by name/tag/language (or deep-search inside content), and every save is snapshotted
 so you can diff and roll back.
 
@@ -91,6 +91,10 @@ Each section holds a mix of block types:
 - **Note** — Markdown prose with `[[cross-page links]]` and external links.
 - **Rich text** — sanitized WYSIWYG HTML.
 - **Checklist** — tickable items with progress.
+- **Table (CSV)** — edit plain CSV; view renders a clean table (tolerant parse, auto-detects
+  the delimiter, warns on malformed input).
+- **JSON tree** — edit raw JSON; view renders a collapsible, syntax-colored tree with
+  copy-path-on-click and a fold-all / unfold-all toggle.
 
 Blocks also support **variables** (`_V_NAME_V_` fill-ins), **Copy as…** (raw / fenced /
 escaped / one-line / vars-filled), and merge / split / reorder.

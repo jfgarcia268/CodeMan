@@ -13,6 +13,34 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
 
 ## [Unreleased]
 
+## [1.9.0] — 2026-06-23
+
+### Added
+- **CSV / table block** — a new block kind. Edit it as plain CSV text (the first row is the
+  header); when not editing it renders as a clean table. The parser handles quoted fields,
+  `""` escapes, embedded newlines, and auto-detects comma / semicolon / tab delimiters.
+  Malformed input never breaks the view — an unterminated quote or rows with differing column
+  counts show a warning banner above a best-effort table. CSV blocks export to a Markdown table
+  (Markdown export) and an HTML `<table>` (HTML export), and convert to/from the other block
+  kinds like any other.
+- **JSON tree block** — a new block kind. Edit it as raw JSON; when not editing it renders as a
+  collapsible, syntax-colored tree. Click any key or array index to copy its JS-accessor path
+  (e.g. `root.records[0].Id`), collapse/expand nodes to navigate large payloads, and use
+  **Format** to pretty-print. Invalid JSON never breaks the view — it shows a clear error plus
+  the raw text. JSON blocks export to a pretty-printed code block (Markdown / HTML) and convert
+  to/from the other block kinds.
+- **Collapse-all / expand-all toggle** on the JSON tree block — one toolbar button folds or unfolds
+  every node at once (in addition to the existing per-node expand/collapse).
+
+### Fixed
+- Long lines in the **code / CSV / JSON** source editors now scroll horizontally instead of being
+  clipped, in both edit and view modes, with a thin dark-themed scrollbar. **Note (Markdown)** editors
+  wrap prose instead (so a long paragraph stays readable while editing).
+- Wide content in **Note (Markdown)** and **Rich-text** blocks now scrolls horizontally in view mode:
+  fenced code blocks and tables get their own horizontal scrollbar instead of spilling/clipping.
+- A two-finger sideways trackpad swipe over a horizontally-scrolling editor no longer triggers the
+  browser's back/forward navigation (overscroll is contained at the page root).
+
 ## [1.8.0] — 2026-06-19
 
 ### Added
