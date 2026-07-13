@@ -1935,6 +1935,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
    that follow line up cleanly into two columns */
 .mini-menu-opt .mm-ic { display: inline-flex; align-items: center; justify-content: flex-start; width: 24px; flex-shrink: 0; font-size: 12px; color: var(--muted, #9aa0a8); }
 .mini-menu-opt.active .mm-ic, .mini-menu-opt:hover .mm-ic { color: inherit; }
+/* Keyboard focus ring for menu items (they're programmatically focused during
+   arrow-key navigation, tabindex=-1). Inset offset so the ring isn't clipped by
+   the menu's padded edge. A dedicated LIGHTER ring (not the app-wide --accent
+   token): --accent is also the `.active` row fill, so an accent ring vanishes on
+   the current-selection row. Light blue clears 3:1 on --panel-2; white on the
+   accent fill covers the active row. No visual change at rest. */
+.mini-menu-opt:focus-visible { outline: 2px solid #6cb6e6; outline-offset: -2px; }
+.mini-menu-opt.active:focus-visible { outline-color: #fff; }
 /* section divider between groups of options (e.g. actions · block-kind · copy-as) */
 .mini-menu-sep { height: 1px; margin: 4px 6px; background: var(--border-2); }
 

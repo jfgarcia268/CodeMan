@@ -850,70 +850,46 @@ function pageToHtml(data) {
     + esc(data.title || 'Untitled') + '</h1>' + parts.join('\n') + '</body></html>';
 }
 
-// Small popup menu anchored under the Export button.
+// Small popup menu anchored under the Export button. Delegates to the shared,
+// accessible showMiniMenu; opts.anchorRect preserves the plain (no clamp/flip)
+// positioning this menu has always used — and works from the mobile page-header
+// ⋯ path, which hands us the *visible* headerMoreBtn (a hidden exportBtn would
+// anchor the submenu at 0,0).
 function exportMenu(anchor) {
-  const existing = document.querySelector('.mini-menu');
-  if (existing) { existing.remove(); return; }
-  const menu = document.createElement('div'); menu.className = 'mini-menu';
-  const r = anchor.getBoundingClientRect();
-  menu.style.top = Math.round(r.bottom + 4) + 'px';
-  menu.style.left = Math.round(r.left) + 'px';
-  const opt = (label, fn) => { const o = document.createElement('div'); o.className = 'mini-menu-opt'; o.textContent = label; o.onclick = () => { menu.remove(); fn(); }; return o; };
-  menu.append(
-    opt('This page → HTML', () => exportCurrentPage('html')),
-    opt('This page → Markdown', () => exportCurrentPage('md')),
-    opt('This page → JSON', () => exportCurrentPage('json')),
-    opt('All pages → JSON', () => exportAll())
-  );
-  document.body.appendChild(menu);
-  const off = (e) => { if (!menu.contains(e.target) && e.target !== anchor) { menu.remove(); document.removeEventListener('mousedown', off); } };
-  setTimeout(() => document.addEventListener('mousedown', off), 0);
+  showMiniMenu(anchor, [
+    { label: 'This page → HTML', onClick: () => exportCurrentPage('html') },
+    { label: 'This page → Markdown', onClick: () => exportCurrentPage('md') },
+    { label: 'This page → JSON', onClick: () => exportCurrentPage('json') },
+    { label: 'All pages → JSON', onClick: () => exportAll() },
+  ], { anchorRect: anchor.getBoundingClientRect() });
 }
 
 // Sidebar "⋯ More" overflow menu — the utility actions that used to be cryptic
 // header icons, now labeled rows (all also reachable from the ⌘K palette).
+// align:'right' keeps it right-aligned/tucked under the sidebar (via showMiniMenu).
 function openMoreMenu(anchor) {
-  const existing = document.querySelector('.mini-menu');
-  if (existing) { existing.remove(); return; }
-  const menu = document.createElement('div'); menu.className = 'mini-menu';
-  const r = anchor.getBoundingClientRect();
-  menu.style.top = Math.round(r.bottom + 4) + 'px';
-  // right-align under the ⋯ button so the menu stays tucked under the sidebar
-  menu.style.left = Math.round(r.right) + 'px';
-  menu.style.transform = 'translateX(-100%)';
-  const opt = (icon, label, fn) => {
-    const o = document.createElement('div'); o.className = 'mini-menu-opt';
-    const ic = document.createElement('span'); ic.className = 'mm-ic'; ic.textContent = icon;
-    const tx = document.createElement('span'); tx.textContent = label;
-    o.append(ic, tx);
-    o.onclick = () => { menu.remove(); fn(); };
-    return o;
-  };
-  const sep = () => { const d = document.createElement('div'); d.className = 'mini-menu-sep'; return d; };
-  menu.append(
+  const items = [
     // everyday actions
-    opt('★', 'Favorites & recently copied', () => openFavorites()),
-    opt('🏷', 'Manage tags', () => openTagManager()),
-    opt('⧉', 'Quick-paste block', () => openBlockPalette()),
-    opt('⌘', 'Command palette…', () => openCommandPalette()),
-    opt('⇄', 'Find & replace…', () => openReplace()),
-    opt('🗑', 'Trash', () => openTrash()),
-    sep(),
+    { icon: '★', label: 'Favorites & recently copied', onClick: () => openFavorites() },
+    { icon: '🏷', label: 'Manage tags', onClick: () => openTagManager() },
+    { icon: '⧉', label: 'Quick-paste block', onClick: () => openBlockPalette() },
+    { icon: '⌘', label: 'Command palette…', onClick: () => openCommandPalette() },
+    { icon: '⇄', label: 'Find & replace…', onClick: () => openReplace() },
+    { icon: '🗑', label: 'Trash', onClick: () => openTrash() },
+    { divider: true },
     // maintenance
-    opt('⟳', 'Rebuild index', () => rebuildIndex(anchor)),
-    opt('☁', 'Download for offline', () => primeOfflineCache())
-  );
+    { icon: '⟳', label: 'Rebuild index', onClick: () => rebuildIndex(anchor) },
+    { icon: '☁', label: 'Download for offline', onClick: () => primeOfflineCache() },
+  ];
   // Recovery entry — only when writes failed to sync (mirrors the badge/palette reach).
   if (typeof dlCountCached === 'function' && dlCountCached() > 0) {
-    menu.append(sep(), opt('⚠', 'Review unsynced changes…', () => openDeadLetterPanel()));
+    items.push({ divider: true }, { icon: '⚠', label: 'Review unsynced changes…', onClick: () => openDeadLetterPanel() });
   }
   // Sign-out — only when a shared-secret token is stored (password gate in use).
   if (typeof authToken !== 'undefined' && authToken) {
-    menu.append(sep(), opt('⊗', 'Forget password (sign out)', () => signOut()));
+    items.push({ divider: true }, { icon: '⊗', label: 'Forget password (sign out)', onClick: () => signOut() });
   }
-  document.body.appendChild(menu);
-  const off = (e) => { if (!menu.contains(e.target) && e.target !== anchor) { menu.remove(); document.removeEventListener('mousedown', off); } };
-  setTimeout(() => document.addEventListener('mousedown', off), 0);
+  showMiniMenu(anchor, items, { align: 'right' });
 }
 
 // Rebuild the server-side metadata index (powers sidebar badges + name/tag/lang

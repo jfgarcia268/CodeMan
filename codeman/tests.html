@@ -76,6 +76,24 @@
   t('uniqueCopyName inner "copy" is not stripped', uniqueCopyName('My copy shop', new Set()), 'My copy shop copy');
   t('uniqueCopyName accepts an Array', uniqueCopyName('Foo', ['Foo']), 'Foo copy');
 
+  // miniMenuWrapIndex: ArrowUp/Down index wrap for the accessible ⋯ menus.
+  t('miniMenuWrapIndex mid-range unchanged', miniMenuWrapIndex(2, 5), 2);
+  t('miniMenuWrapIndex first item', miniMenuWrapIndex(0, 5), 0);
+  t('miniMenuWrapIndex last item', miniMenuWrapIndex(4, 5), 4);
+  t('miniMenuWrapIndex past end wraps to 0', miniMenuWrapIndex(5, 5), 0);
+  t('miniMenuWrapIndex before start wraps to last', miniMenuWrapIndex(-1, 5), 4);
+  t('miniMenuWrapIndex far-negative wraps in range', miniMenuWrapIndex(-6, 5), 4);
+  t('miniMenuWrapIndex empty menu → -1', miniMenuWrapIndex(0, 0), -1);
+  t('miniMenuWrapIndex single item stays 0', miniMenuWrapIndex(1, 1), 0);
+
+  // miniMenuHasCheck: does a menu reserve the icon column (any checkable row)?
+  t('miniMenuHasCheck none checkable → false', miniMenuHasCheck([{ label: 'a' }, { label: 'b' }]), false);
+  t('miniMenuHasCheck icon-only is not checkable', miniMenuHasCheck([{ icon: '★', label: 'a' }]), false);
+  t('miniMenuHasCheck a checked:true row → true', miniMenuHasCheck([{ label: 'a' }, { label: 'b', checked: true }]), true);
+  t('miniMenuHasCheck checked:false still counts (defined)', miniMenuHasCheck([{ label: 'a', checked: false }]), true);
+  t('miniMenuHasCheck ignores dividers', miniMenuHasCheck([{ divider: true }, { label: 'a' }]), false);
+  t('miniMenuHasCheck empty list → false', miniMenuHasCheck([]), false);
+
   // Duplicate deep-copy + insert-below: the copy lands at idx+1 and is independent.
   {
     const arr = [{ code: 'a' }, { code: 'b' }];

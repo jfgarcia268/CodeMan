@@ -369,6 +369,47 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   the project ancestors of any path form a prefix from the root — `projectChain()` relies on this.
   Guard all create/move/reorder paths with `isValidProjectParent` (server mirrors it in
   `create_project`/`move`); don't add a new path that bypasses it.
+- **`showMiniMenu(anchorEl, items, opts)` (editor.js) is the ONE accessible popup-menu — nothing
+  else constructs a `.mini-menu` (grep-verified).** Every `⋯`/overflow popup routes through it:
+  block-kind menus ×3, section `⋯`, tags menu, per-column sort (`buildColSortMenu`, tree.js),
+  page-header `⋯`, sidebar More (`openMoreMenu`), Export submenu (`exportMenu`), and the block
+  Copy-as `▾` submenu — the old bespoke bodies were all folded in as thin item-builders. **Don't
+  fork a second hand-rolled `.mini-menu`.** Checkable menus (colsort) pass `checked` per item →
+  each option becomes `role="menuitemradio"` + `aria-checked`, and the pure `miniMenuHasCheck(items)`
+  reserves the 24px icon column on EVERY row (✓ on checked rows, accent `.active` background as
+  before) so labels stay aligned; menus with no `checked` item keep the exact per-item `it.icon`
+  behavior (column only where an icon is supplied) so none of them shift. **A11y contract:**
+  container `role="menu"` (named via `aria-label` from the trigger's title/text), options
+  `role="menuitem"` (roving `tabindex=-1`), dividers `role="separator"`. **Triggers are marked
+  STATICALLY at creation** — menu-opening buttons are built with `menuBtn()` (= `markMenuTrigger`
+  ∘ `mkBtn`, tree.js) or `markMenuTrigger(el)` (core.js) for the two `createElement` triggers
+  (page Export, mobile page-header `⋯`), so each carries `aria-haspopup="menu"` +
+  `aria-expanded="false"` **before its first open** (a screen reader announces it as a menu button
+  from the first render); `showMiniMenu` then toggles only `aria-expanded` (and a safety-net sets
+  haspopup if a dynamic anchor lacks it). Keyboard: ArrowUp/Down **wrap** (via the pure, unit-tested
+  `miniMenuWrapIndex`), Home/End, Enter/Space activate, Escape/Tab close. **Focus on open** lands on
+  the first item — or, in a checkable menu (colsort), on the currently-`checked` item (via
+  `miniMenuHasCheck` + `checkedIdx`). **Keyboard dismissal (Escape/Tab) returns focus to `anchorEl`**
+  (guarded by `document.contains` so a re-render that dropped the anchor fails soft). **On item
+  activation**, if the action left focus on `<body>` (it only re-rendered/toasted rather than opening
+  its own modal/panel), focus is restored to a caller-supplied `it.refocus()` target or the surviving
+  `anchorEl` — so the next Tab doesn't restart at the top of the page; an action that opens its own
+  modal keeps focus there. Pointer dismissal (outside-click/scroll) does NOT force focus.
+  The block-type menu marks its current row with `active`/`aria-current` (not `checked`/`✓`), a
+  deliberate visual-parity choice — don't convert it to a radio menu without accepting the `✓`-column
+  shift. Toggle (`_anchor`
+  re-click), the outside-`mousedown`-closes handler, close-on-scroll, and the "don't
+  `preventDefault` the toolbar mousedown" rule are all preserved; opening one menu closes any other
+  via its `_close` (clears that anchor's `aria-expanded` + listeners — no stale `.remove()` bypass).
+  **Three positioning modes, each byte-preserving a prior behavior (zero positional regression is
+  the whole point):** *default* = viewport clamp + upward flip near the bottom edge; *`opts.align:
+  'right'`* = right-align under the anchor (`left=r.right; translateX(-100%)`, the `openMoreMenu`/
+  sidebar behavior); *`opts.anchorRect`* = plain top/left from a caller-supplied rect, no clamp/flip
+  — used by the `exportMenu` submenu (passed the **visible** `headerMoreBtn` on the mobile page-header
+  path, never a hidden `exportBtn` at 0,0), the **colsort** menu (its original plain top/left), and
+  the **Copy-as** submenu (which pre-computes its bespoke `left=max(8, r.right−200)` clamp into the
+  rect so it lands identically). The
+  `.mini-menu-opt:focus-visible` ring (inset offset) is the keyboard affordance; no change at rest.
 - **The code-block `⋯` overflow menu now declutters BOTH desktop and mobile** (was mobile-only
   before the UI/UX pass). The secondary actions — `#` lines / `$` vars / Duplicate / Split /
   `⤵ To subsection` / block-kind `.type-menu` / copy-as `.copy-as` — are hidden by **unconditional**

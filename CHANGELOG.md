@@ -14,6 +14,12 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
 ## [Unreleased]
 
 ### Added
+- **Keyboard- & screen-reader-operable popup menus.** Every `⋯` / overflow menu (block actions,
+  section, tags, per-column sort, the page-header `⋯`, the sidebar More menu, the Export submenu,
+  and the block Copy-as menu) is now a proper accessible menu: open it and arrow-key up/down (wrapping) between items,
+  Home/End to jump, Enter/Space to activate, Escape to close — focus returns to the button you
+  opened it from, and assistive tech announces it as a menu. The menus look and land exactly where
+  they did before.
 - **Unsynced-changes review.** When an offline edit can't be synced back to the server (a
   name the server rejects, a save that keeps failing), it's no longer silently dropped —
   the offline badge shows "N changes could not sync — review" (in a distinct red state), opening a

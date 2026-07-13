@@ -479,40 +479,35 @@ function renderColSortHead(parentPath, pref) {
   btn.className = 'col-sort-btn' + (pref && pref.field ? ' active' : '');
   btn.title = 'Sort this column';
   btn.textContent = pref && pref.field ? '⇅ ' + colSortLabel(pref) : '⇅';
+  // data-colsort-path lets buildColSortMenu re-find (and re-focus) this button after
+  // an apply re-renders the tree (the old anchor is detached) — see its refocus.
+  btn.setAttribute('data-colsort-path', parentPath);
+  markMenuTrigger(btn);
   btn.addEventListener('click', e => { e.stopPropagation(); buildColSortMenu(btn, parentPath); });
   head.appendChild(btn);
   return head;
 }
 
-// Sort menu for a column (reuses the .mini-menu pattern). Offers each field × asc/desc,
-// then "Manual order" to clear. The current choice is marked.
+// Sort menu for a column. Routes through the shared accessible showMiniMenu (so it
+// gets role=menu/menuitemradio, keyboard nav + focus-return for free); the active
+// choice is a checked row (✓ + accent). opts.anchorRect preserves the original
+// plain top/left positioning (no clamp/flip) exactly.
 function buildColSortMenu(anchor, parentPath) {
-  const existing = document.querySelector('.mini-menu');
-  if (existing) { existing.remove(); return; }
   const pref = colSort[parentPath];
-  const menu = document.createElement('div'); menu.className = 'mini-menu';
-  const r = anchor.getBoundingClientRect();
-  menu.style.top = Math.round(r.bottom + 4) + 'px';
-  menu.style.left = Math.round(r.left) + 'px';
-  const opt = (label, active, fn) => {
-    const o = document.createElement('div'); o.className = 'mini-menu-opt' + (active ? ' active' : '');
-    const ic = document.createElement('span'); ic.className = 'mm-ic'; ic.textContent = active ? '✓' : '';
-    const tx = document.createElement('span'); tx.textContent = label;
-    o.append(ic, tx);
-    o.onclick = () => { menu.remove(); fn(); };
-    return o;
-  };
-  const sep = () => { const d = document.createElement('div'); d.className = 'mini-menu-sep'; return d; };
+  // setColSort re-renders the tree, detaching `anchor`; refocus the freshly-rendered
+  // ⇅ button for this column (by data-colsort-path) so keyboard focus survives the apply.
+  const refocus = () => document.querySelector('.col-sort-btn[data-colsort-path="' + (window.CSS && CSS.escape ? CSS.escape(parentPath) : parentPath) + '"]');
+  const items = [];
   COL_SORT_FIELDS.forEach(f => {
     ['asc', 'desc'].forEach(dir => {
-      const active = pref && pref.field === f.field && pref.dir === dir;
-      menu.append(opt(f.label + ' ' + (dir === 'desc' ? '↓' : '↑'), active, () => setColSort(parentPath, f.field, dir)));
+      const active = !!(pref && pref.field === f.field && pref.dir === dir);
+      items.push({ label: f.label + ' ' + (dir === 'desc' ? '↓' : '↑'), active, checked: active, refocus, onClick: () => setColSort(parentPath, f.field, dir) });
     });
   });
-  menu.append(sep(), opt('Manual order', !(pref && pref.field), () => setColSort(parentPath, 'manual')));
-  document.body.appendChild(menu);
-  const off = (e) => { if (!menu.contains(e.target) && e.target !== anchor) { menu.remove(); document.removeEventListener('mousedown', off); } };
-  setTimeout(() => document.addEventListener('mousedown', off), 0);
+  const manualActive = !(pref && pref.field);
+  items.push({ divider: true });
+  items.push({ label: 'Manual order', active: manualActive, checked: manualActive, refocus, onClick: () => setColSort(parentPath, 'manual') });
+  showMiniMenu(anchor, items, { anchorRect: anchor.getBoundingClientRect() });
 }
 
 /* ---------- DRAG-TO-SORT (Miller columns) ---------- */
@@ -1058,6 +1053,13 @@ function mkBtn(text, onClick) {
     onClick();
   });
   return b;
+}
+
+// mkBtn for a button that opens a showMiniMenu popup: same signature, but the
+// element is statically marked as a menu trigger (aria-haspopup/aria-expanded)
+// so a screen reader announces it as a menu button BEFORE its first open.
+function menuBtn(text, onClick) {
+  return markMenuTrigger(mkBtn(text, onClick));
 }
 
 // Folder that the sidebar header's +Folder/+Page buttons create into.

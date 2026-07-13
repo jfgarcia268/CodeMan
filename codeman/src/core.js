@@ -195,6 +195,16 @@ async function api(action, body, query) {
   }
 }
 
+// Mark a button as a menu trigger for assistive tech BEFORE its menu is ever
+// opened — without this, a trigger announces as a plain button until first open.
+// showMiniMenu then just toggles aria-expanded on it. Apply at trigger creation.
+function markMenuTrigger(el) {
+  if (!el) return el;
+  el.setAttribute('aria-haspopup', 'menu');
+  if (!el.hasAttribute('aria-expanded')) el.setAttribute('aria-expanded', 'false');
+  return el;
+}
+
 function toast(msg) {
   let t = document.querySelector('.toast');
   if (!t) {

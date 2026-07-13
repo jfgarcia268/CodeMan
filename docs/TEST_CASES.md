@@ -108,6 +108,37 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
   (sanitizer strips script/handlers/`javascript:`) — escaping holds (security boundary).
   **[auto: tests.html sanitizeRichHtml + md escapes raw html]**
 
+### TC-menu — Shared popup `⋯` menus (`showMiniMenu`) — a11y + positioning parity
+**Every** `⋯`/overflow popup routes through the one `showMiniMenu` — block-kind menus ×3, section
+`⋯`, tags menu, **per-column sort (colsort)**, page-header `⋯`, sidebar `⋯` / More, Export submenu,
+and the block **Copy-as `▾`** submenu. No hand-rolled `.mini-menu` remains (grep-verified).
+- TC-menu-01 (A11y): the open menu is `role="menu"`, each option `role="menuitem"` (or
+  `role="menuitemradio"` + `aria-checked` in the checkable colsort menu), dividers
+  `role="separator"`; the anchor button carries `aria-haspopup="menu"` + `aria-expanded` toggling
+  `true` on open / `false` on close. Screen reader announces "menu" + item count.
+- TC-menu-02 (A11y): **keyboard-only, all sites incl. colsort + Copy-as** — open a menu, focus
+  lands on the first item; ArrowDown/Up move and **wrap** at both ends; Home/End jump to first/last;
+  Enter/Space activate the focused item; Escape closes and **returns focus to the anchor**; Tab
+  closes. Every menu action is operable with no mouse. **[auto: tests.html miniMenuWrapIndex]**
+- TC-menu-03 (A11y): closing by outside-click or by scrolling closes cleanly (fails soft — no error
+  — if the anchor was removed by a re-render); clicking the anchor again toggles the menu shut.
+  Opening any menu while another is open closes the first via its `_close` path (its anchor's
+  `aria-expanded` resets, its dismiss listeners are removed — no lingering `.remove()` bypass).
+- TC-menu-04 (P, positioning parity — NO regression): **default** mode — a block `⋯` menu opened
+  near the viewport bottom **flips upward** and stays clamped inside the viewport (left edge ≥ 8px).
+- TC-menu-05 (P, positioning parity): **sidebar `⋯` (openMoreMenu)** stays **right-aligned** under
+  its button (`left = r.right; translateX(-100%)`), tucked under the sidebar as before.
+- TC-menu-06 (P, positioning parity): the **Export submenu** anchors to its passed rect (plain
+  top/left, no clamp/flip) on desktop (from `exportBtn`) **and** on the **mobile page-header `⋯`
+  path**, where it's handed the *visible* `headerMoreBtn` (never opens at 0,0).
+- TC-menu-07 (P, positioning + visual parity): the **colsort menu** opens at the same plain
+  top/left as before (`anchorRect`), and the active row still shows **both** a `✓` in the aligned
+  24px icon column **and** the accent `.active` background; inactive rows keep the reserved column
+  so all labels line up. **[auto: tests.html miniMenuHasCheck — icon-column reservation]**
+- TC-menu-08 (P, positioning parity): the block **Copy-as `▾`** submenu lands in the identical
+  spot as before — left clamped to `max(8, r.right − 200)`, top `r.bottom + 4` — and each item
+  still copies via `copyText` (records the copy, "Copied…/Copy failed" toast).
+
 ### TC-dup — Duplicate content (block / section / page)
 - TC-dup-01 (P): **block** — for all five kinds (code/note/rich/checklist/csv/json), the block ⋯
   overflow menu shows **❐ Duplicate block** (no longer ⧉ — that glyph is clipboard-Copy only). Click
