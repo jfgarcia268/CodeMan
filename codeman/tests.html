@@ -680,6 +680,7 @@
           ta('importPages malformed JSON → error toast, no crash', await runImport('{oops', 'bad.json'), ['Invalid JSON']);
           ta('importPages wrong-shape object → imports 0, no crash', await runImport('{"foo":1}', 'x.json'), ['Imported 0 pages']);
           ta('importPages bundle of junk values → imports 0, no crash', await runImport('{"a":null,"b":[1],"c":{"sections":"nope"}}', 'y.json'), ['Imported 0 pages']);
+          ta('importPages falsy-but-valid JSON (null) → error toast, no crash', await runImport('null', 'z.json'), ['Invalid JSON']);
         } finally {
           document.createElement = _create; HTMLInputElement.prototype.click = _click;
           window.toast = _toast; window.loadTree = _load;

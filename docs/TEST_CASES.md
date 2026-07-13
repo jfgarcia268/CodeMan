@@ -15,7 +15,7 @@ and reports against this matrix); UI/usability passes are run by the
 
 1. **Automated suites first** (fast, deterministic):
    - **Client units** — open `codeman/tests.html` in a browser. Expect the summary
-     **"N passed, 0 failed"** (currently 204). `window.__testResult = {pass, fail, done}` for
+     **"N passed, 0 failed"** (currently 205). `window.__testResult = {pass, fail, done}` for
      scripting (`done` flips true after the async offline tests finish).
    - **Server API** — `bash codeman/tests-api.sh` (spins a throwaway `php -S` against a temp data
      dir; exit 0 = all green; currently 66). Override port: `bash codeman/tests-api.sh 8099` —
