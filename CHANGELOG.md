@@ -13,6 +13,21 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
 
 ## [Unreleased]
 
+## [1.11.0] — 2026-07-13
+
+### Added
+- Command palette and Find & replace are now reachable from the sidebar ⋯ menu — a
+  touch-friendly path for phones/tablets, where the ⌘K shortcut (previously the only way
+  to reach them) isn't available.
+- Both automated test suites now run in CI on every push and pull request (GitHub Actions),
+  with new regression coverage for save-conflict detection, trash restore, find & replace,
+  tag rename/merge/delete, the offline write-queue replay, rich-text paste sanitizing, and
+  import error handling.
+
+### Fixed
+- Importing a JSON file whose entire contents are `null` (or another non-object value) now
+  shows an "Invalid JSON" message instead of silently failing.
+
 ## [1.10.0] — 2026-07-13
 
 ### Added

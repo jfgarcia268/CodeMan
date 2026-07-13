@@ -413,6 +413,21 @@
     t('blockKind detects json', blockKind({ json: true }), 'json');
   })();
 
+  // sanitizeRichHtml: whitelist sanitizer for rich blocks — scripts, event
+  // handlers and javascript: URLs must never survive a paste.
+  (function () {
+    t('sanitize strips <script>, keeps surrounding text', sanitizeRichHtml('<p>a<script>alert(1)<\/script>b</p>'), '<p>ab</p>');
+    t('sanitize strips event handlers', sanitizeRichHtml('<p onclick="x()">hi</p>'), '<p>hi</p>');
+    t('sanitize allowed formatting survives', sanitizeRichHtml('<p><b>x</b> <em>y</em></p>'), '<p><b>x</b> <em>y</em></p>');
+    const jsHref = sanitizeRichHtml('<a href="javascript:alert(1)">x</a>');
+    t('sanitize javascript: href neutralized (link text kept)', [jsHref.includes('javascript'), jsHref.includes('>x</a>')], [false, true]);
+    const okHref = sanitizeRichHtml('<a href="https://x.test/">x</a>');
+    t('sanitize https href kept + hardened', [okHref.includes('href="https://x.test/"'), okHref.includes('rel="noopener noreferrer"')], [true, true]);
+    t('sanitize unknown tag unwrapped, text kept', sanitizeRichHtml('<article>keep</article>'), 'keep');
+    t('sanitize nested payload inside unknown tag', sanitizeRichHtml('<article><script>x<\/script>keep<img src=x onerror=alert(1)></article>'), 'keep');
+    t('sanitize style url() stripped, benign style kept', [sanitizeRichHtml('<span style="background:url(x)">t</span>').includes('style'), sanitizeRichHtml('<span style="color:red">t</span>').includes('color:red')], [false, true]);
+  })();
+
   // parseJsonSafe: tolerant JSON parse — never throws; { ok, value, error }.
   (function () {
     t('parseJsonSafe valid object', parseJsonSafe('{"a":1,"b":[2,3]}').value, { a: 1, b: [2, 3] });
@@ -529,8 +544,12 @@
       // active namespace AND snapshot/restore exactly the keys under test (safe to run).
       for (const k of ['tree', 'queue', 'trash', 'history']) snap[k] = await kvGet(k);
 
-      const TP = 'zztest_folder/Page.json';
-      const baseTree = () => [{ type: 'folder', name: 'zztest_folder', path: 'zztest_folder', children: [
+      // Run-id prefix for every seeded page path: a killed run's leftovers can
+      // never collide with (or false-pass) the next run's seeds.
+      const RUN = 'zz' + Date.now().toString(36) + '_';
+      const TF = RUN + 'test_folder';
+      const TP = TF + '/Page.json';
+      const baseTree = () => [{ type: 'folder', name: TF, path: TF, children: [
         { type: 'page', name: 'Page', path: TP, tags: [], langs: [] },
       ] }];
 
@@ -582,16 +601,103 @@
 
       await pageDel(TP);
 
+      // flushQueue replay: FIFO drain, conflict → forced resend, network failure
+      // retains the queue. apiFetch/renderTree/toast/updateOfflineBadge/setOffline
+      // are swapped for stubs and restored in `finally` (all are rebindable
+      // top-level function declarations).
+      {
+        const _fetch = window.apiFetch, _render = window.renderTree, _toast = window.toast,
+              _badge = window.updateOfflineBadge, _setOff = window.setOffline, _tree = treeData;
+        try {
+          window.renderTree = () => {}; window.toast = () => {};
+          window.updateOfflineBadge = () => {}; window.setOffline = () => {};
+
+          // a) FIFO drain, then the tree reconcile fetch
+          const calls = [];
+          window.apiFetch = async (action, body) => {
+            calls.push(action + ':' + ((body && (body.name || body.path)) || ''));
+            return action === 'tree' ? [] : { ok: true };
+          };
+          syncQueue.length = 0;
+          syncQueue.push({ action: 'create_page', body: { name: RUN + 'A', parent: '' } },
+                         { action: 'save_page', body: { path: RUN + 'A.json', data: {} } },
+                         { action: 'delete', body: { path: RUN + 'A.json' } });
+          await flushQueue();
+          ta('flushQueue drains FIFO in order (then reconciles the tree)', calls,
+             ['create_page:' + RUN + 'A', 'save_page:' + RUN + 'A.json', 'delete:' + RUN + 'A.json', 'tree:']);
+          ta('flushQueue empties the queue', syncQueue.length, 0);
+
+          // b) save_page conflict → re-sent forced (never silently dropped)
+          const saves = [];
+          window.apiFetch = async (action, body) => {
+            if (action === 'save_page') { saves.push(!!(body && body.force)); return body && body.force ? { ok: true } : { conflict: true }; }
+            return action === 'tree' ? [] : { ok: true };
+          };
+          syncQueue.push({ action: 'save_page', body: { path: RUN + 'B.json', data: { title: 'b' } } });
+          await flushQueue();
+          ta('flushQueue conflict → forced resend', saves, [false, true]);
+          ta('flushQueue conflict op still drains', syncQueue.length, 0);
+
+          // c) thrown fetch (backend down) → op stays queued + setOffline(true)
+          const offCalls = [];
+          window.setOffline = (v) => { offCalls.push(v); };
+          window.apiFetch = async () => { throw new Error('down'); };
+          syncQueue.push({ action: 'save_page', body: { path: RUN + 'C.json', data: {} } });
+          await flushQueue();
+          ta('flushQueue network failure keeps the op queued', syncQueue.length, 1);
+          ta('flushQueue network failure flips offline', offCalls, [true]);
+          syncQueue.length = 0;
+        } finally {
+          window.apiFetch = _fetch; window.renderTree = _render; window.toast = _toast;
+          window.updateOfflineBadge = _badge; window.setOffline = _setOff; treeData = _tree;
+        }
+      }
+
+      // importPages negatives: malformed / wrong-shape input fails gracefully —
+      // error surfaced via toast, no crash, nothing imported. The hidden file
+      // input is captured via a createElement shim; its click() is stubbed so no
+      // real file picker opens.
+      {
+        const _create = document.createElement, _click = HTMLInputElement.prototype.click,
+              _toast = window.toast, _load = window.loadTree;
+        try {
+          let lastInput = null; const toasts = [];
+          document.createElement = function (tag, ...rest) {
+            const el = _create.call(document, tag, ...rest);
+            if (String(tag).toLowerCase() === 'input') lastInput = el;
+            return el;
+          };
+          HTMLInputElement.prototype.click = function () {};
+          window.toast = (m) => { toasts.push(String(m)); };
+          window.loadTree = async () => {};
+          const runImport = async (text, name) => {
+            toasts.length = 0;
+            importPages();
+            Object.defineProperty(lastInput, 'files', { value: [new File([text], name)], configurable: true });
+            await lastInput.onchange();
+            return toasts.slice();
+          };
+          ta('importPages malformed JSON → error toast, no crash', await runImport('{oops', 'bad.json'), ['Invalid JSON']);
+          ta('importPages wrong-shape object → imports 0, no crash', await runImport('{"foo":1}', 'x.json'), ['Imported 0 pages']);
+          ta('importPages bundle of junk values → imports 0, no crash', await runImport('{"a":null,"b":[1],"c":{"sections":"nope"}}', 'y.json'), ['Imported 0 pages']);
+          ta('importPages falsy-but-valid JSON (null) → error toast, no crash', await runImport('null', 'z.json'), ['Invalid JSON']);
+        } finally {
+          document.createElement = _create; HTMLInputElement.prototype.click = _click;
+          window.toast = _toast; window.loadTree = _load;
+        }
+      }
+
       // openPage dedups concurrent/rapid opens of the SAME path (no duplicate tabs).
       // (Own try/catch so a render hiccup here can't mislabel the offline tests.)
       try {
-        const DP = 'zzdedup/A.json';
+        const DP = RUN + 'dedup/A.json';
         openPages.length = 0;
         await Promise.all([openPage(DP), openPage(DP), openPage(DP)]);
         ta('openPage dedups concurrent opens of same path', openPages.filter(t => t.path === DP).length, 1);
         await openPage(DP); // re-opening an already-open page focuses the existing tab
         ta('openPage re-open focuses existing tab', openPages.filter(t => t.path === DP).length, 1);
         openPages.length = 0;
+        await pageDel(DP); // drop the cached page seeded by the stubbed get_page
       } catch (e2) {
         fail++; const d2 = document.createElement('div'); d2.className = 'row fail';
         d2.textContent = '✗ openPage dedup test threw: ' + (e2 && e2.message); out.appendChild(d2);

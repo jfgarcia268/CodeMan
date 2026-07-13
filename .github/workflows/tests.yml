@@ -1,0 +1,66 @@
+# Runs both CodeMan test suites on every push and pull request:
+#   - api-tests:    codeman/tests-api.sh (bash + curl against a throwaway php -S)
+#   - client-tests: codeman/tests.html headless via .github/scripts/run-client-tests.mjs
+#                   (Playwright is a CI-only dep installed under .github/ — the app
+#                   itself has NO build step and NO npm deps; never add any to codeman/)
+#   - invariants:   cheap greps for architecture rules that a refactor could silently break
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  api-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+      - name: Run server API tests
+        run: bash codeman/tests-api.sh
+
+  client-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+      - name: Install Playwright (CI-only, kept out of codeman/)
+        working-directory: .github
+        run: |
+          # npm init -y is unusable here: it derives the package name from the
+          # directory (".github"), which npm rejects as an invalid name.
+          test -f package.json || echo '{"name":"codeman-ci","private":true}' > package.json
+          npm install playwright
+          npx playwright install --with-deps chromium
+      - name: Run client unit tests (tests.html headless)
+        run: node .github/scripts/run-client-tests.mjs
+
+  invariants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: sw.js derives its cache version from version.js (single version source)
+        run: grep -q "importScripts('version.js')" codeman/sw.js
+      - name: api.php is never precached by the service worker
+        run: |
+          if awk '/^const SHELL = \[/{f=1} f{print} f&&/\];/{exit}' codeman/sw.js | grep -q 'api\.php'; then
+            echo 'api.php must NOT be in the sw.js SHELL precache — data goes through src/offline.js, not the SW cache'
+            exit 1
+          fi
+      # Phase 2 (data safety) will activate this invariant once writeJsonAtomic lands:
+      #
+      #   - name: page JSON writes are atomic (temp file + rename)
+      #     run: |
+      #       grep -q 'function writeJsonAtomic' codeman/api.php
+      #       # ...and assert no bare `file_put_contents(...json_encode` of page data
+      #       # remains outside writeJsonAtomic, so a crash mid-write can never
+      #       # truncate a page file.
+      #
+      # Left commented out until Phase 2 adds the helper — see the Implementation Plan.

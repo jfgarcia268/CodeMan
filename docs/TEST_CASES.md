@@ -15,9 +15,16 @@ and reports against this matrix); UI/usability passes are run by the
 
 1. **Automated suites first** (fast, deterministic):
    - **Client units** — open `codeman/tests.html` in a browser. Expect the summary
-     **"N passed, 0 failed"** (currently 187). `window.__testResult = {pass, fail}` for scripting.
+     **"N passed, 0 failed"** (currently 205). `window.__testResult = {pass, fail, done}` for
+     scripting (`done` flips true after the async offline tests finish).
    - **Server API** — `bash codeman/tests-api.sh` (spins a throwaway `php -S` against a temp data
-     dir; exit 0 = all green; currently 28). Override port: `bash codeman/tests-api.sh 8099`.
+     dir; exit 0 = all green; currently 66). Override port: `bash codeman/tests-api.sh 8099` —
+     a taken port is skipped automatically (bounded upward hunt), so parallel runs stay green.
+   - **CI enforces both** on every push/PR: `.github/workflows/tests.yml` runs `tests-api.sh`
+     (`api-tests` job), tests.html headless via Playwright + `php -S`
+     (`client-tests` job — fails on any assertion failure, a 60s hang, **or a pass count below
+     the FLOOR** in `.github/scripts/run-client-tests.mjs`; bump FLOOR when you add assertions),
+     and a grep-based `invariants` job (sw.js version single-sourcing, api.php never precached).
 2. **Then the manual/driven Core suite below**, against a running dev server
    (`cd codeman && php -S localhost:8090`, data falls back to `structures/`). Drive via the
    browser-preview MCP and/or Chrome MCP. Test **both layouts** (single + double/Miller) and
@@ -56,13 +63,13 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
 - TC-drag-01 (P): drag a page above/below another in a column → order persists in `.order.json`;
   fires `dropReorder` **exactly once**; "before" drop lands before (regression: double-fire).
 - TC-drag-02 (P): drag a folder; "move into" a folder.
-- TC-drag-03 (N): project into a plain folder is rejected (`isValidProjectParent`, server mirror).
+- TC-drag-03 (N): project into a plain folder is rejected (`isValidProjectParent`, server mirror). **[auto: tests-api move guard]**
 - TC-drag-04 (E): in double layout, dragging an item **clears that column's active sort**.
 
 ### TC-proj — Projects & nesting
 - TC-proj-01 (P): `.project` marker rendered prominently; project-chain banner + color breadcrumb.
 - TC-proj-02 (N): project may live at root or inside another project, **never** in a plain folder —
-  guarded client + server (create_project, move). **[auto-ish: tests.html isValidProjectParent]**
+  guarded client + server (create_project, move). **[auto: tests.html isValidProjectParent + tests-api move guard]**
 
 ### TC-search — Search
 - TC-search-01 (P): name/tag/code-type filter; results render in both layouts.
@@ -99,6 +106,7 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
   open 500-block page / 8000-line block render < ~150ms, no jank.
 - TC-editor-06 (A): paste `<script>`/HTML into **note** (markdown, `html:false`) and **rich**
   (sanitizer strips script/handlers/`javascript:`) — escaping holds (security boundary).
+  **[auto: tests.html sanitizeRichHtml + md escapes raw html]**
 
 ### TC-dup — Duplicate content (block / section / page)
 - TC-dup-01 (P): **block** — for all five kinds (code/note/rich/checklist/csv/json), the block ⋯
@@ -225,26 +233,35 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
 
 ### TC-data — Trash / History / Save-conflict
 - TC-data-01 (P): Trash soft-delete → restore / empty; **empty_trash prunes the item's history**;
-  soft-delete preserves history (restorable). **[auto: tests-api]**
+  soft-delete preserves history (restorable); full delete → list → restore round-trip lands the
+  file back at `origPath` with the `.meta` cleared. **[auto: tests-api]**
 - TC-data-02 (P): History snapshots prior content (last 20), restore + `lineDiff`; **same-second
   saves retain distinct versions** (collision bump). **[auto: tests-api + tests.html lineDiff]**
 - TC-data-03 (A): **save-conflict (2 tabs)** — stale-mtime save → modal "Overwrite / Cancel
   (discards your unsaved changes…)"; Overwrite force-saves + snapshots the other version to History
-  (recoverable); Cancel reloads disk version.
+  (recoverable); Cancel reloads disk version. Server side (stale `baseMtime` → `{conflict:true}` +
+  file untouched; `force:true` → write + history snapshot) is **[auto: tests-api save-conflict]**;
+  the modal flow stays manual.
 
 ### TC-prod — Productivity
 - TC-prod-01 (P): Command palette ⌘K — jump to page (substring match), path-subtitle disambiguation;
-  `>` command mode executes commands; Esc closes; empty/no-match handled.
+  `>` command mode executes commands; Esc closes; empty/no-match handled. Also reachable without a
+  keyboard: sidebar `⋯` menu → **⌘ Command palette…** opens the same palette.
 - TC-prod-02 (P): Quick-paste block palette ⌘⇧K; Favorites + recently-copied.
 - TC-prod-03 (P): Find & Replace across pages (literal/regex, preview dry-run, history-safe write,
-  invalid regex → error); open tabs reconcile after write.
+  invalid regex → error); open tabs reconcile after write. Also reachable without a keyboard:
+  sidebar `⋯` menu → **⇄ Find & replace…** opens the same panel. Server side (preview counts
+  without writing/snapshotting, literal + regex-with-captures writes, history-snapshot-first,
+  invalid regex → clean error) is **[auto: tests-api replace_content]**.
 - TC-prod-04 (P): Tag manager rename/merge/delete; open tabs re-fetch after the write; mobile rows
-  wrap so the usage count isn't clipped.
+  wrap so the usage count isn't clipped. Server side (rename, merge-dedup, empty-`to` delete,
+  history-snapshot-first) is **[auto: tests-api rename_tag]**.
 
 ### TC-io — Export / Import
 - TC-io-01 (P): export HTML (self-contained, title escaped) / Markdown / JSON. **[auto: tests.html pageToHtml/pageToMarkdown]**
 - TC-io-02 (P/N): JSON import round-trips byte-identical; malformed / non-CodeMan JSON fails
   gracefully (no tree corruption); traversal names server-rejected.
+  **[auto-ish: tests.html importPages negatives + tests-api rename/safePath guards]**
 
 ### TC-offline — Offline + Service Worker
 - TC-offline-01 (P): SW registers (secure context incl. localhost) + precaches the shell.
@@ -253,7 +270,9 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
 - TC-offline-03 (P): reconnect (online event / probe / focus) → queue flushes, writes land on the
   server, badge clears; a pre-existing queue flushes on cold **online** boot. Offline **cold** boot
   with saved tabs restores them from the IndexedDB mirror **concurrently**, no errors, no spurious
-  online flip; on reconnect the queued write still flushes exactly once.
+  online flip; on reconnect the queued write still flushes exactly once. The replay engine (FIFO
+  drain, save-conflict → forced resend, network failure → queue retained + offline flip) is
+  **[auto: tests.html flushQueue replay]**.
 - TC-offline-04 (N): a 401 (auth) or a malformed-but-200 body is treated as a **server response, not
   offline** — no false offline; a poisoned queued op drains rather than latching offline.
 
@@ -275,6 +294,8 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
 ### TC-mobile — Responsive (≤768px)
 - TC-mobile-01 (P): drawer sidebar + backdrop; icon-only block toolbars + `⋯` overflow; compact page
   header + `⋯`; 40px top band; section header single row; uniform 34×32 / 30px icon footprints.
+  The sidebar `⋯` menu offers **⌘ Command palette…** and **⇄ Find & replace…** (the only touch
+  path to them — no keyboard shortcuts on mobile) and both open correctly at ≤768px.
 - TC-mobile-02 (E): 16px editor inputs + viewport zoom-lock; safe-area insets; no horizontal overflow
   to 360px; section title ellipsizes (no mid-word clip); tree delete is a ≥32px tap target.
 - TC-mobile-03 (P): the 768px flip re-renders the open page without reload.
