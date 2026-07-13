@@ -149,6 +149,23 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
   (macOS overlay bars unaffected).
 - TC-hscroll-07 (E): **Windows / Firefox** scrollbar theming (`scrollbar-width`/`scrollbar-color`
   vs `::-webkit-scrollbar`) and **mobile touch** horizontal scroll.
+- TC-hscroll-08 (E, macOS-gated): **view mode on macOS** (browser + Electron) — a wide block of each
+  kind (code, CSV table, note fenced `<pre>`, note table, rich `<pre>`, rich table, JSON tree) shows a
+  **persistent themed thin horizontal scrollbar WITHOUT dragging** (the hardened `-webkit-appearance:none`
+  view-scroller recipe defeats the macOS overlay auto-hide). Windows/Linux show the same themed bar with
+  **no double bar**.
+- TC-hscroll-09 (P): **JSON view mode** — a wide value + deep tree → `.json-tree` `scrollWidth > clientWidth`
+  and scrolls horizontally like code (was equal/no-scroll before, when rows wrapped); long string values no
+  longer wrap (`.json-row` `flex-wrap:nowrap`, `.json-val` `white-space:pre`); copy-path key click +
+  collapse/expand toggle still work.
+- TC-hscroll-10 (A): **note PROSE still wraps** (only fenced `<pre>`/tables scroll — the recipe styles
+  pre/table only, not prose); code **edit-mode** overlay alignment, caret tracking, last line (line-numbers
+  ON and OFF), and resize handle unchanged; **no** `-webkit-appearance:none` on edit surfaces; **no**
+  `width:max-content` rule on `.code-view pre`.
+- TC-hscroll-11 (E): a **note-prose** paragraph containing a very long **unbroken** string (URL / token /
+  no-space run) **wraps** and stays inside the block (`overflow-wrap:anywhere` on `.block.note .code-view`)
+  — it does not overflow/clip or grow a horizontal scrollbar. Fenced code + tables in the same note still
+  scroll. (Prose wraps; only code/tables scroll.)
 
 ### TC-csv — CSV / table block
 - TC-csv-01 (P): add a CSV block; enter `name,age\nAda,36` → view mode renders a table with the

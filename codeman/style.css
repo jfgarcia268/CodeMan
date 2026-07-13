@@ -1351,33 +1351,61 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .note-toggle.on { background: #7a5cc0; color: #fff; }
 .copy-as { padding-left: 7px; padding-right: 7px; }
 
-/* ---------- Thin dark scrollbar for source editors (Win/Linux/desktop-app) ---------- */
+/* ---------- Thin dark scrollbar for source editors + block views ---------- */
+/* Firefox (no overlay problem): thin themed bars everywhere. */
 .code-edit, .code-view,
 .csv-edit, .json-edit, .csv-table-wrap, .json-tree, .json-raw,
-.block.note .code-edit {
+.block.note .code-edit, .block.note .code-view pre, .block.note .code-view table,
+.block.rich .rich-surface pre, .block.rich .rich-surface table {
   scrollbar-width: thin;
   scrollbar-color: var(--scrollbar-thumb) transparent;
 }
-.code-edit::-webkit-scrollbar, .code-view::-webkit-scrollbar,
+/* WebKit/Blink EDIT surfaces — UN-hardened (no appearance:none) so the code
+   textarea overlay/gutter geometry is untouched; macOS keeps overlay bars here. */
+.code-edit::-webkit-scrollbar,
 .csv-edit::-webkit-scrollbar, .json-edit::-webkit-scrollbar,
-.csv-table-wrap::-webkit-scrollbar, .json-tree::-webkit-scrollbar, .json-raw::-webkit-scrollbar,
 .block.note .code-edit::-webkit-scrollbar { width: 8px; height: 8px; }
+/* WebKit/Blink VIEW scrollers — HARDENED: -webkit-appearance:none forces a
+   persistent, space-reserving custom bar (defeats the macOS overlay auto-hide). */
+.code-view::-webkit-scrollbar,
+.csv-table-wrap::-webkit-scrollbar, .json-tree::-webkit-scrollbar, .json-raw::-webkit-scrollbar,
+.block.note .code-view pre::-webkit-scrollbar, .block.note .code-view table::-webkit-scrollbar,
+.block.rich .rich-surface pre::-webkit-scrollbar, .block.rich .rich-surface table::-webkit-scrollbar {
+  -webkit-appearance: none; width: 8px; height: 8px;
+}
+/* Shared track / thumb / hover / corner (all edit + view scrollers). */
 .code-edit::-webkit-scrollbar-track, .code-view::-webkit-scrollbar-track,
 .csv-edit::-webkit-scrollbar-track, .json-edit::-webkit-scrollbar-track,
 .csv-table-wrap::-webkit-scrollbar-track, .json-tree::-webkit-scrollbar-track, .json-raw::-webkit-scrollbar-track,
-.block.note .code-edit::-webkit-scrollbar-track { background: transparent; }
+.block.note .code-edit::-webkit-scrollbar-track,
+.block.note .code-view pre::-webkit-scrollbar-track, .block.note .code-view table::-webkit-scrollbar-track,
+.block.rich .rich-surface pre::-webkit-scrollbar-track, .block.rich .rich-surface table::-webkit-scrollbar-track {
+  background: transparent;
+}
 .code-edit::-webkit-scrollbar-thumb, .code-view::-webkit-scrollbar-thumb,
 .csv-edit::-webkit-scrollbar-thumb, .json-edit::-webkit-scrollbar-thumb,
 .csv-table-wrap::-webkit-scrollbar-thumb, .json-tree::-webkit-scrollbar-thumb, .json-raw::-webkit-scrollbar-thumb,
-.block.note .code-edit::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 4px; }
+.block.note .code-edit::-webkit-scrollbar-thumb,
+.block.note .code-view pre::-webkit-scrollbar-thumb, .block.note .code-view table::-webkit-scrollbar-thumb,
+.block.rich .rich-surface pre::-webkit-scrollbar-thumb, .block.rich .rich-surface table::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb); border-radius: 4px;
+}
 .code-edit::-webkit-scrollbar-thumb:hover, .code-view::-webkit-scrollbar-thumb:hover,
 .csv-edit::-webkit-scrollbar-thumb:hover, .json-edit::-webkit-scrollbar-thumb:hover,
 .csv-table-wrap::-webkit-scrollbar-thumb:hover, .json-tree::-webkit-scrollbar-thumb:hover, .json-raw::-webkit-scrollbar-thumb:hover,
-.block.note .code-edit::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
+.block.note .code-edit::-webkit-scrollbar-thumb:hover,
+.block.note .code-view pre::-webkit-scrollbar-thumb:hover, .block.note .code-view table::-webkit-scrollbar-thumb:hover,
+.block.rich .rich-surface pre::-webkit-scrollbar-thumb:hover, .block.rich .rich-surface table::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
 .code-edit::-webkit-scrollbar-corner, .code-view::-webkit-scrollbar-corner,
 .csv-edit::-webkit-scrollbar-corner, .json-edit::-webkit-scrollbar-corner,
 .csv-table-wrap::-webkit-scrollbar-corner, .json-tree::-webkit-scrollbar-corner, .json-raw::-webkit-scrollbar-corner,
-.block.note .code-edit::-webkit-scrollbar-corner { background: transparent; }
+.block.note .code-edit::-webkit-scrollbar-corner,
+.block.note .code-view pre::-webkit-scrollbar-corner, .block.note .code-view table::-webkit-scrollbar-corner,
+.block.rich .rich-surface pre::-webkit-scrollbar-corner, .block.rich .rich-surface table::-webkit-scrollbar-corner {
+  background: transparent;
+}
 
 /* ---------- NOTE BLOCKS (rendered Markdown) ---------- */
 /* In note mode the textarea is the editor (opaque, normal text) and the view is
@@ -1409,6 +1437,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .block.note .code-view {
   display: block;
   white-space: normal;
+  /* Wrap long unbroken strings (URLs, tokens, no-space runs) so prose stays inside
+     the block instead of overflowing/clipping — prose wraps, it never h-scrolls
+     (fenced code + tables scroll on their own). Inherits into <p>/<li>/<td>. */
+  overflow-wrap: anywhere;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -1962,14 +1994,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .json-node:not([open]) > .json-summary .json-meta { opacity: .85; }
 .json-meta { color: var(--text-dim); }
 .json-children { padding-left: 16px; border-left: 1px solid var(--border); margin-left: 4px; }
-.json-row { display: flex; align-items: baseline; gap: 4px; flex-wrap: wrap; }
+.json-row { display: flex; align-items: baseline; gap: 4px; flex-wrap: nowrap; }
 .json-key {
   color: #9cdcfe; cursor: pointer; border-radius: 3px; padding: 0 2px;
   white-space: pre; flex: 0 0 auto;
 }
 .json-key:hover { background: var(--accent-2); color: #fff; }
 .json-colon { color: var(--text-dim); }
-.json-val { white-space: pre-wrap; word-break: break-word; }
+.json-val { white-space: pre; }
 .json-string { color: #ce9178; }
 .json-number { color: #b5cea8; }
 .json-boolean { color: #569cd6; }
