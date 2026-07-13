@@ -127,6 +127,14 @@ function signOut() {
 // A 401 means the optional password gate is on: prompt once and retry.
 const API_TIMEOUT_MS = 9000; // abort a hung request so the retry/offline path can run
 
+// The request headers every write shares. One attach point so auth (and, later, a
+// request-id) can't drift between apiFetch and the keepalive unload-save in editor.js.
+function apiHeaders() {
+  const h = {};
+  if (authToken) h['X-CodeMan-Auth'] = authToken;
+  return h;
+}
+
 async function apiFetch(action, body, query) {
   const doFetch = () => {
     // Normally relative (UI is served by the NAS). The desktop wrapper bundles the
@@ -134,8 +142,7 @@ async function apiFetch(action, body, query) {
     const base = (typeof window !== 'undefined' && window.CODEMAN_API_BASE) || '';
     let url = base + 'api.php?action=' + action;
     if (query) url += '&' + query;
-    const opts = { method: body !== undefined ? 'POST' : 'GET', headers: {} };
-    if (authToken) opts.headers['X-CodeMan-Auth'] = authToken;
+    const opts = { method: body !== undefined ? 'POST' : 'GET', headers: apiHeaders() };
     if (body !== undefined) opts.body = JSON.stringify(body);
     // Time-box the request: a hung fetch (flaky mobile link, slow TLS) aborts and
     // throws so we fail fast instead of spinning. AbortError is a network failure.
@@ -167,7 +174,10 @@ async function apiFetch(action, body, query) {
     // connectivity loss. Surface it as an app error rather than throwing, so api()
     // doesn't false-trip the whole UI offline and a poisoned queued op can't latch
     // offline forever (it drains as a failed op instead of re-tripping flushQueue).
-    return { error: 'malformed server response (' + res.status + ')' };
+    // Tagged _transient so flushQueue can classify it (retry a few times, then park)
+    // WITHOUT string-matching the message — a malformed body is usually a passing
+    // server hiccup (a stray PHP notice), not a permanent rejection like a 4xx.
+    return { error: 'malformed server response (' + res.status + ')', _transient: true };
   }
 }
 

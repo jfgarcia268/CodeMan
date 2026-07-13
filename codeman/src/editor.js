@@ -3036,7 +3036,17 @@ function editorCapPx() {
 
 /* ---------- SAVE ---------- */
 
+// Pages with un-persisted edits. Marked in scheduleSave() — the single choke point
+// every mutation path funnels through — and cleared in savePage() ONLY on a
+// successful, non-conflict save (a real mtime bump OR a queued-offline write, both of
+// which mean the edit is durably captured). A conflict or a thrown save keeps the page
+// dirty so the next flush retries it. flushSave() early-returns when the active page
+// isn't dirty, so a tab switch / unload on an untouched page does ZERO writes — no
+// history churn, no mtime bump (see the flushSave contract in CLAUDE.md).
+let pageDirty = new Set();
+
 function scheduleSave() {
+  if (currentPagePath) pageDirty.add(currentPagePath);
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(savePage, 500);
 }
@@ -3066,6 +3076,12 @@ async function savePage() {
     } else if (tab && res && res.mtime != null) {
       tab.baseMtime = res.mtime;
     }
+    // Durably captured (a server mtime OR a queued offline write) → no longer dirty.
+    // A conflict returned above (early return) or a thrown api() keeps it dirty so a
+    // later flush retries. But if an edit arrived mid-save (savePending), stay dirty —
+    // the finally-block re-save clears it once THAT save lands, closing any window where
+    // an unload could skip a genuinely-dirty page.
+    if (!savePending) pageDirty.delete(savedPath);
     toast('Saved');
   } finally {
     saveInFlight = false;
@@ -3086,6 +3102,7 @@ async function handleSaveConflict(path, diskMtime) {
   if (overwrite) {
     const res = await api('save_page', { path, data: tab ? tab.data : currentPageData, baseMtime: diskMtime, force: true });
     if (tab && res && res.mtime != null) tab.baseMtime = res.mtime;
+    pageDirty.delete(path);
     toast('Saved (overwrote disk version)');
   } else {
     // reload disk version into the tab
@@ -3095,6 +3112,7 @@ async function handleSaveConflict(path, diskMtime) {
     delete data._mtime;
     if (tab) { tab.data = data; tab.baseMtime = m; }
     if (activePath === path) { currentPageData = data; renderPage(); }
+    pageDirty.delete(path); // discarded our edits in favour of disk → nothing pending
     toast('Reloaded disk version');
   }
 }
@@ -3104,24 +3122,42 @@ async function handleSaveConflict(path, diskMtime) {
 function flushSave(opts) {
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
   if (!currentPagePath) return;
-  const tab = openPages.find(t => t.path === currentPagePath);
-  const body = JSON.stringify({ path: currentPagePath, data: currentPageData, force: true });
-  if (opts && opts.beacon && navigator.sendBeacon) {
-    navigator.sendBeacon('api.php?action=save_page', new Blob([body], { type: 'application/json' }));
-    // sendBeacon has no response, so we can't learn the new mtime here. Drop the
-    // cached baseMtime so the next save skips the (now-unanswerable) conflict
-    // check and re-syncs from a clean write — otherwise returning to the tab and
-    // typing one char would false-conflict against our own beacon write.
+  // Dirty guard: only write if this page actually has un-persisted edits. A tab switch
+  // / unload on an unchanged page must do NOTHING (no forced save → no history
+  // snapshot, no mtime bump). Call sites stay unconditional; the gate lives here.
+  if (!pageDirty.has(currentPagePath)) return;
+  const path = currentPagePath, data = currentPageData;
+  const tab = openPages.find(t => t.path === path);
+  if (opts && opts.keepalive) {
+    // Unload path: a keepalive fetch survives the page teardown (a normal fetch is
+    // cancelled on navigation). It carries the SAME auth headers as every other write
+    // (apiHeaders) — NEVER a header-less network write a gated server would 401. If the
+    // browser refuses it (offline, over quota), fall back to queue-routing so the edit
+    // still replays on reconnect — never a silent drop. (An IndexedDB write started in
+    // beforeunload isn't guaranteed to finish, which is why visibilitychange→hidden is
+    // the primary trigger below and beforeunload is only a backstop.)
+    const body = JSON.stringify({ path, data, force: true });
+    const requeue = () => { try { enqueue({ action: 'save_page', body: { path, data, force: true } }); } catch (e) {} };
+    try {
+      const p = fetch('api.php?action=save_page', { method: 'POST', keepalive: true, headers: apiHeaders(), body });
+      if (p && p.catch) p.catch(requeue);
+    } catch (e) { requeue(); }
+    // No usable response on unload → drop the cached baseMtime so returning to the tab
+    // and typing one char doesn't false-conflict against our own keepalive write.
     if (tab) tab.baseMtime = null;
+    pageDirty.delete(path);
     return;
   }
-  api('save_page', { path: currentPagePath, data: currentPageData, force: true })
-    .then(res => { if (tab && res && res.mtime != null) tab.baseMtime = res.mtime; });
+  api('save_page', { path, data, force: true })
+    .then(res => { if (tab && res && res.mtime != null) tab.baseMtime = res.mtime; pageDirty.delete(path); });
 }
 
-// Flush in-flight edits if the tab is closed/hidden mid-debounce.
-window.addEventListener('beforeunload', () => { if (saveTimer) flushSave({ beacon: true }); });
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden' && saveTimer) flushSave({ beacon: true }); });
+// Persist a dirty page if the tab is hidden/closed. visibilitychange→hidden is the
+// PRIMARY trigger (fires reliably on tab switch / app background, and a keepalive fetch
+// there completes); beforeunload is a best-effort backstop. Both are unconditional —
+// the dirty guard inside flushSave is the gate (an unchanged page writes nothing).
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushSave({ keepalive: true }); });
+window.addEventListener('beforeunload', () => { flushSave({ keepalive: true }); });
 
 /* ---------- INDEX ---------- */
 

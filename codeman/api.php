@@ -68,6 +68,61 @@ function safePath($base, $rel) {
     return $base . '/' . implode('/', $parts);
 }
 
+// Atomically write $json to $path: write to a per-write-unique, dot-prefixed temp
+// file in the SAME directory, then rename() over the target. rename() is atomic on
+// POSIX, so a crash between the write and the rename can never truncate or corrupt
+// the real file — a concurrent reader sees either the whole old bytes or the whole
+// new, never a half-written page. THE TEMP NAME MUST BE PER-WRITE UNIQUE (uniqid):
+// a fixed "<path>.tmp" would let two concurrent save_pages clobber each other's temp
+// before either renames, defeating the serialization LOCK_EX gives us. The dot
+// prefix keeps an orphaned temp (e.g. a crash before the rename) invisible to
+// buildTree. Returns the bytes written, or false on failure.
+// (Caveat: Windows rename() can't replace an existing file — but api.php only ever
+// runs on the Linux NAS / macOS dev, never Windows, so the POSIX guarantee holds.)
+function writeJsonAtomic($path, $json) {
+    $tmp = dirname($path) . '/.tmp-' . uniqid('', true);
+    $bytes = @file_put_contents($tmp, $json, LOCK_EX);
+    if ($bytes === false) { @unlink($tmp); return false; }
+    @chmod($tmp, 0644);
+    if (!@rename($tmp, $path)) { @unlink($tmp); return false; }
+    return $bytes;
+}
+
+// Move a page/folder's .history subtree when it's renamed or moved, so its version
+// history follows it (a page: .history/<rel>.json/ ; a folder: .history/<rel>/, whole
+// subtree). Best-effort: History is a recovery net, never a hard dependency — a
+// missing/locked .history (or a name collision at the destination) must NOT fail the
+// rename/move. Both rels are run through safePath so a crafted path can't escape
+// .history (same posture as empty_trash's origPath).
+function migrateHistory($oldRel, $newRel) {
+    global $historyDir;
+    $from = safePath($historyDir, $oldRel);
+    $to = safePath($historyDir, $newRel);
+    if ($from === $to || $from === $historyDir . '/' || !file_exists($from)) return;
+    $parent = dirname($to);
+    if (!is_dir($parent)) @mkdir($parent, 0777, true);
+    if (!file_exists($to)) { @rename($from, $to); return; } // fast path: nothing at the destination
+    // The destination history already exists (a prior same-named item left it behind).
+    // Don't strand the source AND don't let the moved page inherit only the stale dest
+    // history: MERGE the source's non-colliding version files in (deduped by filename =
+    // timestamp), then drop whatever's left of the source so it can't mislead.
+    mergeHistoryDir($from, $to);
+}
+// Recursively merge history dir $from into $to: carry across any file/subtree not already
+// present at the destination (a colliding timestamp filename = the same version, skipped),
+// then remove the drained source. Best-effort — never fails the calling rename/move.
+function mergeHistoryDir($from, $to) {
+    if (!is_dir($to)) @mkdir($to, 0777, true);
+    foreach (@scandir($from) ?: [] as $e) {
+        if ($e === '.' || $e === '..') continue;
+        $sf = $from . '/' . $e;
+        $tf = $to . '/' . $e;
+        if (is_dir($sf)) mergeHistoryDir($sf, $tf);
+        else if (!file_exists($tf)) @rename($sf, $tf);
+    }
+    @rrmdir($from);
+}
+
 // Manual child ordering per folder, persisted in a hidden .order.json holding
 // child entry names (folder names and "page.json" filenames) in display order.
 function readOrder($dir) {
@@ -76,7 +131,7 @@ function readOrder($dir) {
     return [];
 }
 function writeOrder($dir, $order) {
-    file_put_contents(rtrim($dir, '/') . '/.order.json', json_encode(array_values($order)), LOCK_EX);
+    writeJsonAtomic(rtrim($dir, '/') . '/.order.json', json_encode(array_values($order)));
 }
 // Put a freshly created entry first in its folder's order.
 function prependOrder($dir, $name) {
@@ -96,7 +151,7 @@ function readColSorts($base) {
     return [];
 }
 function writeColSorts($base, $map) {
-    file_put_contents(colSortFile($base), json_encode((object)$map), LOCK_EX);
+    writeJsonAtomic(colSortFile($base), json_encode((object)$map));
 }
 
 // Walk a section (any depth, legacy or tabbed) collecting tags and block langs.
@@ -304,7 +359,7 @@ function flushIndex() {
         if (!isset($indexSeen[$k])) { unset($index[$k]); $indexDirty = true; }
     }
     if ($indexDirty) {
-        file_put_contents($indexFile, json_encode($index), LOCK_EX);
+        writeJsonAtomic($indexFile, json_encode($index));
     }
 }
 
@@ -337,7 +392,7 @@ function snapshotHistory($base, $rel, $path) {
     // pure-integer for restore-by-ts) so a concurrent same-second version is still
     // retained and recoverable instead of being silently dropped.
     while (file_exists($vfile)) { $stamp++; $vfile = $hdir . '/' . $stamp . '.json'; }
-    file_put_contents($vfile, $old, LOCK_EX);
+    writeJsonAtomic($vfile, $old);
     $vers = glob($hdir . '/*.json') ?: [];
     if (count($vers) > HISTORY_KEEP) {
         sort($vers); // oldest mtimes first (numeric filenames)
@@ -465,7 +520,7 @@ switch ($action) {
                 $pageList[] = ['path' => $rel, 'matches' => $pageMatches];
                 if (!$preview && $changed) {
                     snapshotHistory($base, $rel, $file->getPathname());
-                    file_put_contents($file->getPathname(), json_encode($data, JSON_PRETTY_PRINT), LOCK_EX);
+                    writeJsonAtomic($file->getPathname(), json_encode($data, JSON_PRETTY_PRINT));
                     clearstatcache(true, $file->getPathname());
                     $changedPages++;
                 }
@@ -512,7 +567,7 @@ switch ($action) {
             if ($changed) {
                 $rel = ltrim(substr($full, strlen($base)), '/');
                 snapshotHistory($base, $rel, $full);
-                file_put_contents($full, json_encode($data, JSON_PRETTY_PRINT), LOCK_EX);
+                writeJsonAtomic($full, json_encode($data, JSON_PRETTY_PRINT));
                 clearstatcache(true, $full);
                 $changedPages++;
             }
@@ -593,7 +648,7 @@ switch ($action) {
         // reports ok. Same guard as save_page.
         if (!is_dir(dirname($path))) jsonError('parent folder does not exist', 404);
         if (!file_exists($path)) {
-            if (@file_put_contents($path, json_encode(['title' => $name, 'sections' => []], JSON_PRETTY_PRINT)) === false) jsonError('failed to create page', 500);
+            if (writeJsonAtomic($path, json_encode(['title' => $name, 'sections' => []], JSON_PRETTY_PRINT)) === false) jsonError('failed to create page', 500);
         }
         echo json_encode(['ok' => true]);
         break;
@@ -632,7 +687,7 @@ switch ($action) {
         $dir = dirname($path);
         if (!is_dir($dir)) jsonError('parent folder does not exist', 404);
         snapshotHistory($base, $input['path'], $path); // version the prior content
-        $bytes = @file_put_contents($path, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), LOCK_EX);
+        $bytes = writeJsonAtomic($path, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
         if ($bytes === false) jsonError('failed to write page', 500);
         clearstatcache(true, $path);
         echo json_encode(['ok' => true, 'mtime' => @filemtime($path)]);
@@ -649,6 +704,10 @@ switch ($action) {
         $newPath = $isFolder ? $dir . '/' . $newName : $dir . '/' . $newName . '.json';
         if (file_exists($newPath)) jsonError('name already exists');
         rename($oldPath, $newPath);
+        // Carry the version history over to the new name (best-effort).
+        $parentRel = (strpos($input['path'], '/') !== false) ? substr($input['path'], 0, strrpos($input['path'], '/')) : '';
+        $newRel = ($parentRel !== '' ? $parentRel . '/' : '') . ($isFolder ? $newName : $newName . '.json');
+        migrateHistory($input['path'], $newRel);
         echo json_encode(['ok' => true]);
         break;
 
@@ -676,6 +735,8 @@ switch ($action) {
         if (dirname($src) === $destDir) { echo json_encode(['ok' => true]); break; }
         if (file_exists($dest)) { jsonError('name already exists in target'); }
         rename($src, $dest);
+        // Carry the version history over to the new location (best-effort).
+        migrateHistory($input['path'], (($input['target'] ?? '') !== '' ? $input['target'] . '/' : '') . $name);
         echo json_encode(['ok' => true]);
         break;
 
@@ -693,7 +754,7 @@ switch ($action) {
         while (file_exists($dest)) { $entry = $stamp . '_' . (++$i) . '__' . $name; $dest = $trashDir . '/' . $entry; }
         $wasDir = is_dir($path);
         rename($path, $dest);
-        @file_put_contents($dest . '.meta', json_encode([
+        writeJsonAtomic($dest . '.meta', json_encode([
             'origPath' => $input['path'],
             'name' => preg_replace('/\.json$/', '', $name),
             'deletedAt' => $stamp,

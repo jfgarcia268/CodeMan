@@ -217,6 +217,63 @@ eqs "rename_tag merge dedups into one tag" "$(grep -o '"keeptag"' "$DATA/Tg.json
 post rename_tag '{"from":"keeptag","to":""}' >/dev/null         # empty `to` = delete
 hasnt "rename_tag empty to → tag deleted" "$(cat "$DATA/Tg.json")" 'keeptag'
 
+# --- atomic writes: a save burst leaves NO temp residue + every page parses -------
+post create_folder '{"name":"Atomic","parent":""}' >/dev/null
+for i in 1 2 3 4 5 6 7 8; do
+  post save_page "{\"path\":\"Atomic/Pg.json\",\"data\":{\"title\":\"v$i\",\"sections\":[{\"title\":\"S\",\"collapsed\":false,\"tags\":[],\"blocks\":[{\"type\":\"bash\",\"label\":\"\",\"code\":\"line $i\"}],\"subsections\":[]}]}}" >/dev/null
+done
+tmpleft=$(find "$DATA" -name '.tmp-*' 2>/dev/null | wc -l | tr -d ' ')
+eqs "atomic writes leave no .tmp-* residue anywhere under data" "$tmpleft" "0"
+# Every *.json under the data root (pages, history snapshots, .order/.index/.colsort)
+# must still parse — a non-atomic write crashing mid-stream would leave a truncated file.
+badjson=0
+while IFS= read -r f; do
+  php -r '$c=@file_get_contents($argv[1]); if($c==="" || (json_decode($c)===null && trim($c)!=="null")) exit(1);' "$f" 2>/dev/null || badjson=$((badjson+1))
+done < <(find "$DATA" -type f -name '*.json' 2>/dev/null)
+eqs "every JSON file parses after a save burst (no truncation)" "$badjson" "0"
+
+# --- rename/move migrate the page's .history subtree ------------------------------
+post create_folder '{"name":"Hm","parent":""}' >/dev/null
+post create_page '{"name":"Old","parent":"Hm"}' >/dev/null
+post save_page '{"path":"Hm/Old.json","data":{"title":"a","sections":[]}}' >/dev/null
+post save_page '{"path":"Hm/Old.json","data":{"title":"b","sections":[]}}' >/dev/null
+test -d "$DATA/.history/Hm/Old.json" && ok "history exists before rename" || bad "history exists before rename" "missing"
+post rename '{"path":"Hm/Old.json","newName":"New"}' >/dev/null
+test -d "$DATA/.history/Hm/New.json" && ok "rename migrated the page history to the new name" || bad "rename migrated the page history" "not at Hm/New.json"
+test ! -d "$DATA/.history/Hm/Old.json" && ok "rename left no history at the old name" || bad "rename left no history at the old name" "still at Hm/Old.json"
+hist=$(curl -sG "$BASE" --data-urlencode "action=list_history" --data-urlencode "path=Hm/New.json")
+has "renamed page lists its migrated history" "$hist" '"ts"'
+post create_folder '{"name":"HmDest","parent":""}' >/dev/null
+post move '{"path":"Hm/New.json","target":"HmDest"}' >/dev/null
+test -d "$DATA/.history/HmDest/New.json" && ok "move migrated the page history to the target" || bad "move migrated the page history" "not at HmDest/New.json"
+test ! -d "$DATA/.history/Hm/New.json" && ok "move left no history at the old location" || bad "move left no history at the old location" "still at Hm/New.json"
+# folder rename migrates the WHOLE history subtree
+post create_folder '{"name":"HFolderA","parent":""}' >/dev/null
+post create_page '{"name":"P","parent":"HFolderA"}' >/dev/null
+post save_page '{"path":"HFolderA/P.json","data":{"title":"x","sections":[]}}' >/dev/null
+post save_page '{"path":"HFolderA/P.json","data":{"title":"y","sections":[]}}' >/dev/null
+post rename '{"path":"HFolderA","newName":"HFolderB"}' >/dev/null
+test -d "$DATA/.history/HFolderB/P.json" && ok "folder rename migrated the whole history subtree" || bad "folder rename migrated the whole history subtree" "not at HFolderB/P.json"
+
+# --- move into a dest whose .history ALREADY exists → merge, don't strand (LOW-1) ---
+post create_folder '{"name":"MgD","parent":""}' >/dev/null
+post create_page '{"name":"Mv","parent":"MgD"}' >/dev/null
+post save_page '{"path":"MgD/Mv.json","data":{"title":"d1","sections":[]}}' >/dev/null
+post save_page '{"path":"MgD/Mv.json","data":{"title":"d2","sections":[]}}' >/dev/null
+post delete '{"path":"MgD/Mv.json"}' >/dev/null   # leaves .history/MgD/Mv.json behind (dest history)
+test -d "$DATA/.history/MgD/Mv.json" && ok "dest history exists from a prior deleted page" || bad "dest history exists" "missing"
+destv_before=$(ls "$DATA/.history/MgD/Mv.json" 2>/dev/null | wc -l | tr -d ' ')
+sleep 1   # distinct timestamps so source versions don't collide with dest on merge
+post create_page '{"name":"Mv","parent":""}' >/dev/null
+post save_page '{"path":"Mv.json","data":{"title":"s1","sections":[]}}' >/dev/null
+sleep 1
+post save_page '{"path":"Mv.json","data":{"title":"s2","sections":[]}}' >/dev/null
+test -d "$DATA/.history/Mv.json" && ok "source history exists before the dest-exists move" || bad "source history exists" "missing"
+post move '{"path":"Mv.json","target":"MgD"}' >/dev/null
+test ! -d "$DATA/.history/Mv.json" && ok "dest-exists move removed the stale source history (not stranded)" || bad "dest-exists move removed the stale source history" "source .history/Mv.json still present"
+destv_after=$(ls "$DATA/.history/MgD/Mv.json" 2>/dev/null | wc -l | tr -d ' ')
+[ "$destv_after" -gt "$destv_before" ] && ok "dest-exists move merged source versions into dest ($destv_before → $destv_after)" || bad "dest-exists move merged source versions into dest" "dest count $destv_before → $destv_after"
+
 # --- password gate ----------------------------------------------------------
 start_server "testsecret"
 r=$(curl -s -w $'\n%{http_code}' "$BASE?action=tree");                         eqs "gate: no token → 401" "$(code "$r")" "401"

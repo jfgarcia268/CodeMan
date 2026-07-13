@@ -62,6 +62,133 @@ async function openTrash() {
   });
 }
 
+/* ---------- DEAD-LETTER QUEUE PANEL ----------
+   Review writes the server REJECTED (parked by offline.js flushQueue). Grouped by
+   cascadeOf so a failed subtree reads as one unit. Per-op Inspect / Retry / Discard,
+   plus bulk Retry-all / Discard-all / Export. No eviction — a soft cap escalates to an
+   export prompt instead, so data is never dropped without the user's say. */
+const DEAD_LETTER_SOFT_CAP = 100;
+
+async function openDeadLetterPanel() {
+  openPanel('Unsynced changes — review', async (body, foot, close) => {
+    body.innerHTML = '<div class="panel-loading">Loading…</div>';
+    const items = await dlList();
+    body.innerHTML = '';
+    if (!items.length) { body.innerHTML = '<div class="panel-empty">Nothing to review — all changes synced.</div>'; return; }
+
+    // One-line orientation for a populated panel — what these are + what the actions do.
+    const intro = document.createElement('div'); intro.className = 'panel-intro';
+    intro.textContent = 'These edits were made offline and the server rejected them, so they are not saved there yet. Retry sends a change again, Discard drops it, and Export saves them as JSON first.';
+    body.appendChild(intro);
+
+    if (items.length > DEAD_LETTER_SOFT_CAP) {
+      const note = document.createElement('div'); note.className = 'dl-cap-note';
+      note.textContent = '⚠ ' + items.length + ' unsynced changes have piled up — use “Export all” below to save these changes as JSON before discarding.';
+      body.appendChild(note);
+    }
+
+    // Group by cascadeOf ('' = standalone). A cascade group is HEADED by the failed
+    // parent create_* itself (it lives in the standalone bucket with cascadeOf:null), so
+    // the parent + the dependents it blocked render contiguously, parent first.
+    const groups = new Map();
+    items.forEach(it => { const k = it.cascadeOf || ''; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(it); });
+    const standalone = groups.get('') || [];
+    groups.delete('');
+    groups.forEach((ops, key) => {
+      const pi = standalone.findIndex(it => dlCreatedPath(it) === key);
+      if (pi !== -1) ops.unshift(standalone.splice(pi, 1)[0]); // hoist the failed parent to the group head
+    });
+
+    const refresh = () => { close(); openDeadLetterPanel(); };
+    standalone.forEach(it => body.appendChild(buildDeadLetterRow(it, refresh)));
+    groups.forEach((ops, key) => {
+      const gh = document.createElement('div'); gh.className = 'dl-group-head';
+      gh.textContent = 'Could not create “' + key + '” — these depend on it';
+      body.appendChild(gh);
+      ops.forEach(it => body.appendChild(buildDeadLetterRow(it, refresh)));
+    });
+
+    const exp = document.createElement('button'); exp.className = 'secondary'; exp.textContent = 'Export all';
+    exp.title = 'Download every unsynced change as JSON';
+    exp.onclick = () => {
+      download('codeman-unsynced-' + items.length + '-changes.json', JSON.stringify(items, null, 2), 'application/json');
+      toast('Exported ' + items.length + ' change' + (items.length === 1 ? '' : 's'));
+    };
+    const retryAll = document.createElement('button'); retryAll.textContent = 'Retry all';
+    retryAll.onclick = async () => {
+      for (const it of items) { await enqueue({ action: it.action, body: it.body, query: it.query }); await dlRemove(it.id); }
+      close(); toast('Retrying ' + items.length + ' change' + (items.length === 1 ? '' : 's') + '…'); flushQueue();
+    };
+    const discardAll = document.createElement('button'); discardAll.className = 'danger'; discardAll.textContent = 'Discard all';
+    discardAll.style.marginRight = 'auto'; // pull the destructive action away from the primary (right) slot
+    discardAll.onclick = async () => {
+      if (!await showConfirm('Permanently discard all ' + items.length + ' unsynced change' + (items.length === 1 ? '' : 's') + '? This cannot be undone.', { okLabel: 'Discard all' })) return;
+      for (const it of items) await dlRemove(it.id);
+      close(); toast('Discarded'); openDeadLetterPanel();
+    };
+    // Order: Discard-all (left, separated) · Export-all · Retry-all (primary, right).
+    foot.append(discardAll, exp, retryAll);
+  });
+}
+
+// A parked op → a review row (label, server reason, Inspect / Retry / Discard).
+function buildDeadLetterRow(it, refresh) {
+  const row = document.createElement('div'); row.className = 'panel-row';
+  const info = document.createElement('div'); info.className = 'panel-row-info';
+  const nm = document.createElement('div'); nm.className = 'panel-row-name';
+  nm.textContent = dlLabel(it);
+  const sub = document.createElement('div'); sub.className = 'panel-row-sub';
+  // Timestamp FIRST (fixed width, always visible) then the reason — the row ellipsizes,
+  // and a long raw server reason would otherwise hide the "when". Full reason on hover.
+  sub.textContent = fmtTime(it.ts) + ' · ' + it.reason;
+  sub.title = it.reason;
+  info.append(nm, sub);
+  const inspect = document.createElement('button'); inspect.className = 'secondary'; inspect.textContent = 'Inspect';
+  inspect.onclick = () => openDeadLetterInspect(it);
+  const retry = document.createElement('button'); retry.textContent = 'Retry';
+  retry.onclick = async () => {
+    await enqueue({ action: it.action, body: it.body, query: it.query });
+    await dlRemove(it.id);
+    toast('Retrying…'); flushQueue(); refresh();
+  };
+  const discard = document.createElement('button'); discard.className = 'danger'; discard.textContent = 'Discard';
+  discard.onclick = async () => {
+    if (!await showConfirm('Discard this change permanently? This cannot be undone.', { okLabel: 'Discard' })) return;
+    await dlRemove(it.id); toast('Discarded'); refresh();
+  };
+  row.append(info, inspect, retry, discard);
+  return row;
+}
+
+// A human label for a parked op: the verb + the page/folder it targeted.
+function dlLabel(it) {
+  const b = it.body || {};
+  const target = b.path || ((b.parent ? b.parent + '/' : '') + (b.name || '')) || '';
+  const verb = { save_page: 'Save', create_page: 'Create page', create_folder: 'Create folder',
+    create_project: 'Create project', delete: 'Delete', rename: 'Rename', move: 'Move',
+    reorder: 'Reorder', set_col_sort: 'Sort' }[it.action] || it.action;
+  return verb + (target ? ' · ' + target : '');
+}
+
+function openDeadLetterInspect(it) {
+  openPanel('Change details — ' + dlLabel(it), (body, foot) => {
+    const text = JSON.stringify(it, null, 2);
+    const pre = document.createElement('pre'); pre.className = 'dl-inspect';
+    pre.textContent = text;
+    body.appendChild(pre);
+    // Copy the full payload (routed through copyText so it works in insecure contexts too)
+    // so a user can hand it to support.
+    const copy = document.createElement('button'); copy.className = 'secondary'; copy.textContent = 'Copy';
+    copy.title = 'Copy this change as JSON';
+    copy.onclick = async () => {
+      const ok = await copyText(text);
+      copy.textContent = ok ? 'Copied' : 'Copy failed';
+      setTimeout(() => { copy.textContent = 'Copy'; }, 1500);
+    };
+    foot.appendChild(copy);
+  });
+}
+
 async function openHistory(path) {
   openPanel('History — ' + nameFromPath(path), async (body, foot, close) => {
     body.innerHTML = '<div class="panel-loading">Loading…</div>';
@@ -276,6 +403,9 @@ function openCommandPalette() {
     { name: 'Download all pages for offline', run: () => primeOfflineCache() },
     { name: 'Open trash…', run: () => openTrash() },
     { name: 'Open favorites…', run: () => openFavorites() },
+    // keyboard path to the recovery panel — only when there's something to recover
+    ...(typeof dlCountCached === 'function' && dlCountCached() > 0
+      ? [{ name: 'Review unsynced changes…', run: () => openDeadLetterPanel() }] : []),
     { name: 'Export current page → HTML', run: () => exportCurrentPage('html') },
     { name: 'Export current page → Markdown', run: () => exportCurrentPage('md') },
     { name: 'Export all pages → JSON', run: () => exportAll() },
@@ -773,6 +903,10 @@ function openMoreMenu(anchor) {
     opt('⟳', 'Rebuild index', () => rebuildIndex(anchor)),
     opt('☁', 'Download for offline', () => primeOfflineCache())
   );
+  // Recovery entry — only when writes failed to sync (mirrors the badge/palette reach).
+  if (typeof dlCountCached === 'function' && dlCountCached() > 0) {
+    menu.append(sep(), opt('⚠', 'Review unsynced changes…', () => openDeadLetterPanel()));
+  }
   // Sign-out — only when a shared-secret token is stored (password gate in use).
   if (typeof authToken !== 'undefined' && authToken) {
     menu.append(sep(), opt('⊗', 'Forget password (sign out)', () => signOut()));

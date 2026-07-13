@@ -54,13 +54,13 @@ jobs:
             echo 'api.php must NOT be in the sw.js SHELL precache — data goes through src/offline.js, not the SW cache'
             exit 1
           fi
-      # Phase 2 (data safety) will activate this invariant once writeJsonAtomic lands:
-      #
-      #   - name: page JSON writes are atomic (temp file + rename)
-      #     run: |
-      #       grep -q 'function writeJsonAtomic' codeman/api.php
-      #       # ...and assert no bare `file_put_contents(...json_encode` of page data
-      #       # remains outside writeJsonAtomic, so a crash mid-write can never
-      #       # truncate a page file.
-      #
-      # Left commented out until Phase 2 adds the helper — see the Implementation Plan.
+      - name: page JSON writes are atomic (temp file + rename)
+        run: |
+          grep -q 'function writeJsonAtomic' codeman/api.php
+          # No bare `file_put_contents(..., json_encode(...))` may remain: every JSON
+          # write (pages, .order/.colsort/.index, history snapshots, trash .meta) must
+          # route through writeJsonAtomic so a crash mid-write can never truncate a file.
+          if grep -nE 'file_put_contents\([^)]*json_encode' codeman/api.php; then
+            echo 'Bare file_put_contents(..., json_encode(...)) found — route it through writeJsonAtomic'
+            exit 1
+          fi

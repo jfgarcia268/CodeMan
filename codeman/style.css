@@ -15,6 +15,13 @@
   --muted: #9aa0a8;       /* dim labels/stamps — was an undefined fallback; centralized to pass AA */
   --accent: #0e639c;      /* primary accent (buttons, focus) */
   --accent-2: #094771;    /* accent hover / active row */
+  --warn-bg: #5a3a1a;     /* amber warning surface (routine offline / queued) */
+  --warn-border: #8a5a2a;
+  --warn-text: #ffd9a8;
+  --danger: #c0392b;      /* was an undefined var(--danger, …) fallback; centralized */
+  --danger-bg: #6e2018;   /* red urgency surface — rejected data / dead-letters (louder than warn) */
+  --danger-border: #a5382a;
+  --danger-text: #ffd7d0;
   --radius: 5px;          /* default control radius — keeps peer controls consistent */
 }
 
@@ -1800,6 +1807,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   padding: 12px 16px;
   border-top: 1px solid #3a3d41;
 }
+/* let the bulk buttons wrap instead of overflowing on a narrow (~320px) panel */
+.panel-foot.modal-btns { flex-wrap: wrap; row-gap: 8px; }
 .panel-loading, .panel-empty {
   color: var(--text-dim);
   text-align: center;
@@ -1832,6 +1841,42 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   text-overflow: ellipsis;
 }
 .panel-row button { padding: 5px 12px; font-size: 12px; flex-shrink: 0; }
+
+/* ---- dead-letter (unsynced changes) panel ---- */
+.panel-intro {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+  padding: 2px 4px 10px;
+}
+.dl-cap-note {
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  color: var(--warn-text);
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+.dl-group-head {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--warn-text);
+  margin: 14px 4px 4px;
+}
+.dl-inspect {
+  background: var(--bg);
+  border: 1px solid var(--border-2);
+  border-radius: 6px;
+  padding: 12px;
+  font-size: 12px;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: auto;
+}
+
 .panel-section-head {
   font-size: 11px;
   text-transform: uppercase;
@@ -2038,7 +2083,64 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
   cursor: pointer;
 }
-.offline-badge.warn { background: #5a3a1a; border-color: #8a5a2a; color: #ffd9a8; }
+.offline-badge.warn { background: var(--warn-bg); border-color: var(--warn-border); color: var(--warn-text); }
+/* Dead-letters (rejected data) — a distinct, higher-urgency RED state, louder than the
+   routine amber offline/queued badge so it reads as more serious. */
+.offline-badge.danger { background: var(--danger-bg); border-color: var(--danger-border); color: var(--danger-text); font-weight: 600; }
+
+/* offline-only desktop backup nudge — a dismissable toast, never modal */
+.nudge-toast {
+  position: fixed;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1300;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100vw - 28px);
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-2);
+  color: var(--text);
+  font-size: 13px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+}
+.nudge-toast .nudge-act {
+  background: var(--accent);
+  border: none;
+  color: #fff;
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.nudge-toast .nudge-act:hover { background: var(--accent-2); }
+/* "Don't remind me" — a DELIBERATE labelled secondary text button (permanent opt-out),
+   visually distinct from the lightweight iconic ✕ so it isn't triggered by reflex. */
+.nudge-toast .nudge-off {
+  background: transparent;
+  border: 1px solid var(--border-2);
+  color: var(--muted);
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.nudge-toast .nudge-off:hover { color: var(--text); border-color: #666; }
+/* the ✕ — lightweight iconic dismiss (this time only) */
+.nudge-toast .nudge-dismiss {
+  background: transparent;
+  border: none;
+  color: var(--muted);   /* was --text-dim (#888, sub-AA) — --muted passes AA */
+  padding: 4px 6px;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+.nudge-toast .nudge-dismiss:hover { color: var(--text); }
 
 /* drawer backdrop element (added in initMobile) — only ever visible on mobile
    with the drawer open; hidden everywhere else, incl. all desktop widths. */
