@@ -13,6 +13,10 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
 
 ## [Unreleased]
 
+### Changed
+- Faster cold boot — restore open tabs in parallel and drop a redundant tree reload (fewer,
+  concurrent API round-trips).
+
 ## [1.9.0] — 2026-06-23
 
 ### Added

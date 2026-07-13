@@ -28,24 +28,76 @@ async function restoreOpenTabs() {
   try { saved = JSON.parse(localStorage.getItem(TABS_KEY)); } catch (e) { return; }
   if (!saved || !Array.isArray(saved.tabs) || !saved.tabs.length) return;
   const existing = collectPagePaths(treeData, new Set());
-  for (const t of saved.tabs) {
-    if (!existing.has(t.path)) continue;
-    const data = await api('get_page', undefined, 'path=' + encodeURIComponent(t.path));
-    if (!data.sections) data.sections = [];
-    const baseMtime = data._mtime != null ? data._mtime : null;
-    delete data._mtime;
-    openPages.push({ path: t.path, title: data.title || nameFromPath(t.path), data, filter: t.filter || '', baseMtime });
+  // Dedup + existence filter up front so we only fetch what we'll show, in SAVED ORDER.
+  const seen = new Set();
+  const candidates = saved.tabs.filter(t => {
+    const p = t && t.path;
+    if (!p || seen.has(p) || !existing.has(p)) return false;
+    seen.add(p); return true;
+  });
+  if (!candidates.length) return;
+  // Fetch every surviving tab CONCURRENTLY. api() never rejects (→ offlineApi);
+  // get_page is a pure read keyed per-path in the cache, so concurrent reads are
+  // safe. The Map decouples result availability from saved order.
+  const results = new Map();
+  await Promise.all(candidates.map(async t => {
+    results.set(t.path, await api('get_page', undefined, 'path=' + encodeURIComponent(t.path)));
+  }));
+  const { tabs, active } = assembleRestoredTabs(saved, existing, p => results.get(p));
+  if (!tabs.length) return;
+  // Defensive: nothing should open a page between boot and here, but push only tabs
+  // not already present so a future auto-open can't produce a duplicate tab.
+  openPages.push(...tabs.filter(t => !openPages.some(o => o.path === t.path))); // saved order
+  const activeTab = openPages.find(t => t.path === active) || openPages[openPages.length - 1];
+  activateTab(activeTab);                                    // EXACTLY ONCE, after all settle
+  expandAncestors(activeTab.path);
+  renderTree();                                              // (a): was loadTree()
+  // A tab whose get_page returned {error} (a malformed server response, not a deleted
+  // page — those were filtered out of `candidates`) was skipped above so it can't
+  // clobber the real page with an empty tab. But activateTab→saveOpenTabs just
+  // persisted only the LOADED tabs, which would permanently forget the errored one.
+  // Re-persist every surviving candidate (loaded + transiently-errored, in saved
+  // order) so a flaky boot retries the failed tab next launch instead of dropping it.
+  if (candidates.some(t => (results.get(t.path) || {}).error)) {
+    try {
+      localStorage.setItem(TABS_KEY, JSON.stringify({
+        tabs: candidates.map(t => ({ path: t.path, filter: t.filter || '' })),
+        active: activePath
+      }));
+    } catch (e) {}
   }
-  if (!openPages.length) return;
-  const active = openPages.find(t => t.path === saved.active) || openPages[openPages.length - 1];
-  activateTab(active);
-  expandAncestors(active.path);
-  loadTree();
 }
 
 function nameFromPath(path) {
   const base = path.includes('/') ? path.slice(path.lastIndexOf('/') + 1) : path;
   return base.replace(/\.json$/, '');
+}
+
+// Pure. Rebuild the restored-tab list in SAVED ORDER from already-resolved
+// get_page results — independent of fetch-resolution timing — skipping tabs
+// that no longer exist, failed to load, or are duplicate paths, then pick the
+// active tab. No I/O, no globals besides pure nameFromPath → unit-testable.
+//   saved:    { tabs:[{path,filter}], active }   (as persisted)
+//   existing: Set<string> of page paths currently in the tree
+//   resultOf: (path) => data | {error} | undefined   (resolved get_page payload)
+// returns:   { tabs:[{path,title,data,filter,baseMtime}], active: string|null }
+function assembleRestoredTabs(saved, existing, resultOf) {
+  const out = [], seen = new Set();
+  for (const t of (saved && saved.tabs) || []) {
+    const path = t && t.path;
+    if (!path || seen.has(path) || !existing.has(path)) continue; // skip dup / non-existent
+    seen.add(path);
+    const data = resultOf(path);
+    if (!data || data.error) continue;            // failed fetch → skip, order NOT shifted
+    if (!Array.isArray(data.sections)) data.sections = [];
+    const baseMtime = data._mtime != null ? data._mtime : null;
+    delete data._mtime;
+    out.push({ path, title: data.title || nameFromPath(path), data, filter: t.filter || '', baseMtime });
+  }
+  const active = out.length
+    ? (out.some(x => x.path === (saved && saved.active)) ? saved.active : out[out.length - 1].path)
+    : null;
+  return { tabs: out, active };
 }
 
 const _openingPages = new Map(); // path → in-flight open Promise — dedups concurrent opens

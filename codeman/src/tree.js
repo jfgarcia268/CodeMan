@@ -94,8 +94,12 @@ function expandAncestors(pagePath) {
 }
 
 async function loadTree() {
-  treeData = await api('tree');
-  try { colSort = (await api('col_sorts')) || {}; } catch (e) { colSort = colSort || {}; }
+  const [tree, cols] = await Promise.all([
+    api('tree'),
+    api('col_sorts').catch(() => null),   // preserve col_sorts-failure tolerance
+  ]);
+  treeData = tree;
+  colSort = cols || {};                    // null/undefined → default {} (as today)
   renderTree();
 }
 

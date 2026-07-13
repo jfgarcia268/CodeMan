@@ -77,6 +77,13 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
 - TC-tabs-02 (E): mobile tab strip scrolls horizontally; "Close all" stays pinned.
 - TC-tabs-03 (A): rapid double-click / concurrent open of the **same** page opens **one** tab
   (in-flight opens are deduped — regression: `openPage` TOCTOU race made duplicate tabs).
+- TC-tabs-04 (A): restore ≥3 saved tabs **concurrently** — order preserved (incl. one artificially
+  slow / out-of-order fetch), previously-active tab focused, a since-deleted tab skipped without
+  shifting survivors, a duplicate path opens once; boot issues **2 fewer** api.php requests (no
+  redundant second `loadTree`). **[auto: tests.html assembleRestoredTabs]**
+- TC-tabs-05 (N): a saved tab whose `get_page` returns `{error}` (malformed server body, not a
+  deleted page) is **not** opened as an empty tab **and is not forgotten** — the surviving-candidate
+  set (loaded + transiently-errored, saved order) is re-persisted so it retries on the next boot.
 
 ### TC-editor — Editor & blocks (code / note / rich / checklist / csv)
 - TC-editor-01 (P): Edit/Save, Cancel→Revert, Copy, Duplicate, Delete per block; section collapse.
@@ -192,7 +199,9 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
 - TC-offline-02 (A): backend down → `offlineState` flips, badge shows queued count, reads served
   from IndexedDB; writes queue. **[auto-ish: tests.html offline reducers]**
 - TC-offline-03 (P): reconnect (online event / probe / focus) → queue flushes, writes land on the
-  server, badge clears; a pre-existing queue flushes on cold **online** boot.
+  server, badge clears; a pre-existing queue flushes on cold **online** boot. Offline **cold** boot
+  with saved tabs restores them from the IndexedDB mirror **concurrently**, no errors, no spurious
+  online flip; on reconnect the queued write still flushes exactly once.
 - TC-offline-04 (N): a 401 (auth) or a malformed-but-200 body is treated as a **server response, not
   offline** — no false offline; a poisoned queued op drains rather than latching offline.
 
