@@ -13,6 +13,10 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
 
 ## [Unreleased]
 
+### Added
+- Duplicate a whole page, a whole section (with its subsections), or a block — discreet ⋯/tree
+  controls; copies land directly below the original.
+
 ### Changed
 - Faster cold boot — restore open tabs in parallel and drop a redundant tree reload (fewer,
   concurrent API round-trips).

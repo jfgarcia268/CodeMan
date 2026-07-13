@@ -960,6 +960,22 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .section-body { padding: 8px 12px 12px; }
 .section.collapsed .section-body { display: none; }
 .section-actions { display: flex; gap: 4px; }
+/* Declutter (mirrors the block-toolbar declutter): the $ Variables + ⤴ Dissolve
+   controls fold behind the section ⋯ menu (proxied via .click()); ⛶ Merge + ✕
+   Delete stay inline. The hidden buttons stay in the DOM so the menu can proxy them. */
+.section-actions .sec-var-toggle,
+.section-actions .section-dissolve { display: none; }
+.section-actions .section-overflow { display: inline-flex; align-items: center; line-height: 1; }
+
+/* Transient reveal pulse for a freshly-duplicated block/section/tree row.
+   Animate the OUTLINE (painted on top of the element's own opaque children —
+   a background flash is occluded on a .block, whose toolbar/code layers fill it
+   edge-to-edge). Negative offset keeps the ring inside overflow:hidden clips. */
+.just-duplicated { animation: cm-dup-flash 1.2s ease-out; }
+@keyframes cm-dup-flash {
+  from { outline: 2px solid var(--accent); outline-offset: -2px; }
+  to   { outline: 2px solid transparent; outline-offset: -2px; }
+}
 /* subsection header reads as a banner matching the code block's toolbar color */
 .subsections .section { overflow: hidden; }   /* clip the header fill to rounded corners */
 .subsections .section-header { background: #2d2d2d; }
@@ -2125,22 +2141,23 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   /* lang picker: let it shrink so it doesn't hog the row */
   body.is-mobile .block-toolbar .lang-picker-btn { min-width: 0; max-width: 130px; }
 
-  /* --- section header (mobile): one compact row — [▼ title  🏷N  ⛶Merge  $ ⤴ 🗑].
+  /* --- section header (mobile): one compact row — [▼ title  🏷N  ⛶Merge  ⋯  ✕].
      Tags become a count button → picklist menu, and the per-section merge bar is
-     relocated here from the body (see renderSection). No more tag-chip row + merge
-     row eating vertical space. --- */
+     relocated here from the body (see renderSection). $ Variables + ⤴ Dissolve now
+     live behind the section ⋯ menu (see the .section-actions declutter above), so
+     the row stays short. No more tag-chip row + merge row eating vertical space. --- */
   .section-header { flex-wrap: wrap; }
   .section-header .section-title { min-width: 0; }
   .section-header .section-actions { order: 4; }
   /* even 6px spacing between ALL header buttons: the row's top-level gap, the
-     section-actions internal gap ($ ✕), and the merge bar's gap all match — so
-     🏷N · ⛶ · $ · ✕ are evenly spaced instead of the actions cluster being tighter */
+     section-actions internal gap (⋯ ✕), and the merge bar's gap all match — so
+     🏷N · ⛶ · ⋯ · ✕ are evenly spaced instead of the actions cluster being tighter */
   body.is-mobile .section-header { gap: 6px; }
   body.is-mobile .section-header .section-actions { gap: 6px; }
   body.is-mobile .section-header .tags { display: none; }   /* desktop chips never used on mobile */
   body.is-mobile .section-tags-btn { min-height: 32px; padding: 6px 9px; font-size: 13px; flex-shrink: 0; }
   body.is-mobile .section-header .merge-bar { margin: 0; gap: 6px; flex-wrap: wrap; }
-  /* the section header's icon buttons ($ var, ⛶ merge, ✕ delete) use the SAME
+  /* the section header's icon buttons (⛶ merge, ⋯ overflow, ✕ delete) use the SAME
      34×32 square footprint as the block toolbar icons — so the section/subsection
      delete ✕ is exactly the same size as a block's delete ✕ (the 🏷N tag button
      keeps its text width). */

@@ -15,7 +15,7 @@ and reports against this matrix); UI/usability passes are run by the
 
 1. **Automated suites first** (fast, deterministic):
    - **Client units** — open `codeman/tests.html` in a browser. Expect the summary
-     **"N passed, 0 failed"** (currently 120). `window.__testResult = {pass, fail}` for scripting.
+     **"N passed, 0 failed"** (currently 187). `window.__testResult = {pass, fail}` for scripting.
    - **Server API** — `bash codeman/tests-api.sh` (spins a throwaway `php -S` against a temp data
      dir; exit 0 = all green; currently 28). Override port: `bash codeman/tests-api.sh 8099`.
 2. **Then the manual/driven Core suite below**, against a running dev server
@@ -87,6 +87,8 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
 
 ### TC-editor — Editor & blocks (code / note / rich / checklist / csv)
 - TC-editor-01 (P): Edit/Save, Cancel→Revert, Copy, Duplicate, Delete per block; section collapse.
+  **Duplicate now inserts the copy DIRECTLY BELOW the source** (not appended to the section end),
+  scrolls it into view with a transient pulse, and persists on reload.
 - TC-editor-02 (E): **input round-trip** — type, save, reopen → byte-identical (trailing whitespace,
   tabs vs spaces, blank lines, emoji, large paste).
 - TC-editor-03 (A): **cancel/revert** — edit then Cancel/Revert restores original, no autosave of the
@@ -97,6 +99,39 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
   open 500-block page / 8000-line block render < ~150ms, no jank.
 - TC-editor-06 (A): paste `<script>`/HTML into **note** (markdown, `html:false`) and **rich**
   (sanitizer strips script/handlers/`javascript:`) — escaping holds (security boundary).
+
+### TC-dup — Duplicate content (block / section / page)
+- TC-dup-01 (P): **block** — for all five kinds (code/note/rich/checklist/csv/json), the block ⋯
+  overflow menu shows **❐ Duplicate block** (no longer ⧉ — that glyph is clipboard-Copy only). Click
+  it → a deep-independent copy appears **directly below** the source (editing the source afterward
+  doesn't change the copy), pulses, and survives reload.
+- TC-dup-02 (P): **section** — the section header shows a **⋯** button whose menu is
+  **❐ Duplicate section · $ Variables · ⤴ Dissolve**. `$ Variables` shows an active state when
+  section vars are on and still honors the "disable block vars first" guard/toast; `⤴ Dissolve`
+  appears for **subsections only**. `⛶ Merge` and `✕ Delete` stay inline. Duplicate → a
+  deep-independent "… copy" section lands directly below, with all blocks + subsections.
+- TC-dup-03 (A): **legacy shape** — duplicating a section whose content is stored in the legacy
+  `{tabs:[…]}` wrapper preserves that shape in the copy (raw JSON clone, no flattening).
+- TC-dup-04 (P): **page (tree ❐)** — hovering a page row (single-column **and** Miller/double
+  layouts) reveals a **❐** action; click → a **"… copy"** sibling page is created, the tree reloads,
+  and the new row is scrolled into view + pulsed. A second duplicate yields **"… copy 2"**.
+  **No tab is opened.** `get_page` round-trips the copy identical to the source (incl. live unsaved
+  edits when the source page is open).
+- TC-dup-05 (P): **page (header ⋯)** — the page header ⋯ menu's first item is **❐ Duplicate page**;
+  click → **exactly one** new tab opens with the copy (a double-invoke still yields one tab via the
+  `_openingPages` dedup).
+- TC-dup-06 (A): **name collision** — duplicating into a folder that already holds "X copy" produces
+  "X copy 2" (never a silent create-page no-op); duplicating "X copy" yields "X copy 2", "X copy 2"
+  yields "X copy".
+- TC-dup-07 (E, offline): block/section/page duplicate all succeed offline; the page path's
+  `create_page` + `save_page` writes queue and **replay FIFO** on reconnect (create before save).
+- TC-dup-09 (N, offline): tree-row duplicate of a page that is **not open and not in the offline
+  cache** (a true miss) is **refused with a toast** ("Open this page before duplicating it offline")
+  rather than silently persisting a blank copy — the offline `get_page` placeholder (`_mtime:null`)
+  is indistinguishable from a real empty page. Open/primed and header-menu (live-buffer) dups are
+  unaffected.
+- TC-dup-08 (E): the **❐** glyph (U+2750) renders as an icon (no tofu/□) on Windows AND macOS across
+  the tree row, section ⋯ menu, block ⋯ menu, and page header ⋯ menu.
 
 ### TC-hscroll — Source-editor horizontal scroll
 - TC-hscroll-01 (P): code **edit mode** — a block with a >200-char single line; the colored layer

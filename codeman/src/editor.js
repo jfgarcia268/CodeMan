@@ -73,6 +73,20 @@ function nameFromPath(path) {
   return base.replace(/\.json$/, '');
 }
 
+// Pick a non-clashing "<stem> copy" name for a duplicated page. sourceName +
+// siblingNames are display names (no ".json"). Strips a trailing " copy"/" copy N"
+// off the source so duplicating "Foo copy" yields "Foo copy 2", not "Foo copy copy".
+// Output always passes safeName (a valid stem + " copy N" stays valid). Pure.
+function uniqueCopyName(sourceName, siblingNames) {
+  const taken = siblingNames instanceof Set ? siblingNames : new Set(siblingNames);
+  const m = /^(.*?) copy(?: \d+)?$/.exec(sourceName);
+  const stem = m ? m[1] : sourceName;
+  let candidate = stem + ' copy';
+  let n = 2;
+  while (taken.has(candidate)) candidate = stem + ' copy ' + (n++);
+  return candidate;
+}
+
 // Pure. Rebuild the restored-tab list in SAVED ORDER from already-resolved
 // get_page results — independent of fetch-resolution timing — skipping tabs
 // that no longer exist, failed to load, or are duplicate paths, then pick the
@@ -98,6 +112,113 @@ function assembleRestoredTabs(saved, existing, resultOf) {
     ? (out.some(x => x.path === (saved && saved.active)) ? saved.active : out[out.length - 1].path)
     : null;
   return { tabs: out, active };
+}
+
+// After a duplicate, the new block/section object is stashed here so the next
+// renderPage() can scroll it into view + pulse it (matched by identity, cleared
+// once revealed). See revealNewEl + the reveal hooks in renderSection*/renderBlock.
+let pendingRevealObj = null;
+
+// Deep-copy a block and drop the copy DIRECTLY BELOW the source (Split's
+// insert-below pattern), then reveal it. Shared by all five block kinds.
+function duplicateBlock(parentArray, idx) {
+  const copy = JSON.parse(JSON.stringify(parentArray[idx]));
+  parentArray.splice(idx + 1, 0, copy);
+  pendingRevealObj = copy;
+  renderPage();
+  scheduleSave();
+  toast('Block duplicated');
+}
+
+// Deep-copy a section (RAW — preserves any legacy {tabs:[]} shape), retitle
+// "… copy", drop it directly below the source, then reveal it.
+function duplicateSection(section, parentArray, idx) {
+  const copy = JSON.parse(JSON.stringify(section));
+  copy.title = (section.title || 'Section') + ' copy';
+  parentArray.splice(idx + 1, 0, copy);
+  pendingRevealObj = copy;
+  renderPage();
+  scheduleSave();
+  toast('Section duplicated');
+}
+
+// Flash + scroll a freshly-duplicated element into view. Uses setTimeout(…,0)
+// (after layout) rather than rAF — see the "Scroll after re-render" gotcha.
+function revealNewEl(el, align) {
+  el.classList.add('just-duplicated');
+  setTimeout(() => {
+    // Blocks sit directly below a visible source → 'nearest' (minimal jump). A
+    // duplicated section can be taller than the viewport → 'start' so its "… copy"
+    // header (what identifies it as new) surfaces, not its bottom edge.
+    el.scrollIntoView({ block: align || 'nearest' });
+    setTimeout(() => el.classList.remove('just-duplicated'), 1200);
+  }, 0);
+}
+
+// Sibling PAGE display-names in a folder (from the loaded tree) — the set
+// uniqueCopyName dedups against. Empty parent ('') = the tree root.
+function siblingPageNames(parent) {
+  return new Set(folderChildren(parent).filter(n => n.type === 'page').map(n => n.name));
+}
+
+// Duplicate a whole page CLIENT-SIDE (no dedicated api.php action): create_page +
+// save_page {baseMtime:null}, then reveal the new row WITHOUT opening a tab. Uses
+// the open tab's live (possibly-unsaved) sections when the source page is open.
+async function duplicatePageFromTree(node) {
+  const parent = node.path.includes('/') ? node.path.slice(0, node.path.lastIndexOf('/')) : '';
+  const newName = uniqueCopyName(node.name, siblingPageNames(parent));
+  const openTab = openPages.find(t => t.path === node.path);
+  let sections;
+  if (openTab) sections = openTab.data.sections || [];
+  else {
+    const d = await api('get_page', undefined, 'path=' + encodeURIComponent(node.path));
+    // Offline + cache miss → offlineApi returns an empty placeholder ({sections:[], _mtime:null})
+    // that's indistinguishable from a real empty page. Refuse rather than silently persist a blank
+    // copy of a page whose real content we can't see — open or prime it first. (Online, _mtime is
+    // always set; the open-tab branch above uses the live buffer and is unaffected.)
+    if (offlineState && (!d || d._mtime == null)) { toast('Open this page before duplicating it offline'); return; }
+    sections = (d && d.sections) || [];
+  }
+  const create = await api('create_page', { parent, name: newName });
+  if (create && create.error) { toast(create.error); return; }
+  const newPath = (parent ? parent + '/' : '') + newName + '.json';
+  const payload = { title: newName, sections: JSON.parse(JSON.stringify(sections)) };
+  const save = await api('save_page', { path: newPath, data: payload, baseMtime: null });
+  if (save && save.error) { toast(save.error); return; }
+  if (parent) {
+    expandedFolders.add(parent); saveExpanded();
+    if (effectiveMode() === 'double') setColumnPathTo(parent);
+  }
+  await loadTree();
+  revealTreeRow(newPath);
+  toast('Page duplicated');
+}
+
+// Scroll + pulse a tree row by path after a re-render (single + Miller layouts
+// both give the row a data-path). setTimeout(…,0) so layout has settled.
+function revealTreeRow(path) {
+  setTimeout(() => {
+    const sel = '.tree-row[data-path="' + ((window.CSS && CSS.escape) ? CSS.escape(path) : path) + '"]';
+    const row = document.querySelector(sel);
+    if (row) { row.scrollIntoView({ block: 'nearest' }); row.classList.add('just-duplicated'); setTimeout(() => row.classList.remove('just-duplicated'), 1200); }
+  }, 0);
+}
+
+// Duplicate the OPEN page from its header ⋯ menu — same client-side flow, but
+// opens the copy in a tab (openPage's _openingPages dedup ⇒ one tab even if fired twice).
+async function duplicateCurrentPage() {
+  if (!currentPagePath) return;
+  const parent = currentPagePath.includes('/') ? currentPagePath.slice(0, currentPagePath.lastIndexOf('/')) : '';
+  const newName = uniqueCopyName(nameFromPath(currentPagePath), siblingPageNames(parent));
+  const create = await api('create_page', { parent, name: newName });
+  if (create && create.error) { toast(create.error); return; }
+  const newPath = (parent ? parent + '/' : '') + newName + '.json';
+  const payload = { title: newName, sections: JSON.parse(JSON.stringify(currentPageData.sections || [])) };
+  const save = await api('save_page', { path: newPath, data: payload, baseMtime: null });
+  if (save && save.error) { toast(save.error); return; }
+  await loadTree();
+  await openPage(newPath);
+  toast('Page duplicated');
 }
 
 const _openingPages = new Map(); // path → in-flight open Promise — dedups concurrent opens
@@ -487,6 +608,8 @@ function renderPageBody() {
   headerMoreBtn.addEventListener('click', () => {
     const allCollapsedNow = allSectionsCollapsed(currentPageData.sections);
     showMiniMenu(headerMoreBtn, [
+      { icon: '❐', label: 'Duplicate page', onClick: () => duplicateCurrentPage() },
+      { divider: true },
       { icon: isFavorite(currentPagePath) ? '★' : '☆', label: isFavorite(currentPagePath) ? 'Unfavorite' : 'Favorite',
         active: isFavorite(currentPagePath), onClick: () => favStar.click() },
       { icon: '≣', label: 'Outline', active: outlineOpen, onClick: () => outlineBtn.click() },
@@ -693,6 +816,7 @@ function renderSectionList(sections, isSub, parentBlocks, mergeCtx) {
     if (reorderMode) attachReorderArrows(el, sections, i);
 
     wrap.appendChild(el);
+    if (el && sec === pendingRevealObj) { pendingRevealObj = null; revealNewEl(el, 'start'); }
   });
 
   return wrap;
@@ -1116,7 +1240,7 @@ function renderSection(section, parentArray, idx, isSub, parentBlocks) {
       scheduleSave();
       toast('Subsection dissolved into parent');
     });
-    dissolveBtn.className = 'secondary';
+    dissolveBtn.className = 'secondary section-dissolve';
     dissolveBtn.title = 'Remove this subsection, moving its blocks and subsections up to the parent';
   }
 
@@ -1128,8 +1252,24 @@ function renderSection(section, parentArray, idx, isSub, parentBlocks) {
   });
   delBtn.className = 'danger';
   if (isMobile) { delBtn.textContent = '✕'; delBtn.title = 'Delete'; }
-  if (dissolveBtn) sectionActions.append(secVarToggle, dissolveBtn, delBtn);
-  else sectionActions.append(secVarToggle, delBtn);
+
+  // Declutter: Duplicate / Variables / Dissolve fold behind a ⋯ menu (the last
+  // two are CSS-hidden and proxied via .click() so their exact handlers run — incl.
+  // secVarToggle's anyBlockVars disabled-guard/toast). ⛶ Merge + ✕ Delete stay inline.
+  const secOverflow = mkBtn('⋯', () => {
+    const sectionVarsOnNow = !!section.varsOn && !anyBlockVars;
+    const items = [
+      { icon: '❐', label: 'Duplicate section', onClick: () => duplicateSection(section, parentArray, idx) },
+      { divider: true },
+      { icon: '$', label: 'Variables', active: sectionVarsOnNow, onClick: () => secVarToggle.click() },
+    ];
+    if (dissolveBtn) items.push({ icon: '⤴', label: 'Dissolve', onClick: () => dissolveBtn.click() });
+    showMiniMenu(secOverflow, items);
+  });
+  secOverflow.className = 'secondary section-overflow';
+  secOverflow.title = 'More section actions';
+  if (dissolveBtn) sectionActions.append(secVarToggle, dissolveBtn, secOverflow, delBtn);
+  else sectionActions.append(secVarToggle, secOverflow, delBtn);
 
   const panel = document.createElement('div');
   panel.className = 'tab-panel';
@@ -1276,6 +1416,7 @@ function renderSectionContent(container, blocks, subsections, sectionVarValues, 
     // Reorder mode: up/down arrows to move this block within its section.
     if (reorderMode && blocks.length >= 2) attachReorderArrows(be, blocks, bIdx);
     container.appendChild(be);
+    if (be && block === pendingRevealObj) { pendingRevealObj = null; revealNewEl(be); }
   });
 
   if (subsections.length) {
@@ -1589,12 +1730,7 @@ function renderChecklistBlock(block, parentArray, idx) {
   copyBtn.title = 'Copy to clipboard';
   if (isMobile) copyBtn.textContent = '⧉';
 
-  const dupBtn = mkBtn('Duplicate', () => {
-    parentArray.push(JSON.parse(JSON.stringify(block)));
-    renderPage();
-    scheduleSave();
-    toast('Block duplicated');
-  });
+  const dupBtn = mkBtn('Duplicate', () => duplicateBlock(parentArray, idx));
   dupBtn.className = 'secondary block-dup';
 
   const clearBtn = mkBtn('Clear done', () => {
@@ -1610,7 +1746,7 @@ function renderChecklistBlock(block, parentArray, idx) {
   // (same pattern as code blocks) so the toolbar is just [label · ⧉ · ⋯ · ✕].
   const overflowBtn = mkBtn('⋯', () => {
     showMiniMenu(overflowBtn, [
-      { icon: '⧉', label: 'Duplicate', onClick: () => dupBtn.click() },
+      { icon: '❐', label: 'Duplicate block', onClick: () => dupBtn.click() },
       { icon: '⊘', label: 'Clear done', onClick: () => clearBtn.click() },
       { divider: true },
       ...BLOCK_KINDS.map(k => ({
@@ -1849,12 +1985,7 @@ function renderRichBlock(block, parentArray, idx) {
   copyBtn.title = 'Copy to clipboard';
   if (isMobile) copyBtn.textContent = '⧉';
 
-  const dupBtn = mkBtn('Duplicate', () => {
-    parentArray.push(JSON.parse(JSON.stringify(block)));
-    renderPage();
-    scheduleSave();
-    toast('Block duplicated');
-  });
+  const dupBtn = mkBtn('Duplicate', () => duplicateBlock(parentArray, idx));
   dupBtn.className = 'secondary block-dup';
 
   // Unified "type" switch (convert to Code / Note / Checklist, keeping the text).
@@ -1867,7 +1998,7 @@ function renderRichBlock(block, parentArray, idx) {
   // block.code before converting so the new kind keeps the current text.
   const overflowBtn = mkBtn('⋯', () => {
     showMiniMenu(overflowBtn, [
-      { icon: '⧉', label: 'Duplicate', onClick: () => dupBtn.click() },
+      { icon: '❐', label: 'Duplicate block', onClick: () => dupBtn.click() },
       { divider: true },
       ...BLOCK_KINDS.map(k => ({
         icon: k.icon, label: k.label, active: blockKind(block) === k.kind,
@@ -2032,17 +2163,12 @@ function renderCsvBlock(block, parentArray, idx) {
   copyBtn.title = 'Copy raw CSV to clipboard';
   if (isMobile) copyBtn.textContent = '⧉';
 
-  const dupBtn = mkBtn('Duplicate', () => {
-    parentArray.push(JSON.parse(JSON.stringify(block)));
-    renderPage();
-    scheduleSave();
-    toast('Block duplicated');
-  });
+  const dupBtn = mkBtn('Duplicate', () => duplicateBlock(parentArray, idx));
   dupBtn.className = 'secondary block-dup';
 
   const overflowBtn = mkBtn('⋯', () => {
     showMiniMenu(overflowBtn, [
-      { icon: '⧉', label: 'Duplicate', onClick: () => dupBtn.click() },
+      { icon: '❐', label: 'Duplicate block', onClick: () => dupBtn.click() },
       { divider: true },
       ...BLOCK_KINDS.map(k => ({
         icon: k.icon, label: k.label, active: blockKind(block) === k.kind,
@@ -2289,12 +2415,7 @@ function renderJsonBlock(block, parentArray, idx) {
   copyBtn.title = 'Copy raw JSON to clipboard';
   if (isMobile) copyBtn.textContent = '⧉';
 
-  const dupBtn = mkBtn('Duplicate', () => {
-    parentArray.push(JSON.parse(JSON.stringify(block)));
-    renderPage();
-    scheduleSave();
-    toast('Block duplicated');
-  });
+  const dupBtn = mkBtn('Duplicate', () => duplicateBlock(parentArray, idx));
   dupBtn.className = 'secondary block-dup';
 
   // Pretty-print the JSON (2-space indent), into the textarea + block.code, and re-render.
@@ -2313,7 +2434,7 @@ function renderJsonBlock(block, parentArray, idx) {
 
   const overflowBtn = mkBtn('⋯', () => {
     showMiniMenu(overflowBtn, [
-      { icon: '⧉', label: 'Duplicate', onClick: () => dupBtn.click() },
+      { icon: '❐', label: 'Duplicate block', onClick: () => dupBtn.click() },
       { icon: '{ }', label: 'Format (pretty-print)', onClick: () => formatJsonBlock() },
       { divider: true },
       ...BLOCK_KINDS.map(k => ({
@@ -2541,14 +2662,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
   copyAsBtn.className = 'secondary copy-as';
   copyAsBtn.title = 'Copy as… (Markdown, escaped string, one line)';
 
-  const dupBtn = mkBtn('Duplicate', () => {
-    // deep-copy this block and add the copy at the bottom of the section
-    const copy = JSON.parse(JSON.stringify(block));
-    parentArray.push(copy);
-    renderPage();
-    scheduleSave();
-    toast('Block duplicated');
-  });
+  const dupBtn = mkBtn('Duplicate', () => duplicateBlock(parentArray, idx));
   dupBtn.className = 'secondary block-dup';
 
   // Split this block into several — inverse of Merge. Splits on blank-line gaps
@@ -2603,11 +2717,14 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
   // body.is-mobile), so its toolbar is unchanged.
   const overflowBtn = mkBtn('⋯', () => {
     const items = [];
+    // Duplicate leads every level's ⋯ (section/page/checklist/rich/csv/json all do) → keep it
+    // first + a divider here too, so it's in one predictable spot across the app.
+    items.push({ icon: '❐', label: 'Duplicate block', onClick: () => dupBtn.click() });
+    items.push({ divider: true });
     if (!block.note) items.push({ icon: '#', label: 'Line numbers',
       active: el.classList.contains('show-lines'), onClick: () => lineToggle.click() });
     if (!sectionControlled) items.push({ icon: '$', label: 'Variables',
       active: !!block.varsOn, onClick: () => varToggle.click() });
-    items.push({ icon: '⧉', label: 'Duplicate', onClick: () => dupBtn.click() });
     if (!block.note) items.push({ icon: '⎘', label: 'Split', onClick: () => splitBtn.click() });
     if (subsectionsArray) items.push({ icon: '⤵', label: 'To subsection', onClick: () => toSubBtn.click() });
     // Block-kind switch (replaces the "Code ▾" button, folded into ⋯ on mobile).

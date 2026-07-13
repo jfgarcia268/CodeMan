@@ -898,6 +898,15 @@ function renderTreeNode(node, opts) {
   const renameBtn = mkBtn('✎', () => startInlineRename(node, label, row));
   actions.append(renameBtn);
 
+  // Pages get a discreet ❐ duplicate button (mkBtn already stops propagation so the
+  // row click/drag doesn't fire). Covers both single-column + Miller (shared node).
+  if (node.type === 'page') {
+    const dupBtn = mkBtn('❐', () => duplicatePageFromTree(node));
+    dupBtn.title = 'Duplicate page';
+    dupBtn.className = 'tree-dup';
+    actions.append(dupBtn);
+  }
+
   // always-visible small delete icon
   const delIcon = document.createElement('span');
   delIcon.className = 'tree-del';

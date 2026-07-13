@@ -66,6 +66,37 @@
   t('nameFromPath strips dir + .json', nameFromPath('a/b/c.json'), 'c');
   t('nameFromPath root file', nameFromPath('x.json'), 'x');
 
+  // uniqueCopyName: pick a non-clashing "<stem> copy [N]" page name.
+  t('uniqueCopyName no siblings', uniqueCopyName('Foo', new Set()), 'Foo copy');
+  t('uniqueCopyName source exists', uniqueCopyName('Foo', new Set(['Foo'])), 'Foo copy');
+  t('uniqueCopyName copy taken → copy 2', uniqueCopyName('Foo', new Set(['Foo', 'Foo copy'])), 'Foo copy 2');
+  t('uniqueCopyName copy+2 taken → copy 3', uniqueCopyName('Foo', new Set(['Foo', 'Foo copy', 'Foo copy 2'])), 'Foo copy 3');
+  t('uniqueCopyName strips trailing " copy"', uniqueCopyName('Foo copy', new Set(['Foo copy'])), 'Foo copy 2');
+  t('uniqueCopyName strips trailing " copy N"', uniqueCopyName('Foo copy 2', new Set(['Foo copy 2'])), 'Foo copy');
+  t('uniqueCopyName inner "copy" is not stripped', uniqueCopyName('My copy shop', new Set()), 'My copy shop copy');
+  t('uniqueCopyName accepts an Array', uniqueCopyName('Foo', ['Foo']), 'Foo copy');
+
+  // Duplicate deep-copy + insert-below: the copy lands at idx+1 and is independent.
+  {
+    const arr = [{ code: 'a' }, { code: 'b' }];
+    arr.splice(0 + 1, 0, JSON.parse(JSON.stringify(arr[0])));
+    arr[0].code = 'MUTATED';
+    t('dup copy sits at idx+1', arr[1].code, 'a');
+    t('dup copy is independent of source', arr[2] === undefined ? 'b' : arr[2].code, 'b');
+    t('dup source mutate does not touch copy', arr[1].code, 'a');
+    t('dup array length grew by one', arr.length, 3);
+  }
+
+  // Section duplicate: RAW clone preserves the legacy {tabs:[]} shape + retitles.
+  {
+    const src = { title: 'S', tabs: [{ blocks: [] }] };
+    const copy = JSON.parse(JSON.stringify(src));
+    copy.title = (src.title || 'Section') + ' copy';
+    t('section dup keeps legacy .tabs', Array.isArray(copy.tabs), true);
+    t('section dup title gets " copy"', copy.title, 'S copy');
+    t('section dup does not mutate source title', src.title, 'S');
+  }
+
   // assembleRestoredTabs: pure rebuild of restored tabs in SAVED ORDER from
   // already-resolved get_page results (fetch-timing independent). Uses throwaway
   // objects per assertion since the helper mutates data.sections/_mtime.
