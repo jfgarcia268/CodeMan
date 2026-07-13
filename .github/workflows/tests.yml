@@ -34,7 +34,9 @@ jobs:
       - name: Install Playwright (CI-only, kept out of codeman/)
         working-directory: .github
         run: |
-          npm init -y >/dev/null
+          # npm init -y is unusable here: it derives the package name from the
+          # directory (".github"), which npm rejects as an invalid name.
+          test -f package.json || echo '{"name":"codeman-ci","private":true}' > package.json
           npm install playwright
           npx playwright install --with-deps chromium
       - name: Run client unit tests (tests.html headless)
