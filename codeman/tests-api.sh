@@ -7,10 +7,15 @@
 # Pairs with codeman/tests.html (the client unit tests). Covers the server-side
 # fixes that can't run in the browser: path-traversal confinement, parent-dir
 # guards, unicode content search, same-second history retention, the empty_trash
-# history-prune + its traversal guard, and the optional password gate.
+# history-prune + its traversal guard, save-conflict detection (stale baseMtime
+# → conflict; force → history snapshot), the project-nesting move guard, the
+# rename traversal guard, the restore_trash round-trip, replace_content
+# (preview dry-run / literal / regex), rename_tag (rename/merge/delete), and
+# the optional password gate.
 #
 #   Run:  bash codeman/tests-api.sh           (exit 0 = all green)
-#         bash codeman/tests-api.sh 8099       (override the port)
+#         bash codeman/tests-api.sh 8099       (override the starting port;
+#                                               a taken port is skipped automatically)
 # ---------------------------------------------------------------------------
 set -u
 
@@ -34,11 +39,27 @@ SERVER_PID=""
 cleanup() { [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null; rm -rf "$TMP"; }
 trap cleanup EXIT INT TERM
 
+# Launch (or relaunch) the throwaway server. If the requested port is already
+# taken (a parallel run, a CI neighbor), `php -S` dies instantly on bind — hunt
+# upward for a free port (bounded) instead of failing the whole suite. BASE is
+# recomputed after the port settles so every later request hits the live server.
 start_server() { # $1 = optional CODEMAN_PASSWORD (empty = gate off)
   if [ -n "$SERVER_PID" ]; then kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null; SERVER_PID=""; fi
-  CODEMAN_DATA="$DATA" CODEMAN_PASSWORD="${1:-}" php -S "127.0.0.1:$PORT" -t "$SCRIPT_DIR" >/dev/null 2>&1 &
-  SERVER_PID=$!
-  curl -s -o /dev/null --retry 40 --retry-connrefused --retry-delay 1 "http://127.0.0.1:$PORT/" || { echo "server failed to start"; exit 2; }
+  local tries=0
+  while :; do
+    CODEMAN_DATA="$DATA" CODEMAN_PASSWORD="${1:-}" php -S "127.0.0.1:$PORT" -t "$SCRIPT_DIR" >/dev/null 2>&1 &
+    SERVER_PID=$!
+    sleep 0.3                                   # a failed bind exits immediately
+    if kill -0 "$SERVER_PID" 2>/dev/null; then
+      BASE="http://127.0.0.1:$PORT/api.php"
+      curl -s -o /dev/null --retry 40 --retry-connrefused --retry-delay 1 "http://127.0.0.1:$PORT/" || { echo "server failed to start"; exit 2; }
+      return 0
+    fi
+    SERVER_PID=""
+    tries=$((tries+1))
+    if [ "$tries" -ge 20 ]; then echo "no free port found (last tried $PORT)"; exit 2; fi
+    PORT=$((PORT+1))
+  done
 }
 
 # POST helper: post <action> <json-body> [authtoken]  → echoes "<body>\n<httpcode>"
@@ -110,6 +131,91 @@ printf '{"origPath":"../../SENTINEL_KEEP","name":"evil","deletedAt":1,"isDir":tr
 post empty_trash '{}' >/dev/null
 test -f "$SENT/x" && ok "empty_trash traversal guard: sentinel OUTSIDE .history survived" || bad "empty_trash traversal guard" "SENTINEL DELETED (traversal escaped!)"
 test ! -d "$DATA/.history/Hp.json" && ok "empty_trash pruned the page's history" || bad "empty_trash pruned the page's history" "still present"
+
+# --- save-conflict detection (stale baseMtime → conflict; force → history) --
+post create_page '{"name":"Conf","parent":""}' >/dev/null
+r=$(post get_page '{"path":"Conf.json"}')
+mt=$(body "$r" | grep -o '"_mtime":[0-9]*' | grep -o '[0-9]*$')
+[ -n "$mt" ] && ok "get_page returns _mtime" || bad "get_page returns _mtime" "no _mtime in [$(body "$r")]"
+sleep 1   # mtime is second-granularity — make the concurrent save observably newer
+post save_page '{"path":"Conf.json","data":{"title":"second","sections":[]},"baseMtime":null}' >/dev/null
+r=$(post save_page "{\"path\":\"Conf.json\",\"data\":{\"title\":\"stale\",\"sections\":[]},\"baseMtime\":$mt}")
+has "stale baseMtime → conflict flagged" "$(body "$r")" '"conflict":true'
+has "conflict left the file untouched" "$(cat "$DATA/Conf.json")" '"second"'
+hasnt "conflict wrote no stale content" "$(cat "$DATA/Conf.json")" '"stale"'
+nh_before=$(ls "$DATA/.history/Conf.json" 2>/dev/null | wc -l | tr -d ' ')
+r=$(post save_page "{\"path\":\"Conf.json\",\"data\":{\"title\":\"forced\",\"sections\":[]},\"baseMtime\":$mt,\"force\":true}")
+eqs "forced save over conflict → 200" "$(code "$r")" "200"
+has "forced save → ok" "$(body "$r")" '"ok":true'
+has "forced save wrote the new content" "$(cat "$DATA/Conf.json")" '"forced"'
+nh_after=$(ls "$DATA/.history/Conf.json" 2>/dev/null | wc -l | tr -d ' ')
+[ "$nh_after" -gt "$nh_before" ] && ok "forced save snapshotted the overwritten version ($nh_before → $nh_after)" || bad "forced save snapshotted the overwritten version" "history count $nh_before → $nh_after"
+
+# --- move guard: a project can never land inside a plain folder -------------
+post create_project '{"name":"Prj","parent":""}' >/dev/null
+post create_folder '{"name":"PlainF","parent":""}' >/dev/null
+r=$(post move '{"path":"Prj","target":"PlainF"}')
+has "move project → plain folder rejected" "$(body "$r")" '"error"'
+test -d "$DATA/Prj" && ok "rejected move left the project in place" || bad "rejected move left the project in place" "Prj missing at root"
+test ! -e "$DATA/PlainF/Prj" && ok "rejected move wrote nothing into the folder" || bad "rejected move wrote nothing into the folder" "PlainF/Prj exists"
+r=$(post move '{"path":"PlainF","target":"Prj"}')
+has "move plain folder → project allowed" "$(body "$r")" '"ok":true'
+test -d "$DATA/Prj/PlainF" && ok "allowed move relocated the folder" || bad "allowed move relocated the folder" "Prj/PlainF missing"
+
+# --- rename guard: traversal newName is rejected -----------------------------
+r=$(post rename '{"path":"P1.json","newName":"../esc"}')
+has "rename traversal newName → invalid name" "$(body "$r")" '"error":"invalid name"'
+test -f "$DATA/P1.json" && ok "rejected rename left the source intact" || bad "rejected rename left the source intact" "P1.json gone"
+test ! -e "$TMP/esc.json" -a ! -e "$DATA/esc.json" && ok "rejected rename wrote nothing" || bad "rejected rename wrote nothing" "esc.json appeared"
+
+# --- restore_trash round-trip (delete → list → restore → back at origPath) ---
+post create_folder '{"name":"RtBox","parent":""}' >/dev/null
+post create_page '{"name":"Rt","parent":"RtBox"}' >/dev/null
+post delete '{"path":"RtBox/Rt.json"}' >/dev/null
+test ! -e "$DATA/RtBox/Rt.json" && ok "delete moved the page out of the tree" || bad "delete moved the page out of the tree" "still present"
+lt=$(post list_trash '{}')
+tid=$(body "$lt" | grep -o '"id":"[^"]*Rt\.json"' | head -1 | sed 's/^"id":"//; s/"$//')
+[ -n "$tid" ] && ok "list_trash shows the deleted page" || bad "list_trash shows the deleted page" "no Rt.json id in [$(body "$lt")]"
+has "list_trash keeps origPath" "$(body "$lt")" '"origPath":"RtBox\/Rt.json"'
+r=$(post restore_trash "{\"id\":\"$tid\"}")
+has "restore_trash → ok" "$(body "$r")" '"ok":true'
+test -f "$DATA/RtBox/Rt.json" && ok "restore put the page back at origPath" || bad "restore put the page back at origPath" "RtBox/Rt.json missing"
+test ! -e "$DATA/.trash/$tid" -a ! -e "$DATA/.trash/$tid.meta" && ok "restore cleared the trash entry + .meta" || bad "restore cleared the trash entry + .meta" "leftovers in .trash"
+
+# --- replace_content: preview is a dry run; literal + regex writes ----------
+post create_page '{"name":"Rc","parent":""}' >/dev/null
+post save_page '{"path":"Rc.json","data":{"title":"Rc","sections":[{"title":"S","collapsed":false,"tags":[],"blocks":[{"type":"bash","label":"","code":"foo bar foo baz"}],"subsections":[]}]}}' >/dev/null
+nh_rc=$(ls "$DATA/.history/Rc.json" 2>/dev/null | wc -l | tr -d ' ')
+r=$(post replace_content '{"find":"foo","replace":"XX","preview":true}')
+has "replace preview counts matches" "$(body "$r")" '"totalMatches":2'
+has "replace preview flags itself" "$(body "$r")" '"preview":true'
+has "replace preview did not write" "$(cat "$DATA/Rc.json")" 'foo bar foo baz'
+eqs "replace preview did not snapshot history" "$(ls "$DATA/.history/Rc.json" 2>/dev/null | wc -l | tr -d ' ')" "$nh_rc"
+r=$(post replace_content '{"find":"foo","replace":"XX"}')
+has "literal replace reports the changed page" "$(body "$r")" '"changedPages":1'
+has "literal replace rewrote the block" "$(cat "$DATA/Rc.json")" 'XX bar XX baz'
+hasnt "literal replace left no match behind" "$(cat "$DATA/Rc.json")" 'foo'
+nh_rc2=$(ls "$DATA/.history/Rc.json" 2>/dev/null | wc -l | tr -d ' ')
+[ "$nh_rc2" -gt "$nh_rc" ] && ok "replace-all snapshotted history first ($nh_rc → $nh_rc2)" || bad "replace-all snapshotted history first" "history count $nh_rc → $nh_rc2"
+r=$(post replace_content '{"find":"b(a)r","replace":"B$1R","regex":true}')
+has "regex replace applies the capture group" "$(cat "$DATA/Rc.json")" 'XX BaR XX baz'
+r=$(post replace_content '{"find":"(","regex":true}')
+has "invalid regex → clean error" "$(body "$r")" '"error":"invalid regular expression"'
+
+# --- rename_tag: rename / merge / delete, history-snapshotted ----------------
+post create_page '{"name":"Tg","parent":""}' >/dev/null
+post save_page '{"path":"Tg.json","data":{"title":"Tg","sections":[{"title":"S","collapsed":false,"tags":["oldtag","keeptag"],"blocks":[],"subsections":[]}]}}' >/dev/null
+nh_tg=$(ls "$DATA/.history/Tg.json" 2>/dev/null | wc -l | tr -d ' ')
+r=$(post rename_tag '{"from":"oldtag","to":"newtag"}')
+has "rename_tag reports 1 changed page" "$(body "$r")" '"pages":1'
+has "rename_tag wrote the new tag" "$(cat "$DATA/Tg.json")" '"newtag"'
+hasnt "rename_tag removed the old tag" "$(cat "$DATA/Tg.json")" '"oldtag"'
+nh_tg2=$(ls "$DATA/.history/Tg.json" 2>/dev/null | wc -l | tr -d ' ')
+[ "$nh_tg2" -gt "$nh_tg" ] && ok "rename_tag snapshotted history first ($nh_tg → $nh_tg2)" || bad "rename_tag snapshotted history first" "history count $nh_tg → $nh_tg2"
+post rename_tag '{"from":"newtag","to":"keeptag"}' >/dev/null   # merge into an existing tag
+eqs "rename_tag merge dedups into one tag" "$(grep -o '"keeptag"' "$DATA/Tg.json" | wc -l | tr -d ' ')" "1"
+post rename_tag '{"from":"keeptag","to":""}' >/dev/null         # empty `to` = delete
+hasnt "rename_tag empty to → tag deleted" "$(cat "$DATA/Tg.json")" 'keeptag'
 
 # --- password gate ----------------------------------------------------------
 start_server "testsecret"

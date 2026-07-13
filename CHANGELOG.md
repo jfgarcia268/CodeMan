@@ -17,6 +17,10 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
 - Command palette and Find & replace are now reachable from the sidebar ⋯ menu — a
   touch-friendly path for phones/tablets, where the ⌘K shortcut (previously the only way
   to reach them) isn't available.
+- Both automated test suites now run in CI on every push and pull request (GitHub Actions),
+  with new regression coverage for save-conflict detection, trash restore, find & replace,
+  tag rename/merge/delete, the offline write-queue replay, rich-text paste sanitizing, and
+  import error handling.
 
 ## [1.10.0] — 2026-07-13
 

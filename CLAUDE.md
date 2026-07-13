@@ -14,6 +14,8 @@ optionally as a native desktop app.
 codeman/          the web app + PHP API (this is what you host)
 codeman-desktop/  optional desktop wrapper (Electron, macOS + Windows)
 .github/workflows/codeman-desktop.yml   tag-triggered macOS + Windows build → Release
+.github/workflows/tests.yml             both test suites + invariant greps on every push/PR
+.github/scripts/run-client-tests.mjs    CI runner for tests.html (Playwright, CI-only dep — never in codeman/)
 docs/images/      README screenshots (generated — see Local dev)
 ```
 
@@ -79,8 +81,8 @@ story is squarely "non-trivial."
 | `api.php` | Filesystem API: tree, page CRUD, move, reorder, content/block search, metadata index, projects, trash, history, save-conflict detection, find & replace, tag rename, optional password gate. |
 | `vendor/prism/` | Vendored Prism (core + autoloader + grammars + theme) — **no CDN**, works offline. Grammars autoload on demand; an unviewed language won't highlight offline until first rendered. |
 | `vendor/markdown-it/` | Vendored **markdown-it** (v14, single UMD file) — **no CDN**, offline. Backs `renderMarkdown` for **note blocks** (full CommonMark + GFM). Loaded as a static `<script>` before the `src/*.js` modules so `window.markdownit` exists when `editor.js` builds its instance. See the markdown-it gotcha. |
-| `tests.html` | Standalone **client** browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + `richToPlainText`/`convertBlock`/`parseCsv`/`parseJsonSafe`/`jsonPath`/`assembleRestoredTabs`/`uniqueCopyName` + deep-search cap + offline trash/history reducers (snapshots/restores the real IndexedDB cache, safe to run). Open it in a browser; ~187 assertions, expect `0 failed`. |
-| `tests-api.sh` | Standalone **server** API tests (bash + curl, no deps). Spins a throwaway `php -S` against a temp `CODEMAN_DATA` dir and asserts api.php behavior the browser can't reach: path-traversal confinement, parent-dir guards, unicode `search_content`, same-second history retention, `empty_trash` history-prune + its traversal guard, and the password gate. `bash codeman/tests-api.sh` (exit 0 = green). |
+| `tests.html` | Standalone **client** browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + `richToPlainText`/`convertBlock`/`parseCsv`/`parseJsonSafe`/`jsonPath`/`assembleRestoredTabs`/`uniqueCopyName` + deep-search cap + offline trash/history reducers (snapshots/restores the real IndexedDB cache, safe to run) + `sanitizeRichHtml` + `flushQueue` replay (FIFO/conflict-force/failure-retains, against stubbed `apiFetch`) + `importPages` negatives. Open it in a browser; ~204 assertions, expect `0 failed`. `window.__testResult = {pass, fail, done}` — CI runs it headless via `.github/scripts/run-client-tests.mjs` and enforces a pass-count FLOOR (bump it there when adding assertions). |
+| `tests-api.sh` | Standalone **server** API tests (bash + curl, no deps). Spins a throwaway `php -S` against a temp `CODEMAN_DATA` dir and asserts api.php behavior the browser can't reach: path-traversal confinement, parent-dir guards, unicode `search_content`, same-second history retention, `empty_trash` history-prune + its traversal guard, save-conflict detection (stale `baseMtime` → conflict + untouched file; `force` → history snapshot), the project-nesting `move` guard, the `rename` traversal guard, the `restore_trash` round-trip, `replace_content` (preview dry-run / literal / regex), `rename_tag` (rename/merge/delete), and the password gate. `bash codeman/tests-api.sh` (exit 0 = green; hunts upward from its port if taken, so parallel/CI runs don't collide). |
 
 **No build step.** The `src/*.js` files are plain classic scripts sharing one global scope;
 the load order in `index.html` *is* the dependency order. Edit a file, reload the browser.
@@ -303,7 +305,10 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
 - Serve `codeman/` with any PHP host. Simplest: `cd codeman && php -S localhost:8090` (data falls
   back to `codeman/structures/`, which is gitignored).
 - **Testing.** Two automated suites: open `codeman/tests.html` in a browser (client units, expect
-  `0 failed`) and run `bash codeman/tests-api.sh` (server API, exit 0). The **full set of regression
+  `0 failed`) and run `bash codeman/tests-api.sh` (server API, exit 0). **Both run in CI on every
+  push/PR** (`.github/workflows/tests.yml` — the client suite headless via
+  `.github/scripts/run-client-tests.mjs`, which also enforces a pass-count FLOOR, plus a grep
+  `invariants` job). The **full set of regression
   test cases lives in [docs/TEST_CASES.md](docs/TEST_CASES.md)**, split into a **Core** tier (run every
   regression) and an **Extended/release-gate** tier (cross-browser, packaged/Windows builds, CI,
   real-device, perf-at-scale, desktop native dialogs — run on demand). **Full regression is run by the

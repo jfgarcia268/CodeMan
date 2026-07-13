@@ -1,0 +1,6 @@
+# CI-only Playwright install (workflows/tests.yml runs `npm install playwright`
+# here so the app tree — codeman/, which has no build step and no npm deps —
+# stays clean). Ignore the artifacts in case someone runs it locally too.
+node_modules/
+package.json
+package-lock.json
