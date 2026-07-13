@@ -13,6 +13,11 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
 
 ## [Unreleased]
 
+### Added
+- Command palette and Find & replace are now reachable from the sidebar ⋯ menu — a
+  touch-friendly path for phones/tablets, where the ⌘K shortcut (previously the only way
+  to reach them) isn't available.
+
 ## [1.10.0] — 2026-07-13
 
 ### Added

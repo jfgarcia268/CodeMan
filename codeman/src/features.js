@@ -765,6 +765,8 @@ function openMoreMenu(anchor) {
     opt('★', 'Favorites & recently copied', () => openFavorites()),
     opt('🏷', 'Manage tags', () => openTagManager()),
     opt('⧉', 'Quick-paste block', () => openBlockPalette()),
+    opt('⌘', 'Command palette…', () => openCommandPalette()),
+    opt('⇄', 'Find & replace…', () => openReplace()),
     opt('🗑', 'Trash', () => openTrash()),
     sep(),
     // maintenance

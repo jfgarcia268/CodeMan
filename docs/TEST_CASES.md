@@ -234,10 +234,12 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
 
 ### TC-prod — Productivity
 - TC-prod-01 (P): Command palette ⌘K — jump to page (substring match), path-subtitle disambiguation;
-  `>` command mode executes commands; Esc closes; empty/no-match handled.
+  `>` command mode executes commands; Esc closes; empty/no-match handled. Also reachable without a
+  keyboard: sidebar `⋯` menu → **⌘ Command palette…** opens the same palette.
 - TC-prod-02 (P): Quick-paste block palette ⌘⇧K; Favorites + recently-copied.
 - TC-prod-03 (P): Find & Replace across pages (literal/regex, preview dry-run, history-safe write,
-  invalid regex → error); open tabs reconcile after write.
+  invalid regex → error); open tabs reconcile after write. Also reachable without a keyboard:
+  sidebar `⋯` menu → **⇄ Find & replace…** opens the same panel.
 - TC-prod-04 (P): Tag manager rename/merge/delete; open tabs re-fetch after the write; mobile rows
   wrap so the usage count isn't clipped.
 
@@ -275,6 +277,8 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
 ### TC-mobile — Responsive (≤768px)
 - TC-mobile-01 (P): drawer sidebar + backdrop; icon-only block toolbars + `⋯` overflow; compact page
   header + `⋯`; 40px top band; section header single row; uniform 34×32 / 30px icon footprints.
+  The sidebar `⋯` menu offers **⌘ Command palette…** and **⇄ Find & replace…** (the only touch
+  path to them — no keyboard shortcuts on mobile) and both open correctly at ≤768px.
 - TC-mobile-02 (E): 16px editor inputs + viewport zoom-lock; safe-area insets; no horizontal overflow
   to 360px; section title ellipsizes (no mid-word clip); tree delete is a ≥32px tap target.
 - TC-mobile-03 (P): the 768px flip re-renders the open page without reload.
