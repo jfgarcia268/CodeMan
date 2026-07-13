@@ -40,10 +40,16 @@ the receiving role gets a complete, self-contained brief and never has to re-der
 | **Development** — code, tests, docs | [senior-developer](.claude/agents/senior-developer.md) | a verified **Completion Report**: changes, tests/docs, suite + live-preview evidence |
 | **QA** — full regression | [senior-qa-engineer](.claude/agents/senior-qa-engineer.md) | a pass/fail report with repro + suspected `file:line` |
 | **Usability / visual** — UX review | [ui-ux-reviewer](.claude/agents/ui-ux-reviewer.md) | prioritized usability/UI findings with evidence |
+| **Performance** — measure & diagnose | [senior-performance-engineer](.claude/agents/senior-performance-engineer.md) | a **Performance Report**: measured findings (before/after), root cause vs symptom, recommended fix + risk, owning role |
 
 **The chain:** Solution Brief → Technical Design → Completion Report → QA + UX review. Each
 agent's output is the *only* context the next one receives, so it must be complete and
 self-contained (that's the point of the handoff contracts — a role is never half-defined).
+The **[senior-performance-engineer](.claude/agents/senior-performance-engineer.md)** is a
+specialist reviewer alongside QA/UX: pull it in whenever a change is performance-sensitive (boot,
+render, search, at-scale behavior) or a slowness needs measuring. It *measures and recommends
+with hard numbers* (separating code cost from environment) and hands its findings back into the
+chain — it does not implement the fix.
 
 **Right-sizing:** this is a quality bar, not mandatory ceremony for every keystroke. Trivial
 changes (a typo, a one-line fix, a rename) don't need the full chain. But for any **new
