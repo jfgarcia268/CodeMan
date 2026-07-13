@@ -13,6 +13,8 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
 
 ## [Unreleased]
 
+## [1.10.0] — 2026-07-13
+
 ### Added
 - Duplicate a whole page, a whole section (with its subsections), or a block — discreet ⋯/tree
   controls; copies land directly below the original.
