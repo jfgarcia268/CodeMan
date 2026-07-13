@@ -15,7 +15,7 @@ and reports against this matrix); UI/usability passes are run by the
 
 1. **Automated suites first** (fast, deterministic):
    - **Client units** — open `codeman/tests.html` in a browser. Expect the summary
-     **"N passed, 0 failed"** (currently 120). `window.__testResult = {pass, fail}` for scripting.
+     **"N passed, 0 failed"** (currently 187). `window.__testResult = {pass, fail}` for scripting.
    - **Server API** — `bash codeman/tests-api.sh` (spins a throwaway `php -S` against a temp data
      dir; exit 0 = all green; currently 28). Override port: `bash codeman/tests-api.sh 8099`.
 2. **Then the manual/driven Core suite below**, against a running dev server
@@ -77,9 +77,18 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
 - TC-tabs-02 (E): mobile tab strip scrolls horizontally; "Close all" stays pinned.
 - TC-tabs-03 (A): rapid double-click / concurrent open of the **same** page opens **one** tab
   (in-flight opens are deduped — regression: `openPage` TOCTOU race made duplicate tabs).
+- TC-tabs-04 (A): restore ≥3 saved tabs **concurrently** — order preserved (incl. one artificially
+  slow / out-of-order fetch), previously-active tab focused, a since-deleted tab skipped without
+  shifting survivors, a duplicate path opens once; boot issues **2 fewer** api.php requests (no
+  redundant second `loadTree`). **[auto: tests.html assembleRestoredTabs]**
+- TC-tabs-05 (N): a saved tab whose `get_page` returns `{error}` (malformed server body, not a
+  deleted page) is **not** opened as an empty tab **and is not forgotten** — the surviving-candidate
+  set (loaded + transiently-errored, saved order) is re-persisted so it retries on the next boot.
 
 ### TC-editor — Editor & blocks (code / note / rich / checklist / csv)
 - TC-editor-01 (P): Edit/Save, Cancel→Revert, Copy, Duplicate, Delete per block; section collapse.
+  **Duplicate now inserts the copy DIRECTLY BELOW the source** (not appended to the section end),
+  scrolls it into view with a transient pulse, and persists on reload.
 - TC-editor-02 (E): **input round-trip** — type, save, reopen → byte-identical (trailing whitespace,
   tabs vs spaces, blank lines, emoji, large paste).
 - TC-editor-03 (A): **cancel/revert** — edit then Cancel/Revert restores original, no autosave of the
@@ -90,6 +99,39 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
   open 500-block page / 8000-line block render < ~150ms, no jank.
 - TC-editor-06 (A): paste `<script>`/HTML into **note** (markdown, `html:false`) and **rich**
   (sanitizer strips script/handlers/`javascript:`) — escaping holds (security boundary).
+
+### TC-dup — Duplicate content (block / section / page)
+- TC-dup-01 (P): **block** — for all five kinds (code/note/rich/checklist/csv/json), the block ⋯
+  overflow menu shows **❐ Duplicate block** (no longer ⧉ — that glyph is clipboard-Copy only). Click
+  it → a deep-independent copy appears **directly below** the source (editing the source afterward
+  doesn't change the copy), pulses, and survives reload.
+- TC-dup-02 (P): **section** — the section header shows a **⋯** button whose menu is
+  **❐ Duplicate section · $ Variables · ⤴ Dissolve**. `$ Variables` shows an active state when
+  section vars are on and still honors the "disable block vars first" guard/toast; `⤴ Dissolve`
+  appears for **subsections only**. `⛶ Merge` and `✕ Delete` stay inline. Duplicate → a
+  deep-independent "… copy" section lands directly below, with all blocks + subsections.
+- TC-dup-03 (A): **legacy shape** — duplicating a section whose content is stored in the legacy
+  `{tabs:[…]}` wrapper preserves that shape in the copy (raw JSON clone, no flattening).
+- TC-dup-04 (P): **page (tree ❐)** — hovering a page row (single-column **and** Miller/double
+  layouts) reveals a **❐** action; click → a **"… copy"** sibling page is created, the tree reloads,
+  and the new row is scrolled into view + pulsed. A second duplicate yields **"… copy 2"**.
+  **No tab is opened.** `get_page` round-trips the copy identical to the source (incl. live unsaved
+  edits when the source page is open).
+- TC-dup-05 (P): **page (header ⋯)** — the page header ⋯ menu's first item is **❐ Duplicate page**;
+  click → **exactly one** new tab opens with the copy (a double-invoke still yields one tab via the
+  `_openingPages` dedup).
+- TC-dup-06 (A): **name collision** — duplicating into a folder that already holds "X copy" produces
+  "X copy 2" (never a silent create-page no-op); duplicating "X copy" yields "X copy 2", "X copy 2"
+  yields "X copy".
+- TC-dup-07 (E, offline): block/section/page duplicate all succeed offline; the page path's
+  `create_page` + `save_page` writes queue and **replay FIFO** on reconnect (create before save).
+- TC-dup-09 (N, offline): tree-row duplicate of a page that is **not open and not in the offline
+  cache** (a true miss) is **refused with a toast** ("Open this page before duplicating it offline")
+  rather than silently persisting a blank copy — the offline `get_page` placeholder (`_mtime:null`)
+  is indistinguishable from a real empty page. Open/primed and header-menu (live-buffer) dups are
+  unaffected.
+- TC-dup-08 (E): the **❐** glyph (U+2750) renders as an icon (no tofu/□) on Windows AND macOS across
+  the tree row, section ⋯ menu, block ⋯ menu, and page header ⋯ menu.
 
 ### TC-hscroll — Source-editor horizontal scroll
 - TC-hscroll-01 (P): code **edit mode** — a block with a >200-char single line; the colored layer
@@ -107,6 +149,23 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
   (macOS overlay bars unaffected).
 - TC-hscroll-07 (E): **Windows / Firefox** scrollbar theming (`scrollbar-width`/`scrollbar-color`
   vs `::-webkit-scrollbar`) and **mobile touch** horizontal scroll.
+- TC-hscroll-08 (E, macOS-gated): **view mode on macOS** (browser + Electron) — a wide block of each
+  kind (code, CSV table, note fenced `<pre>`, note table, rich `<pre>`, rich table, JSON tree) shows a
+  **persistent themed thin horizontal scrollbar WITHOUT dragging** (the hardened `-webkit-appearance:none`
+  view-scroller recipe defeats the macOS overlay auto-hide). Windows/Linux show the same themed bar with
+  **no double bar**.
+- TC-hscroll-09 (P): **JSON view mode** — a wide value + deep tree → `.json-tree` `scrollWidth > clientWidth`
+  and scrolls horizontally like code (was equal/no-scroll before, when rows wrapped); long string values no
+  longer wrap (`.json-row` `flex-wrap:nowrap`, `.json-val` `white-space:pre`); copy-path key click +
+  collapse/expand toggle still work.
+- TC-hscroll-10 (A): **note PROSE still wraps** (only fenced `<pre>`/tables scroll — the recipe styles
+  pre/table only, not prose); code **edit-mode** overlay alignment, caret tracking, last line (line-numbers
+  ON and OFF), and resize handle unchanged; **no** `-webkit-appearance:none` on edit surfaces; **no**
+  `width:max-content` rule on `.code-view pre`.
+- TC-hscroll-11 (E): a **note-prose** paragraph containing a very long **unbroken** string (URL / token /
+  no-space run) **wraps** and stays inside the block (`overflow-wrap:anywhere` on `.block.note .code-view`)
+  — it does not overflow/clip or grow a horizontal scrollbar. Fenced code + tables in the same note still
+  scroll. (Prose wraps; only code/tables scroll.)
 
 ### TC-csv — CSV / table block
 - TC-csv-01 (P): add a CSV block; enter `name,age\nAda,36` → view mode renders a table with the
@@ -192,7 +251,9 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
 - TC-offline-02 (A): backend down → `offlineState` flips, badge shows queued count, reads served
   from IndexedDB; writes queue. **[auto-ish: tests.html offline reducers]**
 - TC-offline-03 (P): reconnect (online event / probe / focus) → queue flushes, writes land on the
-  server, badge clears; a pre-existing queue flushes on cold **online** boot.
+  server, badge clears; a pre-existing queue flushes on cold **online** boot. Offline **cold** boot
+  with saved tabs restores them from the IndexedDB mirror **concurrently**, no errors, no spurious
+  online flip; on reconnect the queued write still flushes exactly once.
 - TC-offline-04 (N): a 401 (auth) or a malformed-but-200 body is treated as a **server response, not
   offline** — no false offline; a poisoned queued op drains rather than latching offline.
 

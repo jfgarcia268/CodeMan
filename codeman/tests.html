@@ -66,6 +66,82 @@
   t('nameFromPath strips dir + .json', nameFromPath('a/b/c.json'), 'c');
   t('nameFromPath root file', nameFromPath('x.json'), 'x');
 
+  // uniqueCopyName: pick a non-clashing "<stem> copy [N]" page name.
+  t('uniqueCopyName no siblings', uniqueCopyName('Foo', new Set()), 'Foo copy');
+  t('uniqueCopyName source exists', uniqueCopyName('Foo', new Set(['Foo'])), 'Foo copy');
+  t('uniqueCopyName copy taken → copy 2', uniqueCopyName('Foo', new Set(['Foo', 'Foo copy'])), 'Foo copy 2');
+  t('uniqueCopyName copy+2 taken → copy 3', uniqueCopyName('Foo', new Set(['Foo', 'Foo copy', 'Foo copy 2'])), 'Foo copy 3');
+  t('uniqueCopyName strips trailing " copy"', uniqueCopyName('Foo copy', new Set(['Foo copy'])), 'Foo copy 2');
+  t('uniqueCopyName strips trailing " copy N"', uniqueCopyName('Foo copy 2', new Set(['Foo copy 2'])), 'Foo copy');
+  t('uniqueCopyName inner "copy" is not stripped', uniqueCopyName('My copy shop', new Set()), 'My copy shop copy');
+  t('uniqueCopyName accepts an Array', uniqueCopyName('Foo', ['Foo']), 'Foo copy');
+
+  // Duplicate deep-copy + insert-below: the copy lands at idx+1 and is independent.
+  {
+    const arr = [{ code: 'a' }, { code: 'b' }];
+    arr.splice(0 + 1, 0, JSON.parse(JSON.stringify(arr[0])));
+    arr[0].code = 'MUTATED';
+    t('dup copy sits at idx+1', arr[1].code, 'a');
+    t('dup copy is independent of source', arr[2] === undefined ? 'b' : arr[2].code, 'b');
+    t('dup source mutate does not touch copy', arr[1].code, 'a');
+    t('dup array length grew by one', arr.length, 3);
+  }
+
+  // Section duplicate: RAW clone preserves the legacy {tabs:[]} shape + retitles.
+  {
+    const src = { title: 'S', tabs: [{ blocks: [] }] };
+    const copy = JSON.parse(JSON.stringify(src));
+    copy.title = (src.title || 'Section') + ' copy';
+    t('section dup keeps legacy .tabs', Array.isArray(copy.tabs), true);
+    t('section dup title gets " copy"', copy.title, 'S copy');
+    t('section dup does not mutate source title', src.title, 'S');
+  }
+
+  // assembleRestoredTabs: pure rebuild of restored tabs in SAVED ORDER from
+  // already-resolved get_page results (fetch-timing independent). Uses throwaway
+  // objects per assertion since the helper mutates data.sections/_mtime.
+  {
+    // 1. Order preserved regardless of result availability (map populated in reverse).
+    const savedOrd = { tabs: [{ path: 'A.json' }, { path: 'B.json' }, { path: 'C.json' }], active: 'A.json' };
+    const existOrd = new Set(['A.json', 'B.json', 'C.json']);
+    const mapOrd = new Map();
+    mapOrd.set('C.json', { sections: [] }); mapOrd.set('B.json', { sections: [] }); mapOrd.set('A.json', { sections: [] });
+    t('assembleRestoredTabs keeps saved order regardless of result timing',
+      assembleRestoredTabs(savedOrd, existOrd, p => mapOrd.get(p)).tabs.map(x => x.path), ['A.json', 'B.json', 'C.json']);
+    // 2. Skip non-existent — B missing from tree.
+    const savedNE = { tabs: [{ path: 'A.json' }, { path: 'B.json' }, { path: 'C.json' }], active: 'A.json' };
+    t('assembleRestoredTabs skips non-existent, order intact',
+      assembleRestoredTabs(savedNE, new Set(['A.json', 'C.json']), () => ({ sections: [] })).tabs.map(x => x.path), ['A.json', 'C.json']);
+    // 3. Skip {error} — B failed to load.
+    const savedErr = { tabs: [{ path: 'A.json' }, { path: 'B.json' }, { path: 'C.json' }], active: 'A.json' };
+    t('assembleRestoredTabs skips {error} result',
+      assembleRestoredTabs(savedErr, new Set(['A.json', 'B.json', 'C.json']), p => p === 'B.json' ? { error: 'x' } : { sections: [] }).tabs.map(x => x.path), ['A.json', 'C.json']);
+    // 4. Dedup duplicate paths.
+    const savedDup = { tabs: [{ path: 'A.json' }, { path: 'A.json' }, { path: 'B.json' }], active: 'A.json' };
+    t('assembleRestoredTabs dedups repeated paths',
+      assembleRestoredTabs(savedDup, new Set(['A.json', 'B.json']), () => ({ sections: [] })).tabs.map(x => x.path), ['A.json', 'B.json']);
+    // 5. Active = saved.active when it survives.
+    const savedActive = { tabs: [{ path: 'A.json' }, { path: 'B.json' }, { path: 'C.json' }], active: 'B.json' };
+    t('assembleRestoredTabs keeps saved.active when present',
+      assembleRestoredTabs(savedActive, new Set(['A.json', 'B.json', 'C.json']), () => ({ sections: [] })).active, 'B.json');
+    // 6. Active falls back to last survivor when saved.active was deleted.
+    const savedActGone = { tabs: [{ path: 'A.json' }, { path: 'B.json' }, { path: 'C.json' }], active: 'B.json' };
+    t('assembleRestoredTabs active falls back to last survivor',
+      assembleRestoredTabs(savedActGone, new Set(['A.json', 'C.json']), () => ({ sections: [] })).active, 'C.json');
+    // 7. No survivors → { tabs:[], active:null }.
+    t('assembleRestoredTabs empty → tabs [] active null',
+      assembleRestoredTabs({ tabs: [{ path: 'A.json' }], active: 'A.json' }, new Set(), () => ({ sections: [] })), { tabs: [], active: null });
+    // 8. baseMtime lift + _mtime strip + title fallback.
+    const savedMt = { tabs: [{ path: 'A.json' }, { path: 'dir/B.json' }], active: 'A.json' };
+    const dataA = { title: 'Alpha', sections: [], _mtime: 123 };
+    const dataB = { sections: [] }; // no title, no _mtime
+    const asm = assembleRestoredTabs(savedMt, new Set(['A.json', 'dir/B.json']), p => p === 'A.json' ? dataA : dataB);
+    t('assembleRestoredTabs lifts _mtime → baseMtime', asm.tabs[0].baseMtime, 123);
+    t('assembleRestoredTabs strips _mtime from data', dataA._mtime, undefined);
+    t('assembleRestoredTabs baseMtime null when _mtime absent', asm.tabs[1].baseMtime, null);
+    t('assembleRestoredTabs title falls back to nameFromPath', asm.tabs[1].title, 'B');
+  }
+
   // qparam
   t('qparam reads key', qparam('a=1&b=two', 'b'), 'two');
   t('qparam decodes', qparam('path=a%2Fb.json', 'path'), 'a/b.json');

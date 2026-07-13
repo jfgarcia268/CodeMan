@@ -97,7 +97,9 @@ Each section holds a mix of block types:
   copy-path-on-click and a fold-all / unfold-all toggle.
 
 Blocks also support **variables** (`_V_NAME_V_` fill-ins), **Copy as…** (raw / fenced /
-escaped / one-line / vars-filled), and merge / split / reorder.
+escaped / one-line / vars-filled), and merge / split / reorder. Anything can be
+**duplicated** — a block, a whole section, or a whole page — with the copy landing right
+below the original.
 
 ![Rich text, Markdown note, checklist, and code blocks on one page](docs/images/note-checklist-blocks.png)
 

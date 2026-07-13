@@ -13,6 +13,22 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
 
 ## [Unreleased]
 
+## [1.10.0] — 2026-07-13
+
+### Added
+- Duplicate a whole page, a whole section (with its subsections), or a block — discreet ⋯/tree
+  controls; copies land directly below the original.
+
+### Changed
+- Faster cold boot — restore open tabs in parallel and drop a redundant tree reload (fewer,
+  concurrent API round-trips).
+
+### Fixed
+- Horizontal scrollbars now appear consistently for wide block content in view mode across all
+  kinds (code, CSV, note code/tables, rich, JSON); JSON tree scrolls horizontally instead of
+  wrapping. Long unbroken strings in note prose now wrap inside the block instead of
+  overflowing/clipping.
+
 ## [1.9.0] — 2026-06-23
 
 ### Added

@@ -960,6 +960,22 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .section-body { padding: 8px 12px 12px; }
 .section.collapsed .section-body { display: none; }
 .section-actions { display: flex; gap: 4px; }
+/* Declutter (mirrors the block-toolbar declutter): the $ Variables + ⤴ Dissolve
+   controls fold behind the section ⋯ menu (proxied via .click()); ⛶ Merge + ✕
+   Delete stay inline. The hidden buttons stay in the DOM so the menu can proxy them. */
+.section-actions .sec-var-toggle,
+.section-actions .section-dissolve { display: none; }
+.section-actions .section-overflow { display: inline-flex; align-items: center; line-height: 1; }
+
+/* Transient reveal pulse for a freshly-duplicated block/section/tree row.
+   Animate the OUTLINE (painted on top of the element's own opaque children —
+   a background flash is occluded on a .block, whose toolbar/code layers fill it
+   edge-to-edge). Negative offset keeps the ring inside overflow:hidden clips. */
+.just-duplicated { animation: cm-dup-flash 1.2s ease-out; }
+@keyframes cm-dup-flash {
+  from { outline: 2px solid var(--accent); outline-offset: -2px; }
+  to   { outline: 2px solid transparent; outline-offset: -2px; }
+}
 /* subsection header reads as a banner matching the code block's toolbar color */
 .subsections .section { overflow: hidden; }   /* clip the header fill to rounded corners */
 .subsections .section-header { background: #2d2d2d; }
@@ -1335,33 +1351,61 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .note-toggle.on { background: #7a5cc0; color: #fff; }
 .copy-as { padding-left: 7px; padding-right: 7px; }
 
-/* ---------- Thin dark scrollbar for source editors (Win/Linux/desktop-app) ---------- */
+/* ---------- Thin dark scrollbar for source editors + block views ---------- */
+/* Firefox (no overlay problem): thin themed bars everywhere. */
 .code-edit, .code-view,
 .csv-edit, .json-edit, .csv-table-wrap, .json-tree, .json-raw,
-.block.note .code-edit {
+.block.note .code-edit, .block.note .code-view pre, .block.note .code-view table,
+.block.rich .rich-surface pre, .block.rich .rich-surface table {
   scrollbar-width: thin;
   scrollbar-color: var(--scrollbar-thumb) transparent;
 }
-.code-edit::-webkit-scrollbar, .code-view::-webkit-scrollbar,
+/* WebKit/Blink EDIT surfaces — UN-hardened (no appearance:none) so the code
+   textarea overlay/gutter geometry is untouched; macOS keeps overlay bars here. */
+.code-edit::-webkit-scrollbar,
 .csv-edit::-webkit-scrollbar, .json-edit::-webkit-scrollbar,
-.csv-table-wrap::-webkit-scrollbar, .json-tree::-webkit-scrollbar, .json-raw::-webkit-scrollbar,
 .block.note .code-edit::-webkit-scrollbar { width: 8px; height: 8px; }
+/* WebKit/Blink VIEW scrollers — HARDENED: -webkit-appearance:none forces a
+   persistent, space-reserving custom bar (defeats the macOS overlay auto-hide). */
+.code-view::-webkit-scrollbar,
+.csv-table-wrap::-webkit-scrollbar, .json-tree::-webkit-scrollbar, .json-raw::-webkit-scrollbar,
+.block.note .code-view pre::-webkit-scrollbar, .block.note .code-view table::-webkit-scrollbar,
+.block.rich .rich-surface pre::-webkit-scrollbar, .block.rich .rich-surface table::-webkit-scrollbar {
+  -webkit-appearance: none; width: 8px; height: 8px;
+}
+/* Shared track / thumb / hover / corner (all edit + view scrollers). */
 .code-edit::-webkit-scrollbar-track, .code-view::-webkit-scrollbar-track,
 .csv-edit::-webkit-scrollbar-track, .json-edit::-webkit-scrollbar-track,
 .csv-table-wrap::-webkit-scrollbar-track, .json-tree::-webkit-scrollbar-track, .json-raw::-webkit-scrollbar-track,
-.block.note .code-edit::-webkit-scrollbar-track { background: transparent; }
+.block.note .code-edit::-webkit-scrollbar-track,
+.block.note .code-view pre::-webkit-scrollbar-track, .block.note .code-view table::-webkit-scrollbar-track,
+.block.rich .rich-surface pre::-webkit-scrollbar-track, .block.rich .rich-surface table::-webkit-scrollbar-track {
+  background: transparent;
+}
 .code-edit::-webkit-scrollbar-thumb, .code-view::-webkit-scrollbar-thumb,
 .csv-edit::-webkit-scrollbar-thumb, .json-edit::-webkit-scrollbar-thumb,
 .csv-table-wrap::-webkit-scrollbar-thumb, .json-tree::-webkit-scrollbar-thumb, .json-raw::-webkit-scrollbar-thumb,
-.block.note .code-edit::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 4px; }
+.block.note .code-edit::-webkit-scrollbar-thumb,
+.block.note .code-view pre::-webkit-scrollbar-thumb, .block.note .code-view table::-webkit-scrollbar-thumb,
+.block.rich .rich-surface pre::-webkit-scrollbar-thumb, .block.rich .rich-surface table::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb); border-radius: 4px;
+}
 .code-edit::-webkit-scrollbar-thumb:hover, .code-view::-webkit-scrollbar-thumb:hover,
 .csv-edit::-webkit-scrollbar-thumb:hover, .json-edit::-webkit-scrollbar-thumb:hover,
 .csv-table-wrap::-webkit-scrollbar-thumb:hover, .json-tree::-webkit-scrollbar-thumb:hover, .json-raw::-webkit-scrollbar-thumb:hover,
-.block.note .code-edit::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
+.block.note .code-edit::-webkit-scrollbar-thumb:hover,
+.block.note .code-view pre::-webkit-scrollbar-thumb:hover, .block.note .code-view table::-webkit-scrollbar-thumb:hover,
+.block.rich .rich-surface pre::-webkit-scrollbar-thumb:hover, .block.rich .rich-surface table::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
 .code-edit::-webkit-scrollbar-corner, .code-view::-webkit-scrollbar-corner,
 .csv-edit::-webkit-scrollbar-corner, .json-edit::-webkit-scrollbar-corner,
 .csv-table-wrap::-webkit-scrollbar-corner, .json-tree::-webkit-scrollbar-corner, .json-raw::-webkit-scrollbar-corner,
-.block.note .code-edit::-webkit-scrollbar-corner { background: transparent; }
+.block.note .code-edit::-webkit-scrollbar-corner,
+.block.note .code-view pre::-webkit-scrollbar-corner, .block.note .code-view table::-webkit-scrollbar-corner,
+.block.rich .rich-surface pre::-webkit-scrollbar-corner, .block.rich .rich-surface table::-webkit-scrollbar-corner {
+  background: transparent;
+}
 
 /* ---------- NOTE BLOCKS (rendered Markdown) ---------- */
 /* In note mode the textarea is the editor (opaque, normal text) and the view is
@@ -1393,6 +1437,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .block.note .code-view {
   display: block;
   white-space: normal;
+  /* Wrap long unbroken strings (URLs, tokens, no-space runs) so prose stays inside
+     the block instead of overflowing/clipping — prose wraps, it never h-scrolls
+     (fenced code + tables scroll on their own). Inherits into <p>/<li>/<td>. */
+  overflow-wrap: anywhere;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -1946,14 +1994,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .json-node:not([open]) > .json-summary .json-meta { opacity: .85; }
 .json-meta { color: var(--text-dim); }
 .json-children { padding-left: 16px; border-left: 1px solid var(--border); margin-left: 4px; }
-.json-row { display: flex; align-items: baseline; gap: 4px; flex-wrap: wrap; }
+.json-row { display: flex; align-items: baseline; gap: 4px; flex-wrap: nowrap; }
 .json-key {
   color: #9cdcfe; cursor: pointer; border-radius: 3px; padding: 0 2px;
   white-space: pre; flex: 0 0 auto;
 }
 .json-key:hover { background: var(--accent-2); color: #fff; }
 .json-colon { color: var(--text-dim); }
-.json-val { white-space: pre-wrap; word-break: break-word; }
+.json-val { white-space: pre; }
 .json-string { color: #ce9178; }
 .json-number { color: #b5cea8; }
 .json-boolean { color: #569cd6; }
@@ -2125,22 +2173,23 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   /* lang picker: let it shrink so it doesn't hog the row */
   body.is-mobile .block-toolbar .lang-picker-btn { min-width: 0; max-width: 130px; }
 
-  /* --- section header (mobile): one compact row — [▼ title  🏷N  ⛶Merge  $ ⤴ 🗑].
+  /* --- section header (mobile): one compact row — [▼ title  🏷N  ⛶Merge  ⋯  ✕].
      Tags become a count button → picklist menu, and the per-section merge bar is
-     relocated here from the body (see renderSection). No more tag-chip row + merge
-     row eating vertical space. --- */
+     relocated here from the body (see renderSection). $ Variables + ⤴ Dissolve now
+     live behind the section ⋯ menu (see the .section-actions declutter above), so
+     the row stays short. No more tag-chip row + merge row eating vertical space. --- */
   .section-header { flex-wrap: wrap; }
   .section-header .section-title { min-width: 0; }
   .section-header .section-actions { order: 4; }
   /* even 6px spacing between ALL header buttons: the row's top-level gap, the
-     section-actions internal gap ($ ✕), and the merge bar's gap all match — so
-     🏷N · ⛶ · $ · ✕ are evenly spaced instead of the actions cluster being tighter */
+     section-actions internal gap (⋯ ✕), and the merge bar's gap all match — so
+     🏷N · ⛶ · ⋯ · ✕ are evenly spaced instead of the actions cluster being tighter */
   body.is-mobile .section-header { gap: 6px; }
   body.is-mobile .section-header .section-actions { gap: 6px; }
   body.is-mobile .section-header .tags { display: none; }   /* desktop chips never used on mobile */
   body.is-mobile .section-tags-btn { min-height: 32px; padding: 6px 9px; font-size: 13px; flex-shrink: 0; }
   body.is-mobile .section-header .merge-bar { margin: 0; gap: 6px; flex-wrap: wrap; }
-  /* the section header's icon buttons ($ var, ⛶ merge, ✕ delete) use the SAME
+  /* the section header's icon buttons (⛶ merge, ⋯ overflow, ✕ delete) use the SAME
      34×32 square footprint as the block toolbar icons — so the section/subsection
      delete ✕ is exactly the same size as a block's delete ✕ (the 🏷N tag button
      keeps its text width). */

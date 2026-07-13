@@ -40,10 +40,16 @@ the receiving role gets a complete, self-contained brief and never has to re-der
 | **Development** — code, tests, docs | [senior-developer](.claude/agents/senior-developer.md) | a verified **Completion Report**: changes, tests/docs, suite + live-preview evidence |
 | **QA** — full regression | [senior-qa-engineer](.claude/agents/senior-qa-engineer.md) | a pass/fail report with repro + suspected `file:line` |
 | **Usability / visual** — UX review | [ui-ux-reviewer](.claude/agents/ui-ux-reviewer.md) | prioritized usability/UI findings with evidence |
+| **Performance** — measure & diagnose | [senior-performance-engineer](.claude/agents/senior-performance-engineer.md) | a **Performance Report**: measured findings (before/after), root cause vs symptom, recommended fix + risk, owning role |
 
 **The chain:** Solution Brief → Technical Design → Completion Report → QA + UX review. Each
 agent's output is the *only* context the next one receives, so it must be complete and
 self-contained (that's the point of the handoff contracts — a role is never half-defined).
+The **[senior-performance-engineer](.claude/agents/senior-performance-engineer.md)** is a
+specialist reviewer alongside QA/UX: pull it in whenever a change is performance-sensitive (boot,
+render, search, at-scale behavior) or a slowness needs measuring. It *measures and recommends
+with hard numbers* (separating code cost from environment) and hands its findings back into the
+chain — it does not implement the fix.
 
 **Right-sizing:** this is a quality bar, not mandatory ceremony for every keystroke. Trivial
 changes (a typo, a one-line fix, a rename) don't need the full chain. But for any **new
@@ -61,8 +67,8 @@ story is squarely "non-trivial."
 | `index.html` | Markup; loads **vendored** Prism + **markdown-it** (offline), then `version.js`, then the 7 ordered `src/*.js` scripts (via the dynamic loader array — `version.js` is first so `CODEMAN_VERSION` exists before the modules run). Cache-busts CSS/JS with a `?v=` query over http(s); on `file://` the query is skipped (Chromium won't resolve `foo.js?v=…` off disk). The stylesheet is a plain `<link>` whose href gets `?v=` appended by JS — **never** `document.write` (that wipes the document under a `file://` load). |
 | `version.js` | **Single version source of truth.** `self.CODEMAN_VERSION = 'X.Y.Z'` — read by the footer (`init.js`) and `importScripts`-ed by `sw.js` for the cache name. Bump this one file per release (CI also syncs it from the git tag for the packaged desktop build). |
 | `src/core.js` | Languages, global state, the `api()` wrapper (offline-aware) + `apiFetch`, toast, `flashCopied`, the `copyText()` clipboard helper (see gotcha), themed modals. `apiFetch` builds a relative `api.php?...` URL, or prefixes `window.CODEMAN_API_BASE` if non-empty — but it's `''` everywhere today (unset in a browser; the desktop preload sets it to `''` so the renderer keeps using the relative, proxied `api.php`), so the URL is effectively always relative. |
-| `src/tree.js` | Sidebar tree (single column) + Miller columns (double, **always exactly 2** — `MILLER_COLS`) + drag-to-sort. `effectiveMode()` forces single-column when `body.is-mobile`, without changing the persisted `sidebarMode` (which **defaults to `double`** on desktop). Project helpers: `pathPrefixes`, `projectChain` (the project-ancestor chain), `isValidProjectParent`; the project-chain banner + color-coded breadcrumb live here. |
-| `src/editor.js` | Page tabs, page/section/block editor, language picker, blocks (code/note/rich/checklist), merge/split/reorder, variables, save (conflict-aware). |
+| `src/tree.js` | Sidebar tree (single column) + Miller columns (double, **always exactly 2** — `MILLER_COLS`) + drag-to-sort. `effectiveMode()` forces single-column when `body.is-mobile`, without changing the persisted `sidebarMode` (which **defaults to `double`** on desktop). Project helpers: `pathPrefixes`, `projectChain` (the project-ancestor chain), `isValidProjectParent`; the project-chain banner + color-coded breadcrumb live here. Page rows carry a discreet `❐` (`.tree-dup`) → `duplicatePageFromTree` (both layouts). |
+| `src/editor.js` | Page tabs, page/section/block editor, language picker, blocks (code/note/rich/checklist), merge/split/reorder, variables, save (conflict-aware). **Duplicate** (glyph `❐`; clipboard-Copy keeps `⧉`): `duplicateBlock`/`duplicateSection` deep-copy (`JSON.parse(JSON.stringify)`) + splice-below + `pendingRevealObj`→`revealNewEl` (pulse/scroll); `duplicatePageFromTree`/`duplicateCurrentPage` are client-side page copies (`create_page`→`save_page {baseMtime:null}`→`loadTree`, then `revealTreeRow` or `openPage`) named by the pure `uniqueCopyName`. |
 | `src/features.js` | Trash & history UI, history diff, favorites + recently-copied, tag manager, command palette, quick-paste block palette, find & replace, export/import, `primeOfflineCache`, `rebuildIndex`, and `openMoreMenu` (the sidebar `⋯` overflow menu, reusing the `.mini-menu` pattern). |
 | `src/ui.js` | Search, layout toggle (single/double), expand/collapse, hide/resize sidebar, and `initMobile()` (the `body.is-mobile` flag + off-canvas drawer + backdrop). |
 | `src/offline.js` | Local-persistence fallback: IndexedDB mirror + write-queue + sync; offline trash/history. |
@@ -73,7 +79,7 @@ story is squarely "non-trivial."
 | `api.php` | Filesystem API: tree, page CRUD, move, reorder, content/block search, metadata index, projects, trash, history, save-conflict detection, find & replace, tag rename, optional password gate. |
 | `vendor/prism/` | Vendored Prism (core + autoloader + grammars + theme) — **no CDN**, works offline. Grammars autoload on demand; an unviewed language won't highlight offline until first rendered. |
 | `vendor/markdown-it/` | Vendored **markdown-it** (v14, single UMD file) — **no CDN**, offline. Backs `renderMarkdown` for **note blocks** (full CommonMark + GFM). Loaded as a static `<script>` before the `src/*.js` modules so `window.markdownit` exists when `editor.js` builds its instance. See the markdown-it gotcha. |
-| `tests.html` | Standalone **client** browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + `richToPlainText`/`convertBlock`/`parseCsv`/`parseJsonSafe`/`jsonPath` + deep-search cap + offline trash/history reducers (snapshots/restores the real IndexedDB cache, safe to run). Open it in a browser; ~155 assertions, expect `0 failed`. |
+| `tests.html` | Standalone **client** browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + `richToPlainText`/`convertBlock`/`parseCsv`/`parseJsonSafe`/`jsonPath`/`assembleRestoredTabs`/`uniqueCopyName` + deep-search cap + offline trash/history reducers (snapshots/restores the real IndexedDB cache, safe to run). Open it in a browser; ~187 assertions, expect `0 failed`. |
 | `tests-api.sh` | Standalone **server** API tests (bash + curl, no deps). Spins a throwaway `php -S` against a temp `CODEMAN_DATA` dir and asserts api.php behavior the browser can't reach: path-traversal confinement, parent-dir guards, unicode `search_content`, same-second history retention, `empty_trash` history-prune + its traversal guard, and the password gate. `bash codeman/tests-api.sh` (exit 0 = green). |
 
 **No build step.** The `src/*.js` files are plain classic scripts sharing one global scope;
@@ -370,7 +376,12 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   Copy→`⧉`, Delete→`✕`) and label-on-own-row; the open page re-renders on the 768px flip
   (`initMobile` calls `renderPage()`), so toolbars reflow without a reload. The `⋯` menu groups
   (`showMiniMenu`, `{divider:true}`→`.mini-menu-sep`): direct actions · `BLOCK_KINDS` convert ·
-  copy-as. **Desktop is no longer byte-identical** — that was an intentional declutter.
+  copy-as. **Desktop is no longer byte-identical** — that was an intentional declutter. **Glyph
+  convention:** `❐` (U+2750) means **Duplicate** at all three levels (block/section/page menus + the
+  tree row); `⧉` is reserved for **clipboard-Copy** only — don't cross them. All Duplicate handlers
+  route through `duplicateBlock`/`duplicateSection` (deep-copy + splice **below** the source, not
+  push-to-end) so a copy lands directly beneath its original and `pendingRevealObj`/`revealNewEl`
+  pulse it into view.
 - **ALL block kinds get the icon toolbar (not just code/note).** `renderChecklistBlock` and
   `renderRichBlock` mirror the same mobile treatment: Edit→`✎`/Save→`✓` (rich), Copy→`⧉`, Delete→`✕`,
   label on its own row, and a `.block-overflow` (`⋯`) that folds Duplicate + the block-kind convert
@@ -486,7 +497,7 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   by a `body.outline-open` class set in `toggleOutline`/`buildPageOutline` (the outline lives deep
   in `.main`, not a body sibling). Both ✕ and backdrop are `display:none` off-mobile → desktop rail
   unchanged.
-- **Mobile section header = one row: `▼ Title  🏷N  ⛶  $ ⤴ ✕`.** On mobile (`isMobile` checked
+- **Mobile section header = one row: `▼ Title  🏷N  ⛶  ⋯ ✕`.** On mobile (`isMobile` checked
   in `renderSection`), section tags collapse into a `.section-tags-btn` (`🏷 N` count) that opens a
   `showMiniMenu` picklist (each tag with ✕ + an Add-tag item) instead of the wrapping chip row, and
   the per-section merge bar is **relocated** out of the section body (`panel`) up onto the header
@@ -494,6 +505,10 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   `⛶`). Merge still works because its `target` (the panel) is captured in the closure — only the
   controls move. Tag add/remove logic is shared via `removeTag`/`addTagFlow` (factored out of
   `renderTags`). Desktop keeps inline chips + the body merge bar (the whole branch is `is-mobile`-gated).
+  The `$` Variables toggle (`.sec-var-toggle`) and `⤴ Dissolve` (`.section-dissolve`, subsections
+  only) are **CSS-hidden on every width** and folded into a new `.section-overflow` (`⋯`) menu
+  (`❐ Duplicate section · $ Variables · ⤴ Dissolve`) that proxies them via `.click()` — so
+  the desktop section header also declutters to `$/⤴`-in-`⋯`. `⛶ Merge` + `✕ Delete` stay inline.
 - **Mobile renames icons to save space.** On mobile every red Delete button (all four `delBtn` sites:
   `renderBlock`/`renderChecklistBlock`/`renderRichBlock`/`renderSection`) becomes a red `✕`
   (`title="Delete"`, keeps `danger`), and the per-section Merge button is just `⛶` (`title="Merge"`).
