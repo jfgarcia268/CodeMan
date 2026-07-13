@@ -13,6 +13,39 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
 
 ## [Unreleased]
 
+## [1.12.0] — 2026-07-13
+
+### Added
+- **Keyboard- & screen-reader-operable popup menus.** Every `⋯` / overflow menu (block actions,
+  section, tags, per-column sort, the page-header `⋯`, the sidebar More menu, the Export submenu,
+  and the block Copy-as menu) is now a proper accessible menu: open it and arrow-key up/down (wrapping) between items,
+  Home/End to jump, Enter/Space to activate, Escape to close — focus returns to the button you
+  opened it from, and assistive tech announces it as a menu. The menus look and land exactly where
+  they did before.
+- **Unsynced-changes review.** When an offline edit can't be synced back to the server (a
+  name the server rejects, a save that keeps failing), it's no longer silently dropped —
+  the offline badge shows "N changes could not sync — review" (in a distinct red state), opening a
+  panel where you can inspect, retry, discard, or export each change (grouped so a whole failed subtree
+  reads as one unit under the item that couldn't be created). Nothing is ever thrown away without your
+  say. The review panel is reachable by keyboard (focus the badge and press Enter) and from the command
+  palette and sidebar ⋯ menu, not just a mouse click on the badge.
+- **Backup reminder (offline-only desktop).** When the desktop app is configured offline-only
+  — so this machine's local store is the *only* copy of your library — it occasionally shows a
+  dismissable "Back up your library — Export all pages" toast. Server-connected and web users
+  never see it (the server is the backup). "Don't remind me" silences it for good.
+
+### Changed
+- **Crash-safe page writes.** Every page and metadata file is now written atomically (write to
+  a temp file, then rename), so a crash or power loss mid-save can never leave a truncated or
+  corrupted page.
+- **History follows renames/moves.** A page's (or folder's) version history now travels with it
+  when you rename or move it, instead of being stranded under the old name.
+
+### Fixed
+- Unsaved edits when a tab is closed or the app is backgrounded are now saved with a reliable
+  keepalive request that carries your login — previously, on a password-protected server, that
+  last-moment save could be rejected and lost.
+
 ## [1.11.0] — 2026-07-13
 
 ### Added

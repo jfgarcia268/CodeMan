@@ -140,7 +140,9 @@ commit (and each changed page is snapshotted to history first):
 Nothing is lost by accident. Deletes go to a restorable **Trash**, every save snapshots the
 prior version to **History** (last 20, with a line-level diff and one-click restore), and
 concurrent edits are caught at save time — last-write-wins, but the other version is
-snapshotted so it's always recoverable.
+snapshotted so it's always recoverable. Every page is written **atomically** (temp file +
+rename), so a crash or power loss mid-save can't leave a truncated or corrupted page, and a
+page's history travels with it when you rename or move it.
 
 ![History diff — the previous version vs. current, with a line-level highlight](docs/images/history-diff.png)
 
@@ -148,6 +150,9 @@ snapshotted so it's always recoverable.
 
 While a tab is open, edits keep working through a server blip — they mirror to IndexedDB and
 replay on reconnect. A service worker precaches the shell for full offline boot over HTTPS.
+If an offline change ever can't be synced back (a name the server rejects, a save that keeps
+failing), it's never silently dropped — a **review panel** surfaces it to inspect, retry,
+discard, or export, so nothing is thrown away without your say.
 
 For reliable offline use anywhere (no certificate, no PWA setup), the optional **Electron
 desktop app** (macOS + Windows) bundles the shell locally and proxies your server. On first

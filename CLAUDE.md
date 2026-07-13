@@ -71,7 +71,7 @@ story is squarely "non-trivial."
 | `src/core.js` | Languages, global state, the `api()` wrapper (offline-aware) + `apiFetch`, toast, `flashCopied`, the `copyText()` clipboard helper (see gotcha), themed modals. `apiFetch` builds a relative `api.php?...` URL, or prefixes `window.CODEMAN_API_BASE` if non-empty — but it's `''` everywhere today (unset in a browser; the desktop preload sets it to `''` so the renderer keeps using the relative, proxied `api.php`), so the URL is effectively always relative. |
 | `src/tree.js` | Sidebar tree (single column) + Miller columns (double, **always exactly 2** — `MILLER_COLS`) + drag-to-sort. `effectiveMode()` forces single-column when `body.is-mobile`, without changing the persisted `sidebarMode` (which **defaults to `double`** on desktop). Project helpers: `pathPrefixes`, `projectChain` (the project-ancestor chain), `isValidProjectParent`; the project-chain banner + color-coded breadcrumb live here. Page rows carry a discreet `❐` (`.tree-dup`) → `duplicatePageFromTree` (both layouts). |
 | `src/editor.js` | Page tabs, page/section/block editor, language picker, blocks (code/note/rich/checklist), merge/split/reorder, variables, save (conflict-aware). **Duplicate** (glyph `❐`; clipboard-Copy keeps `⧉`): `duplicateBlock`/`duplicateSection` deep-copy (`JSON.parse(JSON.stringify)`) + splice-below + `pendingRevealObj`→`revealNewEl` (pulse/scroll); `duplicatePageFromTree`/`duplicateCurrentPage` are client-side page copies (`create_page`→`save_page {baseMtime:null}`→`loadTree`, then `revealTreeRow` or `openPage`) named by the pure `uniqueCopyName`. |
-| `src/features.js` | Trash & history UI, history diff, favorites + recently-copied, tag manager, command palette, quick-paste block palette, find & replace, export/import, `primeOfflineCache`, `rebuildIndex`, and `openMoreMenu` (the sidebar `⋯` overflow menu, reusing the `.mini-menu` pattern). |
+| `src/features.js` | Trash & history UI, history diff, the **dead-letter review panel** (`openDeadLetterPanel` — unsynced changes the server rejected), favorites + recently-copied, tag manager, command palette, quick-paste block palette, find & replace, export/import, `primeOfflineCache`, `rebuildIndex`, and `openMoreMenu` (the sidebar `⋯` overflow menu, reusing the `.mini-menu` pattern). |
 | `src/ui.js` | Search, layout toggle (single/double), expand/collapse, hide/resize sidebar, and `initMobile()` (the `body.is-mobile` flag + off-canvas drawer + backdrop). |
 | `src/offline.js` | Local-persistence fallback: IndexedDB mirror + write-queue + sync; offline trash/history. |
 | `src/init.js` | Bootstrap IIFE + Service Worker registration (skipped on `file://`/insecure contexts) + sets the footer version label from `CODEMAN_VERSION`. |
@@ -81,7 +81,7 @@ story is squarely "non-trivial."
 | `api.php` | Filesystem API: tree, page CRUD, move, reorder, content/block search, metadata index, projects, trash, history, save-conflict detection, find & replace, tag rename, optional password gate. |
 | `vendor/prism/` | Vendored Prism (core + autoloader + grammars + theme) — **no CDN**, works offline. Grammars autoload on demand; an unviewed language won't highlight offline until first rendered. |
 | `vendor/markdown-it/` | Vendored **markdown-it** (v14, single UMD file) — **no CDN**, offline. Backs `renderMarkdown` for **note blocks** (full CommonMark + GFM). Loaded as a static `<script>` before the `src/*.js` modules so `window.markdownit` exists when `editor.js` builds its instance. See the markdown-it gotcha. |
-| `tests.html` | Standalone **client** browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + `richToPlainText`/`convertBlock`/`parseCsv`/`parseJsonSafe`/`jsonPath`/`assembleRestoredTabs`/`uniqueCopyName` + deep-search cap + offline trash/history reducers (snapshots/restores the real IndexedDB cache, safe to run) + `sanitizeRichHtml` + `flushQueue` replay (FIFO/conflict-force/failure-retains, against stubbed `apiFetch`) + `importPages` negatives. Open it in a browser; ~205 assertions, expect `0 failed`. `window.__testResult = {pass, fail, done}` — CI runs it headless via `.github/scripts/run-client-tests.mjs` and enforces a pass-count FLOOR (bump it there when adding assertions). |
+| `tests.html` | Standalone **client** browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + `richToPlainText`/`convertBlock`/`parseCsv`/`parseJsonSafe`/`jsonPath`/`assembleRestoredTabs`/`uniqueCopyName` + deep-search cap + offline trash/history reducers (snapshots/restores the real IndexedDB cache — incl. `dl:` dead-letter keys — safe to run) + `sanitizeRichHtml` + `flushQueue` replay (FIFO/conflict-force/failure-retains + **dead-letter parking**: terminal/transient-exhausted/conflict-force-error, retry, `__codemanAdoptInto` merge, against stubbed `apiFetch`) + `importPages` negatives. Open it in a browser; ~224 assertions, expect `0 failed`. `window.__testResult = {pass, fail, done}` — CI runs it headless via `.github/scripts/run-client-tests.mjs` and enforces a pass-count FLOOR (bump it there when adding assertions). |
 | `tests-api.sh` | Standalone **server** API tests (bash + curl, no deps). Spins a throwaway `php -S` against a temp `CODEMAN_DATA` dir and asserts api.php behavior the browser can't reach: path-traversal confinement, parent-dir guards, unicode `search_content`, same-second history retention, `empty_trash` history-prune + its traversal guard, save-conflict detection (stale `baseMtime` → conflict + untouched file; `force` → history snapshot), the project-nesting `move` guard, the `rename` traversal guard, the `restore_trash` round-trip, `replace_content` (preview dry-run / literal / regex), `rename_tag` (rename/merge/delete), and the password gate. `bash codeman/tests-api.sh` (exit 0 = green; hunts upward from its port if taken, so parallel/CI runs don't collide). |
 
 **No build step.** The `src/*.js` files are plain classic scripts sharing one global scope;
@@ -369,6 +369,47 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   the project ancestors of any path form a prefix from the root — `projectChain()` relies on this.
   Guard all create/move/reorder paths with `isValidProjectParent` (server mirrors it in
   `create_project`/`move`); don't add a new path that bypasses it.
+- **`showMiniMenu(anchorEl, items, opts)` (editor.js) is the ONE accessible popup-menu — nothing
+  else constructs a `.mini-menu` (grep-verified).** Every `⋯`/overflow popup routes through it:
+  block-kind menus ×3, section `⋯`, tags menu, per-column sort (`buildColSortMenu`, tree.js),
+  page-header `⋯`, sidebar More (`openMoreMenu`), Export submenu (`exportMenu`), and the block
+  Copy-as `▾` submenu — the old bespoke bodies were all folded in as thin item-builders. **Don't
+  fork a second hand-rolled `.mini-menu`.** Checkable menus (colsort) pass `checked` per item →
+  each option becomes `role="menuitemradio"` + `aria-checked`, and the pure `miniMenuHasCheck(items)`
+  reserves the 24px icon column on EVERY row (✓ on checked rows, accent `.active` background as
+  before) so labels stay aligned; menus with no `checked` item keep the exact per-item `it.icon`
+  behavior (column only where an icon is supplied) so none of them shift. **A11y contract:**
+  container `role="menu"` (named via `aria-label` from the trigger's title/text), options
+  `role="menuitem"` (roving `tabindex=-1`), dividers `role="separator"`. **Triggers are marked
+  STATICALLY at creation** — menu-opening buttons are built with `menuBtn()` (= `markMenuTrigger`
+  ∘ `mkBtn`, tree.js) or `markMenuTrigger(el)` (core.js) for the two `createElement` triggers
+  (page Export, mobile page-header `⋯`), so each carries `aria-haspopup="menu"` +
+  `aria-expanded="false"` **before its first open** (a screen reader announces it as a menu button
+  from the first render); `showMiniMenu` then toggles only `aria-expanded` (and a safety-net sets
+  haspopup if a dynamic anchor lacks it). Keyboard: ArrowUp/Down **wrap** (via the pure, unit-tested
+  `miniMenuWrapIndex`), Home/End, Enter/Space activate, Escape/Tab close. **Focus on open** lands on
+  the first item — or, in a checkable menu (colsort), on the currently-`checked` item (via
+  `miniMenuHasCheck` + `checkedIdx`). **Keyboard dismissal (Escape/Tab) returns focus to `anchorEl`**
+  (guarded by `document.contains` so a re-render that dropped the anchor fails soft). **On item
+  activation**, if the action left focus on `<body>` (it only re-rendered/toasted rather than opening
+  its own modal/panel), focus is restored to a caller-supplied `it.refocus()` target or the surviving
+  `anchorEl` — so the next Tab doesn't restart at the top of the page; an action that opens its own
+  modal keeps focus there. Pointer dismissal (outside-click/scroll) does NOT force focus.
+  The block-type menu marks its current row with `active`/`aria-current` (not `checked`/`✓`), a
+  deliberate visual-parity choice — don't convert it to a radio menu without accepting the `✓`-column
+  shift. Toggle (`_anchor`
+  re-click), the outside-`mousedown`-closes handler, close-on-scroll, and the "don't
+  `preventDefault` the toolbar mousedown" rule are all preserved; opening one menu closes any other
+  via its `_close` (clears that anchor's `aria-expanded` + listeners — no stale `.remove()` bypass).
+  **Three positioning modes, each byte-preserving a prior behavior (zero positional regression is
+  the whole point):** *default* = viewport clamp + upward flip near the bottom edge; *`opts.align:
+  'right'`* = right-align under the anchor (`left=r.right; translateX(-100%)`, the `openMoreMenu`/
+  sidebar behavior); *`opts.anchorRect`* = plain top/left from a caller-supplied rect, no clamp/flip
+  — used by the `exportMenu` submenu (passed the **visible** `headerMoreBtn` on the mobile page-header
+  path, never a hidden `exportBtn` at 0,0), the **colsort** menu (its original plain top/left), and
+  the **Copy-as** submenu (which pre-computes its bespoke `left=max(8, r.right−200)` clamp into the
+  rect so it lands identically). The
+  `.mini-menu-opt:focus-visible` ring (inset offset) is the keyboard affordance; no change at rest.
 - **The code-block `⋯` overflow menu now declutters BOTH desktop and mobile** (was mobile-only
   before the UI/UX pass). The secondary actions — `#` lines / `$` vars / Duplicate / Split /
   `⤵ To subsection` / block-kind `.type-menu` / copy-as `.copy-as` — are hidden by **unconditional**
@@ -593,6 +634,70 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   double-click or N calls in one tick would each pass the "already open?" check before any push and
   create duplicate tabs. An in-flight `_openingPages` Map (editor.js) makes concurrent opens of the
   same path reuse one fetch/tab. Don't drop it.
+- **`writeJsonAtomic($path, $json)` is the SINGLE write path for every JSON file (api.php).** All
+  page/metadata writes (`save_page`, `create_page`, `replace_content`, `rename_tag`, `writeOrder`,
+  `writeColSorts`, `flushIndex`, `snapshotHistory`, the trash `.meta`) go through it: write a
+  **per-write-unique dot-prefixed temp** (`.tmp-<uniqid>`) in the target dir, then `rename()` over the
+  target (atomic on POSIX → a crash mid-write can never truncate a page). **The temp name MUST be
+  unique** — a fixed `<path>.tmp` would let two concurrent `save_page`s clobber each other's temp
+  before either renames (defeating the LOCK_EX serialization). The dot prefix keeps an orphaned temp
+  invisible to `buildTree`. A **CI invariant** greps that no bare `file_put_contents(…, json_encode(…))`
+  survives outside the helper — route new JSON writes through it. (Linux/macOS only; Windows can't
+  `rename()` over an existing file, but api.php never runs there.)
+- **`rename`/`move` migrate the `.history` subtree (api.php `migrateHistory`).** After the main
+  `rename()`, the page's/folder's `.history/<rel>` is `@rename`d to the new rel (best-effort — a
+  missing/locked history never fails the action; both rels `safePath`'d). If the **destination history
+  already exists** (a prior same-named item left it behind), it does NOT clobber and does NOT strand:
+  `mergeHistoryDir` recursively carries the source's non-colliding version files across (a colliding
+  `<ts>.json` = same version, skipped) then drops the drained source, so the moved page isn't
+  mis-attributed to stale history. The **offline**
+  mirror mirrors this: `mutateTreeCache`'s rename/move branches call `collectRepathPairs` (captured
+  BEFORE `rePath` mutates paths) + `rekeyCachedPaths` to move the cached page content **and** local
+  history from the old key to the new one — else an offline rename shows a blank page under a name
+  that no longer exists.
+- **Dead-letter queue = the anti-silent-loss guarantee (offline.js + features.js).** A queued write
+  the server *rejects* (terminal 4xx, a `_transient` error that outlives 3 retries, or a conflict-force
+  that still errors) is **parked** as a dead-letter, NEVER `shift()`-dropped (that bare shift was the
+  bug). Each is its own kv entry keyed `kvKey('dl:'+id)` = `<NS>\x1F dl:<id>` — so retry is
+  **namespace-locked by construction** (the `dl*` helpers + `kvEnumerate('dl:')` only ever touch the
+  ACTIVE namespace; a parked op can't replay against the wrong server, same guarantee as the queue).
+  Key shape mirrors WS-6's planned `history:<path>` keys (`<NS>\x1F<kind>:<suffix>`) so `kvEnumerate`
+  serves both — no second migration. `flushQueue` classifies via `res._transient` (set by core.js on a
+  malformed body), NOT string-matching — and both the normal path AND the **conflict-force resend** run
+  the same 3-attempt retry before parking a transient (only a genuine terminal parks immediately). The
+  `openDeadLetterPanel` (features.js) groups by `cascadeOf` with the **failed parent `create_*` hoisted
+  to head its own group** (parent + blocked dependents contiguous), and soft-caps at 100 with an
+  **export prompt, never eviction**. `__codemanAdoptInto` **merges** (queue/trash concat, history
+  per-path merge, dl: copied) — never overwrites the target namespace's own unsynced work. **Recovery
+  reach (a11y):** the badge is a **keyboard-operable `role=button`** (Enter/Space) that switches to a
+  distinct **`.danger` (red)** state for dead-letters (louder than routine amber offline/queued); the
+  panel is also reachable from the command palette + sidebar `⋯` menu, both gated on `dlCountCached()>0`
+  (a sync cache refreshed by `updateOfflineBadge`).
+- **`flushSave` is dirty-guarded; unload uses keepalive, not `sendBeacon` (editor.js).** `pageDirty`
+  (a Set of paths) is marked in `scheduleSave` (the one choke point every mutation funnels through) and
+  cleared in `savePage` ONLY on a successful non-conflict save (mtime OR queued-offline branch; and NOT
+  while a mid-save edit is pending re-save). `flushSave` early-returns when the active page isn't dirty
+  — so a tab switch / unload on an **unchanged** page does ZERO writes (no history churn, no mtime
+  bump). **Semantic change C11:** a stale-but-clean tab no longer self-heals `baseMtime` on tab switch
+  (it didn't earn a write). The unload path is a **`keepalive` fetch through `apiHeaders()`** (carries
+  auth — a header-less `sendBeacon` would 401 on a gated server), falling back to `enqueue()` if the
+  browser refuses it (offline/quota) — never a silent drop. `visibilitychange→hidden` is the PRIMARY
+  trigger (fires reliably, keepalive completes); `beforeunload` is a backstop (an IndexedDB write
+  started there isn't guaranteed to finish). Don't reintroduce `sendBeacon` or gate the triggers on
+  `saveTimer` — the dirty guard is the gate. **Contract / latent trap:** because a page only persists
+  on tab-switch/unload if it's in `pageDirty`, **every mutation MUST route through `scheduleSave()`** —
+  a new mutation path that forgets it will silently fail to persist on switch/unload. That contract is
+  locked by a `tests.html` regression guard (`scheduleSave` marks dirty · `flushSave` writes a dirty
+  page but not a clean one · clears on success); keep `scheduleSave` the single choke point.
+- **`navigator.storage.persist()` on boot (init.js) + `apiHeaders()` single header attach point
+  (core.js).** Persist keeps the IndexedDB mirror/queue/dead-letters from being evicted under storage
+  pressure (best-effort, no prompt). `apiHeaders()` is the ONE place request headers are built — both
+  `apiFetch` and the keepalive unload-save use it, so auth (and future request-ids) can't drift.
+- **Release checklist — bump `version.js` for any client-shipping phase.** A phase that changes
+  `codeman/src/*.js`, `style.css`, or `index.html` (like this one) ships new SW-precached assets — the
+  `version.js` bump (→ new `CACHE_VERSION`) is what busts the old service-worker cache. Do it as part
+  of the release cut (see the CI section), not per intermediate commit, but never ship the client
+  without it.
 
 ---
 
@@ -600,11 +705,13 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
 
 **localStorage:** `codeman.sidebarMode` (defaults to `double`), `columnPath`, `selectedFolder`,
 `millerColScroll`, `expandedFolders`, `openTabs`, `sidebarWidth`, `sidebarHidden`, `deepSearch`,
-`favorites`, `recentCopies`, `authToken` (only when the password gate is on).
+`favorites`, `recentCopies`, `authToken` (only when the password gate is on), `exportNudgeAt` +
+`exportNudgeOff` (offline-only desktop backup nudge).
 **IndexedDB `codeman`:** store `kv` holds `tree`, `queue` (pending writes), `trash` (local
-recoverable deletes), `history` (per-page local version log); store `pages` holds cached page
-content. **Desktop wrapper:** `settings.json` in the OS user-data dir holds the server URL or
-`{offlineOnly:true}`.
+recoverable deletes), `history` (per-page local version log), and per-op `dl:<id>` **dead-letters**
+(writes the server rejected, awaiting review) — all keys namespaced per server (`<NS>\x1F…`); store
+`pages` holds cached page content. **Desktop wrapper:** `settings.json` in the OS user-data dir holds
+the server URL or `{offlineOnly:true}`.
 
 ---
 

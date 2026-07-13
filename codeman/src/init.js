@@ -26,6 +26,47 @@ if ('serviceWorker' in navigator) {
   });
 }
 
+// Ask the browser to make our storage persistent (not evictable under storage
+// pressure) — the offline IndexedDB mirror + write-queue + dead-letters must survive.
+// Best-effort: unsupported browsers no-op, and it's granted heuristically (no prompt
+// in practice). Especially important for the offline-only desktop wrapper, where
+// IndexedDB is the ONLY copy of the library.
+if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+
+// Offline-only desktop nudge: with no server configured, this machine's IndexedDB is
+// the ONLY copy of the library, so nudge an occasional backup (Export all). Web /
+// server-backed users never see this — the server is their backup. Never modal; a
+// dismissable toast, and "Don't remind me" silences it for good. Fires at most once
+// per 14 days; the first launch just seeds the clock (no nag on an empty new library).
+(function exportNudge() {
+  try {
+    if (typeof window.CODEMAN_SERVER_URL !== 'string' || window.CODEMAN_SERVER_URL !== '') return;
+    if (localStorage.getItem('codeman.exportNudgeOff') === '1') return;
+    const now = Date.now(), DAY = 86400000;
+    const last = parseInt(localStorage.getItem('codeman.exportNudgeAt') || '0', 10) || 0;
+    if (last && now - last < 14 * DAY) return;
+    localStorage.setItem('codeman.exportNudgeAt', String(now)); // (re)start the clock
+    if (!last) return;                                          // first run: seed only
+    setTimeout(() => {
+      const box = document.createElement('div'); box.className = 'nudge-toast';
+      const msg = document.createElement('span'); msg.textContent = 'Back up your library — ';
+      const act = document.createElement('button'); act.className = 'nudge-act'; act.textContent = 'Export all pages';
+      act.onclick = () => { box.remove(); if (typeof exportAll === 'function') exportAll(); };
+      // Two DISTINCT dismissals, so the permanent one can't be silenced by reflex:
+      // "Don't remind me" is a labelled secondary text button (deliberate, sets the
+      // permanent flag); the "✕" is a lightweight iconic close (this time only).
+      const off = document.createElement('button'); off.className = 'nudge-off'; off.textContent = "Don't remind me";
+      off.title = 'Stop showing this backup reminder';
+      off.onclick = () => { box.remove(); try { localStorage.setItem('codeman.exportNudgeOff', '1'); } catch (e) {} };
+      const x = document.createElement('button'); x.className = 'nudge-dismiss'; x.textContent = '✕'; x.title = 'Dismiss for now';
+      x.setAttribute('aria-label', 'Dismiss for now');
+      x.onclick = () => box.remove();
+      box.append(msg, act, off, x);
+      document.body.appendChild(box);
+    }, 4000);
+  } catch (e) {}
+})();
+
 (async () => {
   await loadTree();
   renderPage();

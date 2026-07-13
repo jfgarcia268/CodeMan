@@ -108,6 +108,37 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
   (sanitizer strips script/handlers/`javascript:`) — escaping holds (security boundary).
   **[auto: tests.html sanitizeRichHtml + md escapes raw html]**
 
+### TC-menu — Shared popup `⋯` menus (`showMiniMenu`) — a11y + positioning parity
+**Every** `⋯`/overflow popup routes through the one `showMiniMenu` — block-kind menus ×3, section
+`⋯`, tags menu, **per-column sort (colsort)**, page-header `⋯`, sidebar `⋯` / More, Export submenu,
+and the block **Copy-as `▾`** submenu. No hand-rolled `.mini-menu` remains (grep-verified).
+- TC-menu-01 (A11y): the open menu is `role="menu"`, each option `role="menuitem"` (or
+  `role="menuitemradio"` + `aria-checked` in the checkable colsort menu), dividers
+  `role="separator"`; the anchor button carries `aria-haspopup="menu"` + `aria-expanded` toggling
+  `true` on open / `false` on close. Screen reader announces "menu" + item count.
+- TC-menu-02 (A11y): **keyboard-only, all sites incl. colsort + Copy-as** — open a menu, focus
+  lands on the first item; ArrowDown/Up move and **wrap** at both ends; Home/End jump to first/last;
+  Enter/Space activate the focused item; Escape closes and **returns focus to the anchor**; Tab
+  closes. Every menu action is operable with no mouse. **[auto: tests.html miniMenuWrapIndex]**
+- TC-menu-03 (A11y): closing by outside-click or by scrolling closes cleanly (fails soft — no error
+  — if the anchor was removed by a re-render); clicking the anchor again toggles the menu shut.
+  Opening any menu while another is open closes the first via its `_close` path (its anchor's
+  `aria-expanded` resets, its dismiss listeners are removed — no lingering `.remove()` bypass).
+- TC-menu-04 (P, positioning parity — NO regression): **default** mode — a block `⋯` menu opened
+  near the viewport bottom **flips upward** and stays clamped inside the viewport (left edge ≥ 8px).
+- TC-menu-05 (P, positioning parity): **sidebar `⋯` (openMoreMenu)** stays **right-aligned** under
+  its button (`left = r.right; translateX(-100%)`), tucked under the sidebar as before.
+- TC-menu-06 (P, positioning parity): the **Export submenu** anchors to its passed rect (plain
+  top/left, no clamp/flip) on desktop (from `exportBtn`) **and** on the **mobile page-header `⋯`
+  path**, where it's handed the *visible* `headerMoreBtn` (never opens at 0,0).
+- TC-menu-07 (P, positioning + visual parity): the **colsort menu** opens at the same plain
+  top/left as before (`anchorRect`), and the active row still shows **both** a `✓` in the aligned
+  24px icon column **and** the accent `.active` background; inactive rows keep the reserved column
+  so all labels line up. **[auto: tests.html miniMenuHasCheck — icon-column reservation]**
+- TC-menu-08 (P, positioning parity): the block **Copy-as `▾`** submenu lands in the identical
+  spot as before — left clamped to `max(8, r.right − 200)`, top `r.bottom + 4` — and each item
+  still copies via `copyText` (records the copy, "Copied…/Copy failed" toast).
+
 ### TC-dup — Duplicate content (block / section / page)
 - TC-dup-01 (P): **block** — for all five kinds (code/note/rich/checklist/csv/json), the block ⋯
   overflow menu shows **❐ Duplicate block** (no longer ⧉ — that glyph is clipboard-Copy only). Click
@@ -241,7 +272,28 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
   (discards your unsaved changes…)"; Overwrite force-saves + snapshots the other version to History
   (recoverable); Cancel reloads disk version. Server side (stale `baseMtime` → `{conflict:true}` +
   file untouched; `force:true` → write + history snapshot) is **[auto: tests-api save-conflict]**;
-  the modal flow stays manual.
+  the modal flow stays manual. **C11 re-baseline:** a stale-but-CLEAN tab no longer self-heals its
+  `baseMtime` on tab switch (it earns no write now) — so a cross-tab conflict is only raised when the
+  second tab actually has un-saved edits. Verify: open a page in 2 tabs, edit+save in tab B, then in
+  tab A **just switch away without typing** → NO save, NO conflict; edit one char in tab A then switch
+  → conflict modal as before.
+- TC-data-04 (A): **dirty-guarded `flushSave` — BOTH directions.**
+  **(a, critical)** On an UNCHANGED open page, switch tabs ~20 times (and background/foreground the
+  app) → **ZERO** new History snapshots and **ZERO** mtime bumps for that page (the dirty guard must
+  not let a clean switch write; and it must not be so eager it *eats* a real save). **(b)** With a
+  DIRTY editor (typed <500ms before the switch/close), switching tabs / closing the tab / backgrounding
+  the app still flushes the edit via a `keepalive` request carrying auth; if that write lands on a
+  stale mtime it wins as a forced save and snapshots the prior version to History (nothing lost). On a
+  password-gated server the keepalive save is NOT rejected (it sends `X-CodeMan-Auth`). If the browser
+  refuses the keepalive (offline), the edit is queued instead — never dropped.
+- TC-data-05 (P): **crash-safe atomic writes + history-follows-rename/move.** A rapid save burst leaves
+  no `.tmp-*` residue and every JSON file still parses; renaming/moving a page (or renaming a folder)
+  carries its `.history` subtree to the new path; moving into a destination whose `.history` already
+  exists **merges** the source's non-colliding versions in and removes the stale source (no stranding,
+  no mis-attribution). **[auto: tests-api atomic-writes + history-migration + dest-exists merge]**
+- TC-data-06 (A): **dirty-guard choke-point contract (regression).** The mechanism (`scheduleSave`
+  marks dirty · `flushSave` writes a dirty page, not a clean one · clears on success) is
+  **[auto: tests.html dirty-guard]**; the live check is any block/section mutation → tab-switch persists.
 
 ### TC-prod — Productivity
 - TC-prod-01 (P): Command palette ⌘K — jump to page (substring match), path-subtitle disambiguation;
@@ -275,6 +327,22 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
   **[auto: tests.html flushQueue replay]**.
 - TC-offline-04 (N): a 401 (auth) or a malformed-but-200 body is treated as a **server response, not
   offline** — no false offline; a poisoned queued op drains rather than latching offline.
+- TC-offline-05 (A): **dead-letter review panel (no silent loss).** Offline, delete a folder subtree
+  whose recreate later fails server-side (e.g. a create that 404s / a rejected name) → the failed
+  op(s) are **parked**, not dropped: the badge shows "N changes could not sync — review", clicking it
+  opens the panel grouped by the failed parent (`cascadeOf`). Each row has Inspect (pretty JSON) /
+  Retry (re-queues + flushes) / Discard (confirm); footer has Retry-all / Discard-all / **Export** (a
+  JSON download of every parked payload). A conflict-force that still errors, and a transient error
+  that survives 3 retries, also park (never a silent `shift()`). Retry is namespace-locked — a parked
+  op can only replay against the server it was made for. **Reach + severity (a11y):** the badge shows a
+  distinct **red** (danger) state for dead-letters vs amber for routine offline/queued, is
+  **keyboard-operable** (Tab to it, Enter/Space opens the panel), and the panel is ALSO reachable from
+  the command palette ("Review unsynced changes…") and the sidebar `⋯` menu — both shown only when
+  there are dead-letters. In the panel, a failed parent `create_*` heads its own cascade group (parent
+  first, dependents under it); Inspect has a Copy button. The parking/classification engine (terminal /
+  transient-exhausted / **conflict-force-transient retried then parked** / conflict-force-terminal,
+  retry re-enqueue, `__codemanAdoptInto` queue-merge) is **[auto: tests.html dead-letter reducers]**;
+  the panel UI + badge keyboard/severity stay manual.
 
 ### TC-colsort — Per-column sort (double layout)
 - TC-colsort-01 (P): Name/Code-type/Kind × asc/desc + Manual order; persists in `.colsort.json`;

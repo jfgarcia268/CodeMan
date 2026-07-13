@@ -113,11 +113,43 @@ if (typeof window !== 'undefined') {
       const u = (targetUrl || '').trim();
       const toNS = u ? 'ns:' + nsHash(u) : 'ns:local';
       if (toNS === fromNS) return;
-      for (const k of ['queue', 'tree', 'trash', 'history']) {
-        const v = await idbGet('kv', fromNS + NS_SEP + k);
-        if (v !== undefined) await idbSet('kv', toNS + NS_SEP + k, v);
+      const get = (ns, k) => idbGet('kv', ns + NS_SEP + k);
+      const set = (ns, k, v) => idbSet('kv', ns + NS_SEP + k, v);
+      // MERGE into the target — never overwrite. The target namespace may already hold
+      // its own unsynced work (a queue parked while it was inactive); clobbering it
+      // would be exactly the silent loss this phase exists to prevent.
+      // queue: append source ops AFTER any the target already has (FIFO preserved).
+      const srcQueue = (await get(fromNS, 'queue')) || [];
+      if (srcQueue.length) { const dst = (await get(toNS, 'queue')) || []; await set(toNS, 'queue', dst.concat(srcQueue)); }
+      // trash: concat (newest-first lists; order isn't load-bearing for restore).
+      const srcTrash = (await get(fromNS, 'trash')) || [];
+      if (srcTrash.length) { const dst = (await get(toNS, 'trash')) || []; await set(toNS, 'trash', dst.concat(srcTrash)); }
+      // history: per-path merge of the two { path: [versions] } maps, capped.
+      const srcHist = await get(fromNS, 'history');
+      if (srcHist && typeof srcHist === 'object') {
+        const dst = (await get(toNS, 'history')) || {};
+        for (const p of Object.keys(srcHist)) dst[p] = (dst[p] || []).concat(srcHist[p] || []).slice(0, LOCAL_HISTORY_KEEP);
+        await set(toNS, 'history', dst);
+      }
+      // tree / colsorts: only seed the target if it has none (else it reconciles from
+      // the server on the next flush — the source tree could be stale for that server).
+      for (const k of ['tree', 'colsorts']) {
+        if ((await get(toNS, k)) === undefined) { const v = await get(fromNS, k); if (v !== undefined) await set(toNS, k, v); }
       }
       const db = await idbOpen();
+      // Dead-letters are unsynced work too — carry each per-op entry across.
+      await new Promise((resolve) => {
+        const cur = db.transaction('kv', 'readonly').objectStore('kv').openCursor();
+        const moves = [];
+        cur.onsuccess = (e) => {
+          const c = e.target.result;
+          if (!c) { Promise.all(moves).then(resolve, resolve); return; }
+          const key = String(c.key);
+          if (key.startsWith(fromNS + NS_SEP + 'dl:')) moves.push(idbSet('kv', toNS + NS_SEP + key.slice(fromNS.length + NS_SEP.length), c.value));
+          c.continue();
+        };
+        cur.onerror = () => resolve();
+      });
       await new Promise((resolve) => {
         const cur = db.transaction('pages', 'readonly').objectStore('pages').openCursor();
         const moves = [];
@@ -135,6 +167,91 @@ if (typeof window !== 'undefined') {
 }
 async function saveQueue() { try { await kvSet('queue', syncQueue); } catch (e) {} }
 async function enqueue(op) { syncQueue.push(op); await saveQueue(); updateOfflineBadge(); }
+
+/* ---------- DEAD-LETTER QUEUE ----------
+   A queued write the server *rejects* (a terminal 4xx, a transient error that
+   survived its retries, or a conflict-force that still errored) must NEVER be
+   silently dropped — that was the old flushQueue's bug (a bare shift() on any
+   non-throw response). It's PARKED here as a dead-letter the user can review, retry,
+   discard, or export (see openDeadLetterPanel in features.js). Each dead-letter is
+   its own kv entry keyed kvKey('dl:' + id) = <NS>\x1F dl:<id>, so retry is
+   NAMESPACE-LOCKED by construction: the helpers only ever read/write the ACTIVE
+   namespace, so a parked op can never replay against the wrong server (the same hard
+   guarantee as the write-queue). The key shape mirrors the planned history:<path>
+   keys (<NS>\x1F<kind>:<suffix>) so kvEnumerate() serves both — no second migration. */
+
+// Cursor the kv store returning { key (namespace-stripped), value } for every entry
+// under the active namespace whose key starts with `prefix`. One helper for every
+// per-op namespaced kv family (dead-letters now; local history later).
+async function kvEnumerate(prefix) {
+  const db = await idbOpen();
+  const full = NS + NS_SEP + prefix;
+  const strip = (NS + NS_SEP).length;
+  return new Promise((res) => {
+    const out = [];
+    const cur = db.transaction('kv', 'readonly').objectStore('kv').openCursor();
+    cur.onsuccess = (e) => {
+      const c = e.target.result;
+      if (!c) return res(out);
+      const key = String(c.key);
+      if (key.startsWith(full)) out.push({ key: key.slice(strip), value: c.value });
+      c.continue();
+    };
+    cur.onerror = () => res(out);
+  });
+}
+
+let _dlSeq = 0;
+// Park an op the server rejected. `kind` is a label ('terminal' | 'retryable-exhausted'
+// | 'retryable' | 'cascade'); `cascadeOf` names the failed create_* this op depended
+// on (so the panel can group a failed subtree).
+async function dlAdd(op, reason, kind, cascadeOf) {
+  const id = Date.now() + '-' + (++_dlSeq);
+  const entry = {
+    id, ts: Math.floor(Date.now() / 1000),
+    action: op.action, body: op.body || null, query: op.query || null,
+    reason: String(reason == null ? 'unknown error' : reason),
+    kind: kind || 'terminal',
+    attempts: op.attempts || 0,
+    cascadeOf: cascadeOf || null,
+  };
+  await kvSet('dl:' + id, entry);
+  updateOfflineBadge();
+  return entry;
+}
+async function dlList() {
+  const rows = await kvEnumerate('dl:');
+  return rows.map(r => r.value).sort((a, b) => (a.ts - b.ts) || String(a.id).localeCompare(String(b.id)));
+}
+async function dlRemove(id) { await kvDel('dl:' + id); updateOfflineBadge(); }
+async function dlCount() { return (await kvEnumerate('dl:')).length; }
+
+// The path a create_* op would create — used to track failed creates so dependent
+// ops can be dead-lettered with a cascade context instead of noisy standalone 404s.
+function dlCreatedPath(op) {
+  if (!op || !op.body) return null;
+  const b = op.body;
+  if (op.action === 'create_page') return (b.parent ? b.parent + '/' : '') + b.name + '.json';
+  if (op.action === 'create_folder' || op.action === 'create_project') return (b.parent ? b.parent + '/' : '') + b.name;
+  return null;
+}
+// If this op is itself a create_* that just failed, remember its target path.
+function dlMarkFailedCreate(op, set) { const p = dlCreatedPath(op); if (p) set.add(p); }
+// Does this op target something under a create_* that already failed this drain?
+// Returns that failed-create path (for cascadeOf), or null.
+function dlCascadeParent(op, set) {
+  if (!op || !op.body || !set.size) return null;
+  const targets = [];
+  if (op.body.path) targets.push(String(op.body.path));
+  if (op.body.parent) targets.push(String(op.body.parent));
+  for (const t of targets) {
+    for (const f of set) {
+      const fFolder = f.replace(/\.json$/, '');
+      if (t === f || t === fFolder || t.startsWith(fFolder + '/')) return f;
+    }
+  }
+  return null;
+}
 
 function setOffline(on) {
   if (offlineState === on) return;
@@ -173,27 +290,66 @@ function scheduleReconnect() {
   reconnectTimer = setTimeout(() => { reconnectTimer = null; probeBackend(); }, reconnectDelay);
 }
 
-// Replay queued writes to the backend in FIFO order. Stops on the first network
-// failure (still offline); reconciles the tree afterward.
+// Replay queued writes to the backend in FIFO order. Network/5xx failures stop the
+// drain (still offline; op stays queued). A server that *rejects* an op — a terminal
+// 4xx, a transient error that outlasts its retries, or a conflict-force that still
+// errors — parks it as a dead-letter (never a bare shift() → never a silent drop).
+// Reconciles the tree once the queue empties.
 let flushing = false;
 async function flushQueue() {
   if (flushing || !syncQueue.length) return;
   flushing = true;
-  let conflicts = 0;
+  let conflicts = 0, dead = 0;
+  const failedCreates = new Set(); // create_* ops that terminally failed this drain
   try {
     while (syncQueue.length) {
       const op = syncQueue[0];
       let res;
       try { res = await apiFetch(op.action, op.body, op.query); }
-      catch (e) { setOffline(true); break; } // backend down again
-      // The server silently refuses a save whose baseMtime is stale (a concurrent
-      // edit landed while we were offline). Don't drop the edit: re-apply it forced.
-      // save_page snapshots the prior content into .history first, so the concurrent
-      // version is recoverable rather than lost — deterministic, never silent.
+      catch (e) { setOffline(true); break; } // network/5xx → still offline, op stays queued
+
+      // Save-conflict: the server refused a stale-baseMtime write (a concurrent edit
+      // landed while we were offline). Re-send forced — save_page snapshots the prior
+      // content into .history first, so the concurrent version is recoverable, never
+      // lost. A forced resend that STILL errors is dead-lettered (never dropped); a
+      // thrown resend means the backend went down again → stop, keep the op queued.
       if (op.action === 'save_page' && res && res.conflict) {
-        try { await apiFetch('save_page', Object.assign({}, op.body, { force: true })); conflicts++; }
+        let res2;
+        try { res2 = await apiFetch('save_page', Object.assign({}, op.body, { force: true })); }
         catch (e) { setOffline(true); break; }
+        if (res2 && res2.error) {
+          if (res2._transient) {
+            // Same transient policy as the normal-error path: a passing hiccup on the
+            // forced resend gets the 3-attempt retry, not an immediate park.
+            op.attempts = (op.attempts || 0) + 1;
+            if (op.attempts >= 3) { await dlAdd(op, res2.error, 'retryable-exhausted'); syncQueue.shift(); await saveQueue(); dead++; continue; }
+            await saveQueue(); break;
+          }
+          await dlAdd(op, res2.error, 'terminal'); dead++;
+        } else conflicts++;
+        syncQueue.shift(); await saveQueue(); updateOfflineBadge();
+        continue;
       }
+
+      if (res && res.error) {
+        if (res._transient) {
+          // Reachable server, transient body (a passing hiccup): retry across flush
+          // cycles, then park. Don't spin in-loop — bump the counter, leave the op at
+          // the head, and break so the next flush (probe / focus / online) retries.
+          op.attempts = (op.attempts || 0) + 1;
+          if (op.attempts >= 3) { await dlAdd(op, res.error, 'retryable-exhausted'); syncQueue.shift(); await saveQueue(); dead++; continue; }
+          await saveQueue(); // persist the bumped attempts counter
+          break;
+        }
+        // Terminal 4xx (bad name, missing parent, project-nesting rule …): can never
+        // succeed as-is → park it, tagged with the failed-create it depended on (if any)
+        // so the panel groups a failed subtree. Remember our own path if we're a create_*.
+        const cascadeOf = dlCascadeParent(op, failedCreates);
+        dlMarkFailedCreate(op, failedCreates);
+        await dlAdd(op, res.error, cascadeOf ? 'cascade' : 'terminal', cascadeOf);
+        syncQueue.shift(); await saveQueue(); dead++; continue;
+      }
+
       syncQueue.shift();
       await saveQueue();
       updateOfflineBadge();
@@ -202,11 +358,12 @@ async function flushQueue() {
       const fresh = await apiFetch('tree');     // reconcile cache with server truth
       await kvSet('tree', fresh);
       treeData = fresh; renderTree();
-      toast(conflicts
-        ? 'Synced — ' + conflicts + ' conflict' + (conflicts === 1 ? '' : 's') + ' overwritten (prior versions in History)'
-        : 'Synced');
+      if (dead) toast('Synced — ' + dead + ' change' + (dead === 1 ? '' : 's') + ' could not sync (review)');
+      else if (conflicts) toast('Synced — ' + conflicts + ' conflict' + (conflicts === 1 ? '' : 's') + ' overwritten (prior versions in History)');
+      else toast('Synced');
     }
   } finally { flushing = false; }
+  updateOfflineBadge();
 }
 
 // Keep the IndexedDB mirror current after a successful backend call.
@@ -350,7 +507,7 @@ async function enqueueReconstruct(entry) {
   }
   const walk = async (n) => {
     if (n.type === 'folder') {
-      if (n.project) await enqueue({ action: 'create_project', body: { name: n.name } });
+      if (n.project) await enqueue({ action: 'create_project', body: { name: n.name, parent: parentOf(n.path) } });
       else await enqueue({ action: 'create_folder', body: { parent: parentOf(n.path), name: n.name } });
       for (const c of (n.children || [])) await walk(c);
     } else {
@@ -498,14 +655,19 @@ async function mutateTreeCache(action, body) {
     const parent = body.path.includes('/') ? body.path.slice(0, body.path.lastIndexOf('/')) : '';
     node.name = body.newName;
     const newPath = (parent ? parent + '/' : '') + (node.type === 'folder' ? body.newName : body.newName + '.json');
+    const pairs = collectRepathPairs(node, newPath); // capture old→new BEFORE rePath mutates paths
     rePath(node, newPath);
+    await rekeyCachedPaths(pairs); // move the cached page content + local history to the new keys
   } else if (action === 'move') {
     const node = findInTree(tree, body.path); if (!node) return;
     removeFromTree(tree, body.path);
     const dest = childrenOf(body.target || ''); if (!dest) return;
     const base = node.path.split('/').pop();
-    rePath(node, (body.target ? body.target + '/' : '') + base);
+    const newPath = (body.target ? body.target + '/' : '') + base;
+    const pairs = collectRepathPairs(node, newPath);
+    rePath(node, newPath);
     dest.push(node);
+    await rekeyCachedPaths(pairs);
   } else if (action === 'reorder') {
     const list = childrenOf(body.parent || ''); if (!list || !Array.isArray(body.order)) return;
     const key = (n) => n.type === 'folder' ? n.name : n.name + '.json';
@@ -525,6 +687,33 @@ function removeFromTree(tree, path) {
 function rePath(node, newPath) {
   node.path = newPath;
   (node.children || []).forEach(c => rePath(c, newPath + '/' + (c.type === 'folder' ? c.name : c.name + '.json')));
+}
+// The [{ old, neu }] path pairs a rePath(node, newPath) will produce — computed
+// BEFORE rePath mutates node.path, so we can re-key the cached page content + local
+// history that are keyed by the OLD paths. Mirrors rePath's descent exactly.
+function collectRepathPairs(node, newPath) {
+  const pairs = [{ old: node.path, neu: newPath }];
+  (node.children || []).forEach(c => {
+    pairs.push(...collectRepathPairs(c, newPath + '/' + (c.type === 'folder' ? c.name : c.name + '.json')));
+  });
+  return pairs;
+}
+// After an offline rename/move, follow the tree change through the OTHER caches: move
+// each page's cached content and its local-history log from the old key to the new one
+// (old key deleted), so opening the renamed/moved page offline shows its content and
+// keeps its History — instead of a blank page keyed by a name that no longer exists.
+async function rekeyCachedPaths(pairs) {
+  try {
+    const hist = (await kvGet('history')) || {};
+    let histChanged = false;
+    for (const { old, neu } of pairs) {
+      if (old === neu) continue;
+      const page = await pageGet(old);
+      if (page !== undefined) { await pageSet(neu, page); await pageDel(old); }
+      if (hist[old]) { hist[neu] = (hist[neu] || []).concat(hist[old]); delete hist[old]; histChanged = true; }
+    }
+    if (histChanged) await kvSet('history', hist);
+  } catch (e) {}
 }
 
 /* ---------- PRIME OFFLINE CACHE ----------
@@ -562,21 +751,56 @@ async function primeOfflineCache(btn) {
     + (failed ? ' · ' + failed + ' skipped' : ''));
 }
 
-function updateOfflineBadge() {
+// Cached dead-letter count, refreshed on every badge update — lets the SYNCHRONOUS
+// menu/command-palette builders decide whether to surface the review entry without an
+// await. Dead-letters only ever appear after a flush attempt (which calls
+// updateOfflineBadge), so this is fresh whenever there's anything to show.
+let _dlCountCache = 0;
+function dlCountCached() { return _dlCountCache; }
+
+async function updateOfflineBadge() {
   let b = document.getElementById('offlineBadge');
   if (!b) {
     b = document.createElement('div'); b.id = 'offlineBadge'; b.className = 'offline-badge';
-    // Tap to force a recheck: probe the server when offline, else flush any queue.
-    b.addEventListener('click', () => { if (offlineState) probeBackend(); else if (syncQueue.length) flushQueue(); });
+    // Operable by keyboard + assistive tech: it's a real control (opens the recovery
+    // panel / forces a recheck), not just a status readout. role=button + tabindex make
+    // it focusable; Enter/Space mirror the click.
+    b.setAttribute('role', 'button');
+    b.setAttribute('tabindex', '0');
+    b.setAttribute('aria-live', 'polite');
+    b.addEventListener('click', onBadgeClick);
+    b.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onBadgeClick(); } });
     document.body.appendChild(b);
   }
   const pending = syncQueue.length;
-  if (!offlineState && !pending) { b.style.display = 'none'; return; }
+  let dl = 0;
+  try { dl = await dlCount(); } catch (e) {}
+  _dlCountCache = dl;
+  if (!offlineState && !pending && !dl) { b.style.display = 'none'; b.setAttribute('aria-label', ''); return; }
   b.style.display = 'block';
-  b.textContent = offlineState
-    ? (pending ? '⚠ Offline · ' + pending + ' change' + (pending === 1 ? '' : 's') + ' queued' : '⚠ Offline (local only)')
-    : (pending ? '↻ Syncing ' + pending + '…' : '');
-  b.classList.toggle('warn', offlineState);
+  if (dl) {
+    // Rejected data needs attention — a distinct, higher-urgency DANGER (red) state, so
+    // it reads as more serious than routine amber "Offline / queued".
+    b.textContent = '⚠ ' + dl + ' change' + (dl === 1 ? '' : 's') + ' could not sync — review';
+    b.classList.add('danger'); b.classList.remove('warn');
+  } else {
+    b.textContent = offlineState
+      ? (pending ? '⚠ Offline · ' + pending + ' change' + (pending === 1 ? '' : 's') + ' queued' : '⚠ Offline (local only)')
+      : (pending ? '↻ Syncing ' + pending + '…' : '');
+    b.classList.remove('danger');
+    b.classList.toggle('warn', offlineState);
+  }
+  b.setAttribute('aria-label', b.textContent + (dl ? ' — activate to review' : ''));
+}
+
+// Badge activate (click / Enter / Space): dead-letters present → open the review panel;
+// else force a recheck (probe the server when offline, or flush a pending queue).
+function onBadgeClick() {
+  dlCount().then(n => {
+    if (n > 0 && typeof openDeadLetterPanel === 'function') openDeadLetterPanel();
+    else if (offlineState) probeBackend();
+    else if (syncQueue.length) flushQueue();
+  }).catch(() => { if (offlineState) probeBackend(); else if (syncQueue.length) flushQueue(); });
 }
 
 // Recover on reconnection signals — but only a real probe success clears offline.

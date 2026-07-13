@@ -76,6 +76,24 @@
   t('uniqueCopyName inner "copy" is not stripped', uniqueCopyName('My copy shop', new Set()), 'My copy shop copy');
   t('uniqueCopyName accepts an Array', uniqueCopyName('Foo', ['Foo']), 'Foo copy');
 
+  // miniMenuWrapIndex: ArrowUp/Down index wrap for the accessible ⋯ menus.
+  t('miniMenuWrapIndex mid-range unchanged', miniMenuWrapIndex(2, 5), 2);
+  t('miniMenuWrapIndex first item', miniMenuWrapIndex(0, 5), 0);
+  t('miniMenuWrapIndex last item', miniMenuWrapIndex(4, 5), 4);
+  t('miniMenuWrapIndex past end wraps to 0', miniMenuWrapIndex(5, 5), 0);
+  t('miniMenuWrapIndex before start wraps to last', miniMenuWrapIndex(-1, 5), 4);
+  t('miniMenuWrapIndex far-negative wraps in range', miniMenuWrapIndex(-6, 5), 4);
+  t('miniMenuWrapIndex empty menu → -1', miniMenuWrapIndex(0, 0), -1);
+  t('miniMenuWrapIndex single item stays 0', miniMenuWrapIndex(1, 1), 0);
+
+  // miniMenuHasCheck: does a menu reserve the icon column (any checkable row)?
+  t('miniMenuHasCheck none checkable → false', miniMenuHasCheck([{ label: 'a' }, { label: 'b' }]), false);
+  t('miniMenuHasCheck icon-only is not checkable', miniMenuHasCheck([{ icon: '★', label: 'a' }]), false);
+  t('miniMenuHasCheck a checked:true row → true', miniMenuHasCheck([{ label: 'a' }, { label: 'b', checked: true }]), true);
+  t('miniMenuHasCheck checked:false still counts (defined)', miniMenuHasCheck([{ label: 'a', checked: false }]), true);
+  t('miniMenuHasCheck ignores dividers', miniMenuHasCheck([{ divider: true }, { label: 'a' }]), false);
+  t('miniMenuHasCheck empty list → false', miniMenuHasCheck([]), false);
+
   // Duplicate deep-copy + insert-below: the copy lands at idx+1 and is independent.
   {
     const arr = [{ code: 'a' }, { code: 'b' }];
@@ -543,6 +561,10 @@
       // kvGet/kvSet/pageGet/pageSet wrappers the functions use, so we seed/read the
       // active namespace AND snapshot/restore exactly the keys under test (safe to run).
       for (const k of ['tree', 'queue', 'trash', 'history']) snap[k] = await kvGet(k);
+      // Dead-letters are per-op namespaced kv entries (dl:<id>) — snapshot every one
+      // so a failed run can NEVER corrupt a contributor's real cache. Restored in
+      // `finally` alongside the four keys above.
+      const dlSnap = await kvEnumerate('dl:'); // [{ key:'dl:<id>', value }]
 
       // Run-id prefix for every seeded page path: a killed run's leftovers can
       // never collide with (or false-pass) the next run's seeds.
@@ -653,6 +675,155 @@
         }
       }
 
+      // dead-letter queue: a server that REJECTS an op parks it (never a silent drop).
+      // Same stub pattern; updateOfflineBadge is now async so it's stubbed async too.
+      {
+        const _fetch = window.apiFetch, _render = window.renderTree, _toast = window.toast,
+              _badge = window.updateOfflineBadge, _setOff = window.setOffline, _tree = treeData,
+              _panel = window.openDeadLetterPanel;
+        const clearDL = async () => { for (const r of await kvEnumerate('dl:')) await kvDel(r.key); };
+        try {
+          window.renderTree = () => {}; window.toast = () => {};
+          window.updateOfflineBadge = async () => {}; window.setOffline = () => {};
+          window.openDeadLetterPanel = () => {};
+          await clearDL();
+
+          // a) terminal error (4xx, no _transient) → parked; the rest of the queue drains
+          window.apiFetch = async (action) => {
+            if (action === 'create_folder') return { error: 'invalid name' };
+            return action === 'tree' ? [] : { ok: true };
+          };
+          syncQueue.length = 0;
+          syncQueue.push({ action: 'create_folder', body: { name: RUN + 'bad', parent: '' } },
+                         { action: 'create_page', body: { name: RUN + 'ok', parent: '' } });
+          await flushQueue();
+          ta('terminal error drains the queue (no stuck op)', syncQueue.length, 0);
+          let dls = await dlList();
+          ta('terminal error parks exactly one dead-letter', dls.length, 1);
+          ta('dead-letter records the action', dls[0] && dls[0].action, 'create_folder');
+          ta('dead-letter records the server reason', dls[0] && dls[0].reason, 'invalid name');
+          ta('dead-letter kind is terminal', dls[0] && dls[0].kind, 'terminal');
+          await clearDL();
+
+          // b) transient error bumps attempts each cycle, parks only at the 3rd
+          window.apiFetch = async (action) => {
+            if (action === 'save_page') return { error: 'malformed server response (200)', _transient: true };
+            return action === 'tree' ? [] : { ok: true };
+          };
+          syncQueue.length = 0;
+          syncQueue.push({ action: 'save_page', body: { path: RUN + 'T.json', data: {} } });
+          await flushQueue();
+          ta('transient error keeps the op queued (attempt 1)', syncQueue.length, 1);
+          ta('transient error bumps attempts to 1', syncQueue[0] && syncQueue[0].attempts, 1);
+          ta('transient error parks nothing yet', (await dlList()).length, 0);
+          await flushQueue(); // attempt 2
+          await flushQueue(); // attempt 3 → park
+          ta('transient error parks after 3 attempts', syncQueue.length, 0);
+          dls = await dlList();
+          ta('exhausted-transient parks one dead-letter', dls.length, 1);
+          ta('exhausted-transient kind', dls[0] && dls[0].kind, 'retryable-exhausted');
+          await clearDL();
+
+          // c) conflict-force that STILL errors → parked (never a bare shift/silent drop)
+          window.apiFetch = async (action, body) => {
+            if (action === 'save_page') return (body && body.force) ? { error: 'failed to write page' } : { conflict: true };
+            return action === 'tree' ? [] : { ok: true };
+          };
+          syncQueue.length = 0;
+          syncQueue.push({ action: 'save_page', body: { path: RUN + 'K.json', data: {} } });
+          await flushQueue();
+          ta('conflict-force error drains the op', syncQueue.length, 0);
+          ta('conflict-force error parks a dead-letter (no silent drop)', (await dlList()).length, 1);
+          await clearDL();
+
+          // c2) conflict-force whose forced resend is TRANSIENT → gets the SAME 3-attempt
+          // retry as a normal transient (not parked on the first hiccup) — LOW-2 consistency
+          window.apiFetch = async (action, body) => {
+            if (action === 'save_page') return (body && body.force) ? { error: 'malformed server response (200)', _transient: true } : { conflict: true };
+            return action === 'tree' ? [] : { ok: true };
+          };
+          syncQueue.length = 0;
+          syncQueue.push({ action: 'save_page', body: { path: RUN + 'CT.json', data: {} } });
+          await flushQueue();
+          ta('conflict-force transient keeps the op queued (attempt 1, not parked)', syncQueue.length, 1);
+          ta('conflict-force transient bumps attempts', syncQueue[0] && syncQueue[0].attempts, 1);
+          ta('conflict-force transient parks nothing yet', (await dlList()).length, 0);
+          await flushQueue(); await flushQueue(); // attempts 2, 3 → park
+          ta('conflict-force transient parks after 3 attempts', (await dlList()).length, 1);
+          await clearDL();
+
+          // d) retry re-enqueues a parked op in the ACTIVE namespace; dlRemove clears it
+          const parked = await dlAdd({ action: 'save_page', body: { path: RUN + 'R.json', data: {} } }, 'boom', 'terminal');
+          ta('dlAdd stores one dead-letter', (await dlCount()), 1);
+          syncQueue.length = 0;
+          await enqueue({ action: parked.action, body: parked.body, query: parked.query });
+          await dlRemove(parked.id);
+          ta('retry re-enqueues the op', syncQueue.some(o => o.action === 'save_page' && o.body.path === RUN + 'R.json'), true);
+          ta('retry clears the dead-letter', (await dlCount()), 0);
+          syncQueue.length = 0;
+        } finally {
+          window.apiFetch = _fetch; window.renderTree = _render; window.toast = _toast;
+          window.updateOfflineBadge = _badge; window.setOffline = _setOff; treeData = _tree;
+          window.openDeadLetterPanel = _panel;
+          await clearDL();
+        }
+      }
+
+      // __codemanAdoptInto MERGES (never overwrites) the target namespace's queue, so
+      // work already parked for the target server can't be clobbered by an adoption.
+      {
+        const targetUrl = 'http://adopt-test.example/' + RUN;
+        const toNS = 'ns:' + nsHash(targetUrl);
+        try {
+          await idbSet('kv', toNS + NS_SEP + 'queue', [{ action: 'create_page', body: { name: 'pre', parent: '' } }]);
+          syncQueue.length = 0;
+          syncQueue.push({ action: 'save_page', body: { path: RUN + 'S.json', data: {} } });
+          await saveQueue();
+          await window.__codemanAdoptInto(targetUrl);
+          const merged = await idbGet('kv', toNS + NS_SEP + 'queue');
+          ta('adopt-into concats target + source queue (merge, not overwrite)', merged.length, 2);
+          ta('adopt-into keeps the pre-existing target op first', merged[0].body.name, 'pre');
+          ta('adopt-into appends the source op', merged[1].body.path, RUN + 'S.json');
+        } finally {
+          for (const k of ['queue', 'tree', 'trash', 'history', 'colsorts']) await idbDel('kv', toNS + NS_SEP + k);
+          syncQueue.length = 0;
+        }
+      }
+
+      // dirty-guard contract (regression guard, finding #10): scheduleSave is the SINGLE
+      // choke point that marks a page dirty, and flushSave writes ONLY a dirty page. If a
+      // future mutation path forgets scheduleSave, this fails loudly.
+      {
+        const _cpp = currentPagePath, _cpd = currentPageData, _api = window.api;
+        try {
+          const DGP = RUN + 'dirty/Guard.json';
+          currentPagePath = DGP; currentPageData = { title: 'g', sections: [] };
+          pageDirty.clear();
+          ta('page starts clean (not in pageDirty)', pageDirty.has(DGP), false);
+          scheduleSave();
+          if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; } // don't let the 500ms debounce fire
+          ta('scheduleSave marks the page dirty (the choke point)', pageDirty.has(DGP), true);
+
+          let saves = 0;
+          window.api = async (a) => { if (a === 'save_page') saves++; return { ok: true, mtime: 1 }; };
+          // flushSave on a CLEAN page must write nothing…
+          pageDirty.clear();
+          flushSave();
+          await Promise.resolve();
+          ta('flushSave on a clean page writes nothing', saves, 0);
+          // …and on a DIRTY page it writes, then clears the flag.
+          pageDirty.add(DGP);
+          flushSave();
+          await Promise.resolve(); await Promise.resolve();
+          ta('flushSave on a dirty page writes', saves, 1);
+          ta('flushSave clears dirty after a successful write', pageDirty.has(DGP), false);
+        } finally {
+          currentPagePath = _cpp; currentPageData = _cpd; window.api = _api;
+          pageDirty.clear();
+          if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+        }
+      }
+
       // importPages negatives: malformed / wrong-shape input fails gracefully —
       // error surfaced via toast, no crash, nothing imported. The hidden file
       // input is captured via a createElement shim; its click() is stubbed so no
@@ -712,6 +883,11 @@
       for (const k of ['tree', 'queue', 'trash', 'history']) {
         if (snap[k] !== undefined) await kvSet(k, snap[k]); else await kvDel(k);
       }
+      // remove any dl: entries this run created, then restore the snapshotted originals
+      try {
+        for (const r of await kvEnumerate('dl:')) await kvDel(r.key);
+        for (const r of dlSnap) await kvSet(r.key, r.value);
+      } catch (e) {}
       syncQueue.length = 0; syncQueue.push(...savedQueue);
       document.getElementById('summary').innerHTML =
         `<span class="${fail ? 'fail' : 'pass'}">${pass} passed, ${fail} failed</span>`;

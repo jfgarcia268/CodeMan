@@ -569,6 +569,7 @@ function renderPageBody() {
   exportBtn.className = 'secondary page-act-demote';
   exportBtn.textContent = '⤓ Export';
   exportBtn.title = 'Export this page';
+  markMenuTrigger(exportBtn);
   exportBtn.addEventListener('click', () => exportMenu(exportBtn));
   const allCollapsed = allSectionsCollapsed(currentPageData.sections);
   const foldBtn = document.createElement('button');
@@ -605,6 +606,7 @@ function renderPageBody() {
   headerMoreBtn.className = 'secondary page-header-more';
   headerMoreBtn.textContent = '⋯';
   headerMoreBtn.title = 'More page actions';
+  markMenuTrigger(headerMoreBtn);
   headerMoreBtn.addEventListener('click', () => {
     const allCollapsedNow = allSectionsCollapsed(currentPageData.sections);
     showMiniMenu(headerMoreBtn, [
@@ -1055,37 +1057,156 @@ function convertBlock(block, kind) {
   else { block.type = 'plaintext'; block.code = text; }   // code
 }
 
-// A small popup menu anchored under a button. items: [{icon,label,active,onClick}].
-// Reuses the .mini-menu styling (shared with the "Copy as…" menu).
-function showMiniMenu(anchorEl, items) {
+// Pure: wrap a menu index into [0,n) so ArrowUp/Down cycle past both ends
+// (returns -1 for an empty menu). Extracted so it's unit-testable in isolation.
+function miniMenuWrapIndex(i, n) {
+  if (!n) return -1;
+  return ((i % n) + n) % n;
+}
+
+// Pure: is this a "checkable" menu — does any option carry a checked state? A
+// checkable menu (e.g. the per-column sort picker) reserves the 24px icon column
+// on EVERY row so the checked (✓) and unchecked rows stay label-aligned. Menus
+// with no checkable item keep the per-item `it.icon` behavior exactly as before
+// (icon column only on rows that supply an icon), so no existing menu shifts.
+function miniMenuHasCheck(items) {
+  return items.some(it => it && !it.divider && it.checked !== undefined);
+}
+
+// The single accessible popup-menu implementation, anchored to a button.
+// items: [{icon,label,active,checked,onClick}] (or {divider:true} for a separator).
+// A `checked` (boolean) makes the option a role="menuitemradio" and marks the menu
+// "checkable" — every row then reserves the icon column and checked rows show ✓
+// (the per-column sort picker). Reuses the .mini-menu styling (shared with the
+// Export + sidebar-⋯ + colsort + copy-as menus).
+//
+// Accessibility (ARIA menu-button pattern): the container is role="menu", each
+// option role="menuitem" (roving tabindex=-1), dividers role="separator"; the
+// anchor gets aria-haspopup="menu" + aria-expanded toggled. Keyboard: ArrowUp/
+// Down wrap, Home/End jump, Enter/Space activate, Escape/Tab close. Focus moves
+// to the first item on open. Keyboard dismissal (Escape/Tab) returns focus to the
+// anchor (failing soft if it was removed by a re-render); pointer dismissal
+// (outside-click/scroll) and item activation do NOT force focus — the click target
+// or the invoked action (which often opens its own modal/panel) owns focus instead.
+//
+// Three positioning modes via opts, each preserving a pre-existing behavior
+// exactly (zero positional regression is the acceptance criterion):
+//   default            — clamp to the viewport + flip upward near the bottom edge.
+//   opts.align:'right' — right-align under the anchor (openMoreMenu: left=r.right,
+//                        translateX(-100%)) so it tucks under the sidebar.
+//   opts.anchorRect    — plain position from a caller-supplied rect, no clamp/flip
+//                        (the exportMenu submenu case).
+function showMiniMenu(anchorEl, items, opts = {}) {
   const open = document.querySelector('.mini-menu');
-  if (open) { const wasMine = open._anchor === anchorEl; open.remove(); if (wasMine) return; }
+  if (open) { const wasMine = open._anchor === anchorEl; (open._close || open.remove).call(open, false); if (wasMine) return; }
   const menu = document.createElement('div');
   menu.className = 'mini-menu'; menu._anchor = anchorEl;
+  menu.setAttribute('role', 'menu');
+  // Name the menu for a screen reader (else it's just "menu, N items"): prefer the
+  // trigger's title, fall back to its aria-label / trimmed text.
+  const menuName = anchorEl && (anchorEl.getAttribute('title') || anchorEl.getAttribute('aria-label') || (anchorEl.textContent || '').trim());
+  if (menuName) menu.setAttribute('aria-label', menuName);
+  menu.tabIndex = -1;
+  const optEls = [];
+  const checkable = miniMenuHasCheck(items);
+  let checkedIdx = -1;
   items.forEach(it => {
-    if (it.divider) { const d = document.createElement('div'); d.className = 'mini-menu-sep'; menu.appendChild(d); return; }
+    if (it.divider) { const d = document.createElement('div'); d.className = 'mini-menu-sep'; d.setAttribute('role', 'separator'); menu.appendChild(d); return; }
     const o = document.createElement('div');
     o.className = 'mini-menu-opt' + (it.active ? ' active' : '');
-    if (it.icon) { const ic = document.createElement('span'); ic.className = 'mm-ic'; ic.textContent = it.icon; o.appendChild(ic); }
+    o.tabIndex = -1;
+    if (it.checked !== undefined) { o.setAttribute('role', 'menuitemradio'); o.setAttribute('aria-checked', it.checked ? 'true' : 'false'); }
+    else { o.setAttribute('role', 'menuitem'); if (it.active) o.setAttribute('aria-current', 'true'); }
+    // Render the icon column when this row has an icon OR the menu is checkable
+    // (then every row reserves it, ✓ on checked rows) — keeps labels aligned.
+    if (it.icon || checkable) { const ic = document.createElement('span'); ic.className = 'mm-ic'; ic.textContent = it.icon || (it.checked ? '✓' : ''); o.appendChild(ic); }
     const lbl = document.createElement('span'); lbl.textContent = it.label; o.appendChild(lbl);
-    o.onclick = () => { menu.remove(); it.onClick && it.onClick(); };
+    // On activation: close, run the action, then keep keyboard focus sane. If the
+    // action opened a modal/panel (focus already moved off <body>), leave it be. If
+    // it only re-rendered/toasted (focus fell to <body>), restore focus to a caller-
+    // supplied post-render target (it.refocus, for anchors re-rendered away) or the
+    // surviving trigger — so the next Tab doesn't restart at the top of the page.
+    o.onclick = () => {
+      close(false);
+      it.onClick && it.onClick();
+      if (document.activeElement === document.body || !document.activeElement) {
+        const t = (it.refocus && it.refocus()) || (document.contains(anchorEl) ? anchorEl : null);
+        if (t && document.contains(t) && typeof t.focus === 'function') t.focus();
+      }
+    };
     menu.appendChild(o);
+    if (checkedIdx < 0 && it.checked === true) checkedIdx = optEls.length;
+    optEls.push(o);
   });
   document.body.appendChild(menu);
-  const r = anchorEl.getBoundingClientRect();
-  const mw = menu.offsetWidth, mh = menu.offsetHeight;
-  menu.style.left = Math.round(Math.min(window.innerWidth - 8 - mw, Math.max(8, r.left))) + 'px';
-  // open downward, or upward if it would overflow the viewport bottom
-  menu.style.top = Math.round(r.bottom + 4 + mh > window.innerHeight ? Math.max(8, r.top - 4 - mh) : r.bottom + 4) + 'px';
-  const off = (e) => { if (!menu.contains(e.target) && e.target !== anchorEl) { menu.remove(); document.removeEventListener('mousedown', off); } };
-  setTimeout(() => document.addEventListener('mousedown', off), 0);
+
+  // --- positioning (three preserved modes) ---
+  if (opts.anchorRect) {
+    // exportMenu: plain position from the supplied rect (no clamp, no flip).
+    const rect = opts.anchorRect;
+    menu.style.top = Math.round(rect.bottom + 4) + 'px';
+    menu.style.left = Math.round(rect.left) + 'px';
+  } else {
+    const r = anchorEl.getBoundingClientRect();
+    if (opts.align === 'right') {
+      // openMoreMenu: right-align under the ⋯ button so it stays under the sidebar.
+      menu.style.top = Math.round(r.bottom + 4) + 'px';
+      menu.style.left = Math.round(r.right) + 'px';
+      menu.style.transform = 'translateX(-100%)';
+    } else {
+      const mw = menu.offsetWidth, mh = menu.offsetHeight;
+      menu.style.left = Math.round(Math.min(window.innerWidth - 8 - mw, Math.max(8, r.left))) + 'px';
+      // open downward, or upward if it would overflow the viewport bottom
+      menu.style.top = Math.round(r.bottom + 4 + mh > window.innerHeight ? Math.max(8, r.top - 4 - mh) : r.bottom + 4) + 'px';
+    }
+  }
+
+  // --- open state + close/focus-return ---
+  // Triggers carry aria-haspopup statically (markMenuTrigger); ensure it as a safety
+  // net for any dynamic anchor, then toggle only aria-expanded here.
+  if (anchorEl) { if (!anchorEl.hasAttribute('aria-haspopup')) anchorEl.setAttribute('aria-haspopup', 'menu'); anchorEl.setAttribute('aria-expanded', 'true'); }
+  let closed = false;
+  const off = (e) => { if (!menu.contains(e.target) && e.target !== anchorEl) close(false); };
+  const onScroll = () => close(false);
+  function close(restoreFocus) {
+    if (closed) return; closed = true;
+    menu.remove();
+    document.removeEventListener('mousedown', off);
+    window.removeEventListener('scroll', onScroll, true);
+    if (anchorEl) anchorEl.setAttribute('aria-expanded', 'false');
+    if (restoreFocus && anchorEl && document.contains(anchorEl)) anchorEl.focus();
+  }
+  menu._close = close;
+
+  // --- keyboard navigation ---
+  let idx = -1;
+  const focusAt = (i) => { idx = miniMenuWrapIndex(i, optEls.length); if (idx >= 0) optEls[idx].focus(); };
+  menu.addEventListener('keydown', (e) => {
+    switch (e.key) {
+      case 'ArrowDown': e.preventDefault(); focusAt(idx + 1); break;
+      case 'ArrowUp': e.preventDefault(); focusAt(idx - 1); break;
+      case 'Home': e.preventDefault(); focusAt(0); break;
+      case 'End': e.preventDefault(); focusAt(optEls.length - 1); break;
+      case 'Enter': case ' ': e.preventDefault(); if (idx >= 0) optEls[idx].click(); break;
+      case 'Escape': e.preventDefault(); close(true); break;
+      case 'Tab': close(true); break; // let focus land back on the anchor, in tab order
+    }
+  });
+  // track the focused item so click-then-arrow keeps a sane starting index
+  optEls.forEach((o, i) => o.addEventListener('focus', () => { idx = i; }));
+
+  // Open focused on the current selection in a checkable menu (e.g. the active sort),
+  // else on the first item.
+  focusAt(checkable && checkedIdx >= 0 ? checkedIdx : 0);
+  // defer the dismiss listeners so the opening click/scroll-into-view don't self-close
+  setTimeout(() => { document.addEventListener('mousedown', off); window.addEventListener('scroll', onScroll, true); }, 0);
 }
 
 // The per-block "type" switch (replaces the old ¶ / T toggles). Same on every
 // block kind, so converting is one consistent control everywhere.
 function makeTypeMenuButton(block) {
   const cur = BLOCK_KINDS.find(k => k.kind === blockKind(block));
-  const btn = mkBtn((cur ? cur.label : 'Type') + ' ▾', () => {
+  const btn = menuBtn((cur ? cur.label : 'Type') + ' ▾', () => {
     showMiniMenu(btn, BLOCK_KINDS.map(k => ({
       icon: k.icon, label: k.label, active: blockKind(block) === k.kind,
       onClick: () => { convertBlock(block, k.kind); renderPage(); scheduleSave(); },
@@ -1256,7 +1377,7 @@ function renderSection(section, parentArray, idx, isSub, parentBlocks) {
   // Declutter: Duplicate / Variables / Dissolve fold behind a ⋯ menu (the last
   // two are CSS-hidden and proxied via .click() so their exact handlers run — incl.
   // secVarToggle's anyBlockVars disabled-guard/toast). ⛶ Merge + ✕ Delete stay inline.
-  const secOverflow = mkBtn('⋯', () => {
+  const secOverflow = menuBtn('⋯', () => {
     const sectionVarsOnNow = !!section.varsOn && !anyBlockVars;
     const items = [
       { icon: '❐', label: 'Duplicate section', onClick: () => duplicateSection(section, parentArray, idx) },
@@ -1317,7 +1438,7 @@ function renderSection(section, parentArray, idx, isSub, parentBlocks) {
   const tabActions = document.createElement('div');
   tabActions.className = 'tab-actions';
   // One "+ Add" menu lists every block kind — scales without piling up buttons.
-  const addMenuBtn = mkBtn('+ Add ▾', () => {
+  const addMenuBtn = menuBtn('+ Add ▾', () => {
     showMiniMenu(addMenuBtn, BLOCK_KINDS.map(k => ({
       icon: k.icon, label: k.label,
       onClick: () => { content.blocks.push(newBlockOfKind(k.kind)); renderPage(); scheduleSave(); },
@@ -1339,7 +1460,7 @@ function renderSection(section, parentArray, idx, isSub, parentBlocks) {
     // (each tag removable + Add tag), and the section's ⛶ Merge bar is relocated out
     // of the body up onto this same header row — one tidy row instead of three.
     const n = (section.tags || []).length;
-    const tagsBtn = mkBtn('🏷 ' + n, () => {
+    const tagsBtn = menuBtn('🏷 ' + n, () => {
       const items = (section.tags || []).map((t, i) => ({
         icon: '✕', label: t, onClick: () => removeTag(section, i),
       }));
@@ -1744,7 +1865,7 @@ function renderChecklistBlock(block, parentArray, idx) {
 
   // Mobile: fold the convert-type / Duplicate / Clear-done controls behind a ⋯ menu
   // (same pattern as code blocks) so the toolbar is just [label · ⧉ · ⋯ · ✕].
-  const overflowBtn = mkBtn('⋯', () => {
+  const overflowBtn = menuBtn('⋯', () => {
     showMiniMenu(overflowBtn, [
       { icon: '❐', label: 'Duplicate block', onClick: () => dupBtn.click() },
       { icon: '⊘', label: 'Clear done', onClick: () => clearBtn.click() },
@@ -1996,7 +2117,7 @@ function renderRichBlock(block, parentArray, idx) {
   // Mobile: fold Duplicate + convert-type behind a ⋯ menu (mirrors code blocks) so
   // the toolbar is just [label · ✎/✓ Cancel · ⧉ · ⋯ · ✕]. Sync the surface HTML into
   // block.code before converting so the new kind keeps the current text.
-  const overflowBtn = mkBtn('⋯', () => {
+  const overflowBtn = menuBtn('⋯', () => {
     showMiniMenu(overflowBtn, [
       { icon: '❐', label: 'Duplicate block', onClick: () => dupBtn.click() },
       { divider: true },
@@ -2166,7 +2287,7 @@ function renderCsvBlock(block, parentArray, idx) {
   const dupBtn = mkBtn('Duplicate', () => duplicateBlock(parentArray, idx));
   dupBtn.className = 'secondary block-dup';
 
-  const overflowBtn = mkBtn('⋯', () => {
+  const overflowBtn = menuBtn('⋯', () => {
     showMiniMenu(overflowBtn, [
       { icon: '❐', label: 'Duplicate block', onClick: () => dupBtn.click() },
       { divider: true },
@@ -2432,7 +2553,7 @@ function renderJsonBlock(block, parentArray, idx) {
     toast('Formatted');
   };
 
-  const overflowBtn = mkBtn('⋯', () => {
+  const overflowBtn = menuBtn('⋯', () => {
     showMiniMenu(overflowBtn, [
       { icon: '❐', label: 'Duplicate block', onClick: () => dupBtn.click() },
       { icon: '{ }', label: 'Format (pretty-print)', onClick: () => formatJsonBlock() },
@@ -2643,21 +2764,16 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     );
     return opts;
   }
-  const copyAsBtn = mkBtn('▾', () => {
-    const existing = document.querySelector('.mini-menu');
-    if (existing) { existing.remove(); return; }
-    const menu = document.createElement('div'); menu.className = 'mini-menu';
+  const copyAsBtn = menuBtn('▾', () => {
+    // Route through the shared accessible menu. Preserve the bespoke right-edge
+    // clamp exactly by handing showMiniMenu a rect whose left is max(8, r.right-200)
+    // (anchorRect mode = plain top/left from the rect, no further clamp/flip) — the
+    // popup still anchors to the copy-as button's own position (CLAUDE.md gotcha).
     const r = copyAsBtn.getBoundingClientRect();
-    menu.style.top = Math.round(r.bottom + 4) + 'px';
-    menu.style.left = Math.round(Math.max(8, r.right - 200)) + 'px';
-    copyAsOptions().forEach(([label, text]) => {
-      const o = document.createElement('div'); o.className = 'mini-menu-opt'; o.textContent = label;
-      o.onclick = () => { menu.remove(); copyText(text).then(ok => { if (ok) recordCopy(block); toast(ok ? 'Copied: ' + label : 'Copy failed'); }); };
-      menu.appendChild(o);
-    });
-    document.body.appendChild(menu);
-    const off = (e) => { if (!menu.contains(e.target) && e.target !== copyAsBtn) { menu.remove(); document.removeEventListener('mousedown', off); } };
-    setTimeout(() => document.addEventListener('mousedown', off), 0);
+    showMiniMenu(copyAsBtn, copyAsOptions().map(([label, text]) => ({
+      label,
+      onClick: () => copyText(text).then(ok => { if (ok) recordCopy(block); toast(ok ? 'Copied: ' + label : 'Copy failed'); }),
+    })), { anchorRect: { bottom: r.bottom, left: Math.max(8, r.right - 200) } });
   });
   copyAsBtn.className = 'secondary copy-as';
   copyAsBtn.title = 'Copy as… (Markdown, escaped string, one line)';
@@ -2715,7 +2831,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
   // rebuilt as items here (not proxied): copyAsBtn's popup anchors to its own rect,
   // which is invalid while it's hidden. Desktop never renders ⋯ (display:none unless
   // body.is-mobile), so its toolbar is unchanged.
-  const overflowBtn = mkBtn('⋯', () => {
+  const overflowBtn = menuBtn('⋯', () => {
     const items = [];
     // Duplicate leads every level's ⋯ (section/page/checklist/rich/csv/json all do) → keep it
     // first + a divider here too, so it's in one predictable spot across the app.
@@ -3036,7 +3152,17 @@ function editorCapPx() {
 
 /* ---------- SAVE ---------- */
 
+// Pages with un-persisted edits. Marked in scheduleSave() — the single choke point
+// every mutation path funnels through — and cleared in savePage() ONLY on a
+// successful, non-conflict save (a real mtime bump OR a queued-offline write, both of
+// which mean the edit is durably captured). A conflict or a thrown save keeps the page
+// dirty so the next flush retries it. flushSave() early-returns when the active page
+// isn't dirty, so a tab switch / unload on an untouched page does ZERO writes — no
+// history churn, no mtime bump (see the flushSave contract in CLAUDE.md).
+let pageDirty = new Set();
+
 function scheduleSave() {
+  if (currentPagePath) pageDirty.add(currentPagePath);
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(savePage, 500);
 }
@@ -3066,6 +3192,12 @@ async function savePage() {
     } else if (tab && res && res.mtime != null) {
       tab.baseMtime = res.mtime;
     }
+    // Durably captured (a server mtime OR a queued offline write) → no longer dirty.
+    // A conflict returned above (early return) or a thrown api() keeps it dirty so a
+    // later flush retries. But if an edit arrived mid-save (savePending), stay dirty —
+    // the finally-block re-save clears it once THAT save lands, closing any window where
+    // an unload could skip a genuinely-dirty page.
+    if (!savePending) pageDirty.delete(savedPath);
     toast('Saved');
   } finally {
     saveInFlight = false;
@@ -3086,6 +3218,7 @@ async function handleSaveConflict(path, diskMtime) {
   if (overwrite) {
     const res = await api('save_page', { path, data: tab ? tab.data : currentPageData, baseMtime: diskMtime, force: true });
     if (tab && res && res.mtime != null) tab.baseMtime = res.mtime;
+    pageDirty.delete(path);
     toast('Saved (overwrote disk version)');
   } else {
     // reload disk version into the tab
@@ -3095,6 +3228,7 @@ async function handleSaveConflict(path, diskMtime) {
     delete data._mtime;
     if (tab) { tab.data = data; tab.baseMtime = m; }
     if (activePath === path) { currentPageData = data; renderPage(); }
+    pageDirty.delete(path); // discarded our edits in favour of disk → nothing pending
     toast('Reloaded disk version');
   }
 }
@@ -3104,24 +3238,42 @@ async function handleSaveConflict(path, diskMtime) {
 function flushSave(opts) {
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
   if (!currentPagePath) return;
-  const tab = openPages.find(t => t.path === currentPagePath);
-  const body = JSON.stringify({ path: currentPagePath, data: currentPageData, force: true });
-  if (opts && opts.beacon && navigator.sendBeacon) {
-    navigator.sendBeacon('api.php?action=save_page', new Blob([body], { type: 'application/json' }));
-    // sendBeacon has no response, so we can't learn the new mtime here. Drop the
-    // cached baseMtime so the next save skips the (now-unanswerable) conflict
-    // check and re-syncs from a clean write — otherwise returning to the tab and
-    // typing one char would false-conflict against our own beacon write.
+  // Dirty guard: only write if this page actually has un-persisted edits. A tab switch
+  // / unload on an unchanged page must do NOTHING (no forced save → no history
+  // snapshot, no mtime bump). Call sites stay unconditional; the gate lives here.
+  if (!pageDirty.has(currentPagePath)) return;
+  const path = currentPagePath, data = currentPageData;
+  const tab = openPages.find(t => t.path === path);
+  if (opts && opts.keepalive) {
+    // Unload path: a keepalive fetch survives the page teardown (a normal fetch is
+    // cancelled on navigation). It carries the SAME auth headers as every other write
+    // (apiHeaders) — NEVER a header-less network write a gated server would 401. If the
+    // browser refuses it (offline, over quota), fall back to queue-routing so the edit
+    // still replays on reconnect — never a silent drop. (An IndexedDB write started in
+    // beforeunload isn't guaranteed to finish, which is why visibilitychange→hidden is
+    // the primary trigger below and beforeunload is only a backstop.)
+    const body = JSON.stringify({ path, data, force: true });
+    const requeue = () => { try { enqueue({ action: 'save_page', body: { path, data, force: true } }); } catch (e) {} };
+    try {
+      const p = fetch('api.php?action=save_page', { method: 'POST', keepalive: true, headers: apiHeaders(), body });
+      if (p && p.catch) p.catch(requeue);
+    } catch (e) { requeue(); }
+    // No usable response on unload → drop the cached baseMtime so returning to the tab
+    // and typing one char doesn't false-conflict against our own keepalive write.
     if (tab) tab.baseMtime = null;
+    pageDirty.delete(path);
     return;
   }
-  api('save_page', { path: currentPagePath, data: currentPageData, force: true })
-    .then(res => { if (tab && res && res.mtime != null) tab.baseMtime = res.mtime; });
+  api('save_page', { path, data, force: true })
+    .then(res => { if (tab && res && res.mtime != null) tab.baseMtime = res.mtime; pageDirty.delete(path); });
 }
 
-// Flush in-flight edits if the tab is closed/hidden mid-debounce.
-window.addEventListener('beforeunload', () => { if (saveTimer) flushSave({ beacon: true }); });
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden' && saveTimer) flushSave({ beacon: true }); });
+// Persist a dirty page if the tab is hidden/closed. visibilitychange→hidden is the
+// PRIMARY trigger (fires reliably on tab switch / app background, and a keepalive fetch
+// there completes); beforeunload is a best-effort backstop. Both are unconditional —
+// the dirty guard inside flushSave is the gate (an unchanged page writes nothing).
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushSave({ keepalive: true }); });
+window.addEventListener('beforeunload', () => { flushSave({ keepalive: true }); });
 
 /* ---------- INDEX ---------- */
 
