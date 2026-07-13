@@ -13,6 +13,8 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
 
 ## [Unreleased]
 
+## [1.12.0] — 2026-07-13
+
 ### Added
 - **Keyboard- & screen-reader-operable popup menus.** Every `⋯` / overflow menu (block actions,
   section, tags, per-column sort, the page-header `⋯`, the sidebar More menu, the Export submenu,
