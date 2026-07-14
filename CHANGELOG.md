@@ -13,6 +13,8 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
 
 ## [Unreleased]
 
+## [1.13.0] — 2026-07-14
+
 ### Added
 - **Accessibility: full keyboard & screen-reader reach.** Page tabs are now a proper tab strip —
   arrow keys (Left/Right, Home/End) move between them and open the page, each tab announces its

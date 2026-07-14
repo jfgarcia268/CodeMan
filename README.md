@@ -135,6 +135,10 @@ commit (and each changed page is snapshotted to history first):
 
 ![Find & replace with a match preview](docs/images/find-replace.png)
 
+The whole app is **keyboard- and screen-reader-operable** — the tree, page tabs, section
+headers, dialogs, and every `⋯`/overflow menu have arrow-key navigation, focus management,
+and ARIA roles.
+
 ### Data safety
 
 Nothing is lost by accident. Deletes go to a restorable **Trash**, every save snapshots the
