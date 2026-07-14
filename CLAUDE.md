@@ -630,6 +630,34 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   at 1200 pages). `updateSearchCapNote` (tree.js, called from `renderTree`) shows the
   `#searchCapNote` "Showing first N of M — refine your search" banner when capped, hidden otherwise.
   It's a render cap, not a server cap (search_content still scans everything) — don't remove it.
+- **`setTreeData(t)` is the SINGLE write point for `treeData` (tree.js) — no bare `treeData = …`
+  survives outside it (grep-verified).** It sets the global AND calls `invalidateTreeMemos()`, which
+  drops the `folderCounts`/`folderMeta` WeakMap caches (memoized by node identity — those aggregates
+  recurse the whole subtree, so re-render/resize/Miller-paging would otherwise re-walk it every
+  time). Every writer routes through it: `loadTree` and the four offline.js paths (`probeBackend`,
+  `flushQueue` reconcile, `restoreNodeToTree`, `mutateTreeCache`). The WeakMap is safe **because**
+  each write either replaces node objects (fresh from IndexedDB/server) or mutates in place then
+  immediately calls `setTreeData` — so a cached value can never outlive the node it summarised. **A
+  future direct `treeData =` assignment = stale counts/tags; always go through `setTreeData`.** A CI
+  grep invariant (`.github/workflows/tests.yml` `invariants` job) fails the build on any bare
+  `treeData =` in `codeman/src/` outside the declaration + `setTreeData` definition — mirroring the
+  `writeJsonAtomic` invariant; keep source comments free of a literal `treeData =` token so they
+  don't trip it.
+- **Single-column tree is LAZY-built — a collapsed folder's `.tree-children` is left unbuilt
+  (`data-lazy="1"`, empty) and constructed on first expand (tree.js `renderTreeNode` folder branch +
+  its `toggleExpand`).** This is what stops the sidebar scaling with library size (collapsed
+  `renderTree()` dropped ~12ms→~0.2ms at 1200 pages). **Consumer-path contract — anything that must
+  reach a collapsed row MUST force the build first or operate on DATA, not the DOM:** a non-empty
+  search sets `forceOpen` (filtered tree via `filterTree` is always fully built — laziness never
+  hides a result); `openPage`/`revealTreeRow`/duplicate flows call `expandAncestors` (→
+  `expandedFolders` → `renderTree` builds the chain eagerly) BEFORE scrolling to the row; persisted
+  `expandedFolders` build eagerly; keyboard ArrowRight-expand routes through `activateTreeItem →
+  click → toggleExpand` (children exist before the next `visibleTreeItems` query); drag/reorder +
+  `primeOfflineCache` walk `treeData`, not the DOM. **`toggleExpand` re-runs
+  `initRovingTabindex(#tree)` after a lazy build** so the freshly-built rows join keyboard traversal
+  with exactly one `tabindex=0` preserved (it bails when one already exists). Miller (double) already
+  renders only its 2 visible columns, so laziness there is inherent — its win is the memoized
+  aggregates. Don't add a path that touches a collapsed subtree's rows without expanding it first.
 - **`openPage` dedups concurrent/rapid opens.** It's async (awaits `get_page`), so a rapid
   double-click or N calls in one tick would each pass the "already open?" check before any push and
   create duplicate tabs. An in-flight `_openingPages` Map (editor.js) makes concurrent opens of the

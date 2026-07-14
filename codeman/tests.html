@@ -538,6 +538,35 @@
     deepSearch = savedDS; deepMatches = savedDM; deepMatchTotal = savedDT;
   })();
 
+  // memoizeByNode: cache a pure node→value fn by node identity; .invalidate() drops it.
+  (function () {
+    let calls = 0;
+    const f = memoizeByNode(n => { calls++; return { seen: n.id }; });
+    const a = { id: 1 }, b = { id: 2 };
+    const r1 = f(a);
+    t('memoizeByNode returns the fn result', r1.seen, 1);
+    t('memoizeByNode caches by node identity', f(a) === r1, true);
+    t('memoizeByNode computes once per cached node', calls, 1);
+    f(b);
+    t('memoizeByNode keys distinct nodes separately', calls, 2);
+    f.invalidate();
+    f(a);
+    t('memoizeByNode invalidate drops the cache', calls, 3);
+  })();
+
+  // folderCounts is memoized by node; a stale count survives an in-place mutation until
+  // invalidateTreeMemos() runs (which setTreeData calls on every write — the invariant).
+  (function () {
+    const node = { type: 'folder', name: 'F', path: 'F', children: [
+      { type: 'page', name: 'a', path: 'F/a.json' }
+    ] };
+    t('folderCounts counts pages (deep)', folderCounts(node).totalPages, 1);
+    node.children.push({ type: 'page', name: 'b', path: 'F/b.json' }); // mutate in place
+    t('folderCounts returns cached value pre-invalidate', folderCounts(node).totalPages, 1);
+    invalidateTreeMemos();
+    t('invalidateTreeMemos recomputes folderCounts', folderCounts(node).totalPages, 2);
+  })();
+
   document.getElementById('summary').innerHTML =
     `<span class="${fail ? 'fail' : 'pass'}">${pass} passed, ${fail} failed</span>`;
   window.__testResult = { pass, fail };
@@ -557,6 +586,22 @@
       out.appendChild(d);
     }
     try {
+      // debounce: trailing-edge coalescing of a burst into one call; cancel() drops a
+      // pending call. Real timers (short) — the search/resize coalescing rides this.
+      await new Promise(resolve => {
+        let n = 0;
+        const d = debounce(() => { n++; }, 20);
+        d(); d(); d();                             // three rapid calls
+        ta('debounce does not fire synchronously', n, 0);
+        setTimeout(() => {
+          ta('debounce coalesces a burst into one call', n, 1);
+          let m = 0;
+          const d2 = debounce(() => { m++; }, 20);
+          d2(); d2.cancel();                       // cancelled before it fires
+          setTimeout(() => { ta('debounce cancel drops the pending call', m, 0); resolve(); }, 40);
+        }, 40);
+      });
+
       // The offline cache is namespaced per server (offline.js): go through the SAME
       // kvGet/kvSet/pageGet/pageSet wrappers the functions use, so we seed/read the
       // active namespace AND snapshot/restore exactly the keys under test (safe to run).
@@ -606,6 +651,14 @@
       await offlineRestoreTrash({ id: t2[0].id });
       ta('restore-after-sync queues create_page', syncQueue.some(o => o.action === 'create_page' && o.body.name === 'Page'), true);
       ta('restore-after-sync queues forced save_page', syncQueue.some(o => o.action === 'save_page' && o.body.path === TP && o.body.force === true), true);
+
+      // mutateTreeCache rename guard (OBS-3): a malformed offline op with no newName must
+      // NOT set node.name = undefined — it returns early, leaving the cached node intact.
+      await kvSet('tree', baseTree()); syncQueue.length = 0;
+      await mutateTreeCache('rename', { path: TF });   // newName missing → guarded (returns early)
+      const guarded = await kvGet('tree');
+      ta('mutateTreeCache rename w/o newName keeps node name', guarded[0].name, TF);
+      ta('mutateTreeCache rename w/o newName keeps node path', guarded[0].path, TF);
 
       // history: record + list + get + restore
       await kvSet('history', {}); syncQueue.length = 0;

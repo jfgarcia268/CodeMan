@@ -11,6 +11,31 @@ function saveExpanded() {
   try { localStorage.setItem(EXPANDED_KEY, JSON.stringify([...expandedFolders])); } catch (e) {}
 }
 let treeData = [];
+// The SINGLE write point for the treeData global. Every write — loadTree (below) AND the
+// offline.js reconcile/restore/mutate paths — routes through here so the per-node
+// folderCounts/folderMeta memos are invalidated in lockstep. A direct reassignment
+// anywhere else would leave those aggregates stale; a CI grep invariant (tests.yml
+// `invariants` job) enforces that no bare assignment survives outside this function.
+// Reads of the global stay direct everywhere.
+function setTreeData(t) { treeData = t; invalidateTreeMemos(); }
+// Memoize a pure node→value function by node identity (WeakMap). Repeated renders
+// (sidebar resize, Miller window paging, keyboard-driven re-renders) re-request the
+// same folder aggregates; caching by the node object avoids re-walking the subtree
+// each time. .invalidate() drops the cache — driven by invalidateTreeMemos on every
+// setTreeData, which either replaces node objects or follows an in-place mutation,
+// so a cached value can never outlive the node it summarised.
+function memoizeByNode(fn) {
+  let cache = new WeakMap();
+  const wrapped = (node) => {
+    if (cache.has(node)) return cache.get(node);
+    const v = fn(node);
+    cache.set(node, v);
+    return v;
+  };
+  wrapped.invalidate = () => { cache = new WeakMap(); };
+  return wrapped;
+}
+function invalidateTreeMemos() { folderCounts.invalidate(); folderMeta.invalidate(); }
 // Per-column sort preferences for the double (Miller) layout, keyed by folder path
 // (''=root) → { field:'name'|'lang'|'kind', dir:'asc'|'desc' }. Source of truth is the
 // server (.colsort.json, fetched in loadTree); a missing entry = manual/default order.
@@ -98,7 +123,7 @@ async function loadTree() {
     api('tree'),
     api('col_sorts').catch(() => null),   // preserve col_sorts-failure tolerance
   ]);
-  treeData = tree;
+  setTreeData(tree);
   colSort = cols || {};                    // null/undefined → default {} (as today)
   renderTree();
 }
@@ -242,18 +267,20 @@ function isFolderVisibleDouble(path) {
 
 // Root row for the folder column (represents '').
 // Counts for a folder: direct subfolders, direct pages, and total pages (deep).
-function folderCounts(node) {
+// Memoized by node identity (recurses the whole subtree — expensive per Miller card
+// on a large library; invalidated on every setTreeData).
+const folderCounts = memoizeByNode(function folderCounts(node) {
   let folders = 0, pages = 0, totalPages = 0;
   (node.children || []).forEach(c => { c.type === 'folder' ? folders++ : pages++; });
   (function deep(n) {
     (n.children || []).forEach(c => { c.type === 'page' ? totalPages++ : deep(c); });
   })(node);
   return { folders, pages, totalPages };
-}
+});
 
 // Aggregate code types (all) and the 5 most common tags across every page
-// anywhere inside a folder/project.
-function folderMeta(node) {
+// anywhere inside a folder/project. Memoized by node identity (deep subtree walk).
+const folderMeta = memoizeByNode(function folderMeta(node) {
   const langs = new Set();
   const tagCounts = {};
   (function deep(n) {
@@ -266,7 +293,7 @@ function folderMeta(node) {
   })(node);
   const topTags = Object.keys(tagCounts).sort((a, b) => tagCounts[b] - tagCounts[a]).slice(0, 5);
   return { langs: [...langs], topTags };
-}
+});
 
 /* ---------- MILLER (Finder) COLUMNS — double layout ---------- */
 
@@ -1001,8 +1028,18 @@ function renderTreeNode(node, opts) {
     if (showArrow) row.setAttribute('aria-expanded', String(isOpen));
     // open vs closed folder glyph as the primary expansion cue (projects keep 📦)
     if (!node.project) icon.textContent = isOpen ? '\u{1F4C2}' : '\u{1F4C1}';
-    renderTreeNodes(node.children || [], childrenEl, opts);
-    if (hasPending && !opts.foldersOnly) childrenEl.appendChild(buildPendingRow());
+    // Lazy-build: a COLLAPSED subtree is left unbuilt (dataset.lazy flag) so the tree
+    // stops scaling with library size — an open folder still builds eagerly. The build
+    // runs on first expand (toggleExpand) below. Every consumer that must reach a
+    // collapsed row forces its ancestors open first (expandAncestors → renderTree, so
+    // isOpen is true here) or walks tree DATA, not the DOM (drag/reorder, primeOffline);
+    // a non-empty search sets forceOpen so filtered results are always fully built.
+    const buildChildren = () => {
+      renderTreeNodes(node.children || [], childrenEl, opts);
+      if (hasPending && !opts.foldersOnly) childrenEl.appendChild(buildPendingRow());
+    };
+    if (isOpen) buildChildren();
+    else childrenEl.dataset.lazy = '1';
     el.appendChild(childrenEl);
 
     const toggleExpand = () => {
@@ -1011,8 +1048,18 @@ function renderTreeNode(node, opts) {
       row.classList.toggle('expanded', open);
       if (showArrow) row.setAttribute('aria-expanded', String(open));
       if (!node.project) icon.textContent = open ? '\u{1F4C2}' : '\u{1F4C1}';
-      if (open) expandedFolders.add(node.path);
-      else expandedFolders.delete(node.path);
+      if (open) {
+        expandedFolders.add(node.path);
+        // First open of a lazily-skipped subtree: build it now, then re-run roving
+        // tabindex/ARIA so the freshly-built rows join keyboard traversal with exactly
+        // one tabindex=0 preserved (initRovingTabindex bails when one already exists).
+        if (childrenEl.dataset.lazy) {
+          delete childrenEl.dataset.lazy;
+          buildChildren();
+          const container = document.getElementById('tree');
+          if (container) initRovingTabindex(container);
+        }
+      } else expandedFolders.delete(node.path);
       saveExpanded();
     };
     if (opts.foldersOnly) {
@@ -1024,7 +1071,18 @@ function renderTreeNode(node, opts) {
     } else {
       row.addEventListener('click', (e) => {
         if (e.target.closest('.tree-actions') || e.target.tagName === 'INPUT') return;
-        if (e.target === row || e.target === label || e.target === icon) toggleExpand();
+        // Flip the expanded FLAG only — selectFolder→renderTree below rebuilds the tree
+        // with this folder now open (a single eager build) and resets roving tabindex at
+        // its end. Calling toggleExpand here would build this subtree a SECOND time (its
+        // DOM/build work is thrown away by the immediate renderTree anyway) — the exact
+        // redundant work on the hot path this phase optimizes. The self-contained
+        // toggleExpand is retained for the foldersOnly chevron above, which toggles
+        // WITHOUT a following renderTree and so needs its inline build + roving reset.
+        if (e.target === row || e.target === label || e.target === icon) {
+          if (expandedFolders.has(node.path)) expandedFolders.delete(node.path);
+          else expandedFolders.add(node.path);
+          saveExpanded();
+        }
         selectFolder(node.path); // mark as target for the toolbar's +Folder/+Page
       });
     }

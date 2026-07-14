@@ -48,6 +48,17 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
 - TC-tree-04 (P): keyboard nav — Enter/Space activate (both layouts); single-column Up/Down/Home/
   End + Left/Right expand-collapse/parent; bail when focus is in an INPUT (don't hijack rename).
 - TC-tree-05 (E): hide sidebar → desktop rail; mobile → floating hamburger + drawer + backdrop.
+- TC-tree-06 (P/A11y): **lazy-build** — a COLLAPSED single-column folder leaves its `.tree-children`
+  unbuilt (`data-lazy="1"`, empty); first expand (row click OR keyboard ArrowRight) builds the
+  children, drops the flag, sets `aria-expanded="true"`, and keeps **exactly one** `[role=treeitem]`
+  at `tabindex=0` (re-runs `initRovingTabindex`). Arrow Up/Down/Home/End then traverse the
+  newly-built rows. Both single-column AND double/Miller.
+- TC-tree-07 (P): **search-while-collapsed** — with all folders collapsed, a query surfacing a deep
+  page (e.g. a `PageN` name match nested 2 folders down) renders its row **visible** in both layouts;
+  the filtered tree is fully built (no `.tree-children[data-lazy]` remains) so no result is hidden.
+- TC-tree-08 (P): **reveal-into-unbuilt-subtree** — opening a deep page from a cleared/collapsed
+  tree (from search, favorites, or a duplicate) expands its ancestor chain, **builds** the subtree,
+  and the page row is visible + reachable; roving tabindex stays singular. Single + Miller.
 
 ### TC-crud — Create / rename / delete (inline rows)
 - TC-crud-01 (P): create project/folder/page targets the selected folder; new items prepend.
@@ -77,7 +88,9 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
 - TC-search-03 (E): **deep-search cap** — a broad term matching > `DEEP_MATCH_CAP` (200) renders only
   the cap and shows the "Showing first N of M — refine your search" banner; banner hides when the
   result set ≤ cap or search cleared. **[auto: tests.html updateSearchCapNote]**
-- TC-search-04 (Pe): name search + tree render stay snappy at ~1200 pages (< ~100ms render).
+- TC-search-04 (Pe): name search + tree render stay snappy at ~1200 pages (< ~100ms render). Search
+  keystrokes now **coalesce** the sidebar re-render (`debounce` ~120ms trailing); the in-page block
+  filter (deep-search) rides the same window so it still reflects the query within ~250ms.
 
 ### TC-tabs — Page tabs
 - TC-tabs-01 (P): open pages as tabs; persist across reload; close / close-all.
@@ -429,6 +442,29 @@ say so in the report rather than implying full coverage.**
   `manifest.webmanifest` install. *Why:* emulated viewport ≠ a real device.
 - TC-ext-perf (scale): seed ~1200+ pages; measure tree/search/page-render + the deep-search cap.
   *Why:* slow to seed/run; covered ad-hoc, not every time.
+- TC-ext-perf-tree (lazy-build + memo, AC6): seed ~1200 pages (10 top folders/projects × 4 subs ×
+  30 pages, warm `.index.json`), then time `renderTree()` (avg of ≥10 warm runs via
+  `performance.now()`) in each state. **Targets:** collapsed single-column ≤5ms; Miller/double
+  ≤60ms; a search/resize burst = **one** render per debounce window; a sidebar-resize drag = **one**
+  render per animation frame. *Measured (1,200 pages, headless Chrome, this phase):* collapsed
+  **12.04ms → 0.24ms**; Miller **0.76 → 1.02ms** (both ≪60ms; memoized folder aggregates); expanded
+  single-column (all folders open, full build) **36.5 → 39.4ms** (unchanged — same DOM work).
+  *Why extended:* needs a seeded large dataset + a driven browser for timing.
+  - **TC-ext-perf-tree-a (DOM-node cap — proves lazy-build intact):** at ~1,200 pages, a
+    fully-collapsed single-column `#tree` holds **≤~500 descendant nodes** (measured **110** with
+    10 top folders; a regression to eager-build would balloon it to ~18,550). Assert
+    `#tree.querySelectorAll('*').length` stays small when collapsed, then expanding one folder
+    **builds its children on demand** (the folder's `.tree-children` goes from `data-lazy="1"`/empty
+    to populated). A future eager-build regression fails the node-count ceiling.
+  - **TC-ext-perf-tree-b (coalescing render-count):** wrap `renderTree` with a counter. A burst of
+    search keystrokes (`updateSearch` typed rapidly) fires **exactly one** `renderTree` per ~120ms
+    debounce window (not one per key); a sidebar-resize drag (a stream of `mousemove`) fires **one**
+    `renderTree` per animation frame (rAF-coalesced), not one per event. A regression that drops the
+    debounce/rAF (rendering per event) fails the count.
+  - **TC-ext-perf-tree-c (folder-click single build):** clicking a collapsed folder builds its direct
+    children **once** (`selectFolder→renderTree`), not twice — instrument `renderTreeNode` and assert
+    each direct child is constructed a single time per click (measured 4 for a 4-child folder;
+    the pre-fix double-build produced 8). Guards against reintroducing the redundant inline build.
 - TC-ext-desktop-sync (native data-sync dialogs): all three `dialog.showMessageBox` branches —
   Local→Server ("Push to server / Keep"), Server→Local ("Sync now / Switch anyway"), Server A→B —
   with a queued change. *Why:* needs a running Electron instance + native-dialog interaction.

@@ -71,6 +71,20 @@ function langColor(id) {
   return 'hsl(' + h + ', 45%, 32%)';
 }
 
+// Trailing-edge debounce: coalesce a burst of calls into one, `wait` ms after the
+// last. Used to keep sidebar renderTree() off the keystroke/resize hot paths (a big
+// library renders too slowly to run per event). `.cancel()` drops a pending call.
+// Pure/timer-only → unit-tested in tests.html.
+function debounce(fn, wait) {
+  let timer = null;
+  const wrapped = function (...args) {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => { timer = null; fn.apply(this, args); }, wait);
+  };
+  wrapped.cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+  return wrapped;
+}
+
 let currentPagePath = null;
 let currentPageData = null;
 let saveTimer = null;

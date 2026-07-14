@@ -13,6 +13,13 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
 
 ## [Unreleased]
 
+### Changed
+- **Faster sidebar & search on large libraries.** The folder tree now builds collapsed subtrees
+  only when you open them (instead of building the whole tree up front), and repeated renders reuse
+  cached folder counts/tags — so the sidebar stays instant even with thousands of pages. Typing in
+  search and dragging the sidebar divider are also smoothed (coalesced) so they don't stutter at
+  scale. No change to what you see: search, reveal, and keyboard navigation work exactly as before.
+
 ### Security
 - **Tighter path safety.** The server now flatly rejects any request whose path contains a `..`,
   `.`, or hidden/dotfile segment (e.g. attempts to read `.index.json` or delete `.history` are

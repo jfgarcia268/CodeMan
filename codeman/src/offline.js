@@ -275,7 +275,7 @@ async function probeBackend() {
   try {
     const fresh = await apiFetch('tree');         // reachable? (throws/aborts if not)
     await kvSet('tree', fresh);
-    treeData = fresh; renderTree();
+    setTreeData(fresh); renderTree();
     setOffline(false);                            // clears state + flushes the queue
     return true;
   } catch (e) {
@@ -357,7 +357,7 @@ async function flushQueue() {
     if (!syncQueue.length) {
       const fresh = await apiFetch('tree');     // reconcile cache with server truth
       await kvSet('tree', fresh);
-      treeData = fresh; renderTree();
+      setTreeData(fresh); renderTree();
       if (dead) toast('Synced — ' + dead + ' change' + (dead === 1 ? '' : 's') + ' could not sync (review)');
       else if (conflicts) toast('Synced — ' + conflicts + ' conflict' + (conflicts === 1 ? '' : 's') + ' overwritten (prior versions in History)');
       else toast('Synced');
@@ -494,7 +494,7 @@ async function restoreNodeToTree(entry) {
     }
   }
   await kvSet('tree', tree);
-  treeData = tree; renderTree();
+  setTreeData(tree); renderTree();
 }
 
 // When a delete already reached the server, restoring means recreating the item.
@@ -652,6 +652,10 @@ async function mutateTreeCache(action, body) {
     removeFromTree(tree, body.path); await pageDel(body.path);
   } else if (action === 'rename') {
     const node = findInTree(tree, body.path); if (!node) return;
+    // Defensive: a malformed offline op with no newName would set node.name = undefined
+    // and corrupt the cached card. The live rename always sends it, but skip the mutation
+    // (leave the node intact) rather than trust the field — same posture as the DLQ guards.
+    if (!body.newName) return;
     const parent = body.path.includes('/') ? body.path.slice(0, body.path.lastIndexOf('/')) : '';
     node.name = body.newName;
     const newPath = (parent ? parent + '/' : '') + (node.type === 'folder' ? body.newName : body.newName + '.json');
@@ -674,7 +678,9 @@ async function mutateTreeCache(action, body) {
     list.sort((a, b) => body.order.indexOf(key(a)) - body.order.indexOf(key(b)));
   }
   await kvSet('tree', tree);
-  treeData = tree; renderTree();
+  // In-place mutation above → route through setTreeData so the folder-aggregate memos
+  // (keyed by node) are dropped; a stale count/tag summary would otherwise survive.
+  setTreeData(tree); renderTree();
 }
 function findInTree(tree, path) { for (const n of tree) { if (n.path === path) return n; if (n.children) { const f = findInTree(n.children, path); if (f) return f; } } return null; }
 function removeFromTree(tree, path) {
