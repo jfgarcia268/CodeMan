@@ -477,6 +477,37 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   since folder activation re-renders via `selectFolder`); single-column also gets Up/Down/Home/End +
   Left/Right expand-collapse/parent. It bails when `e.target` is an INPUT (don't hijack inline
   rename/create). A global `:focus-visible` ring lives near the base `button{}` rule.
+- **Page tabs are an ARIA tablist; the section toggle is the accessible collapse button.**
+  `renderMainTabs` (editor.js) marks `#mainTabs` `role="tablist"` and each `.main-tab`
+  `role="tab"` + `aria-selected` + a **roving tabindex** (only the active tab is `0`), carrying
+  `data-path`. Left/Right **wrap** and Home/End jump via the pure `tabArrowIndex(key,i,n)`;
+  arrow-move uses **automatic activation** (opens that page) then `focusTabByPath` re-focuses the
+  rebuilt tab (activation re-renders the strip). Enter/Space open a focused tab. Each tab's **close ✕
+  is a real `<button>`** (in the Tab order, `aria-label="Close <title>"`) so tabs are keyboard-closable;
+  its click closes then moves focus to a surviving tab (never `<body>`). **"Close all" is a real
+  `<button>`** (`aria-label`), NOT a `role=tab`, and stays sticky-pinned on the mobile strip. Full APG
+  pairing: `#mainTabs` carries `aria-label="Open pages"`, each tab an `id` + `aria-controls="page"`,
+  and `#page` is the `role="tabpanel"` (`tabindex=0`, `aria-labelledby=<active tab id>`), set in
+  `renderMainTabs` (persists across `renderPage`'s innerHTML rewrite). The mobile horizontal-scroll
+  strip is untouched. The slow-open affordance (`openPage`) adds `.tabs-loading` + `aria-busy="true"`
+  to the strip after 250 ms, revealing a hidden (first-open) strip early so the spinner paints.
+  For section collapse, `role="button"` + `tabindex=0` + `aria-expanded` + Enter/Space live on the
+  **`.section-toggle`** span, NOT the `.section-header` — the header contains the title `<input>`
+  and action buttons, and a `role=button` MUST NOT wrap interactive descendants. A shared
+  `toggleCollapse()` closure backs both the header click and the toggle keydown so aria-expanded +
+  the `.collapsed` class + save stay in lockstep. `tabArrowIndex` is pure → unit-tested.
+- **`showModal` (core.js) is a real focus-trapping dialog.** The box is `role="dialog"`
+  `aria-modal="true"`, named via `aria-labelledby`→its `.modal-title` (auto-assigned an id after
+  `buildBody`). It captures `document.activeElement` as the **invoker BEFORE** opening and restores
+  focus to it on close (guarded by `document.contains` — a re-render that dropped it fails soft).
+  `onKey` handles **Tab** (`preventDefault` + cycle within the dialog's focusables via the pure
+  `focusTrapNextIndex(i,n,shift)`, wrapping first↔last), Escape (close), Enter (submit) — same as
+  before. On open a `setTimeout(0)` moves focus inside only if `buildBody` didn't already (its own
+  `setTimeout(0)` focus registers first, so this is a fallback); a dialog with no focusable control
+  focuses the `tabIndex=-1` box itself. Every themed confirm/prompt AND the palette's Move-to picker
+  inherit this. `focusTrapNextIndex` is pure → unit-tested. Toast + the `flashCopied` bubble are
+  `role="status" aria-live="polite"` (the offline badge's channel) — one announces per action
+  (flashCopied shows the bubble OR falls back to toast, never both).
 - **Delete buttons are de-emphasized at rest.** `button.danger` is neutral (`#3a3d41` / dim-red
   text) until `:hover`/`:focus-visible` (then full red). The empty page is an **onboarding** state
   (`.empty-state.onboard`: + New Project / + New Page CTAs, ⌘K hint, "Open the sidebar" nudge when

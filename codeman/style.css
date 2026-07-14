@@ -183,7 +183,7 @@ body.sidebar-hidden:not(.is-mobile) #showSidebarBtn { display: flex; }
   outline: none;
 }
 .sidebar-search input:focus { border-color: var(--accent); }
-.sidebar-search input::placeholder { color: #777; }
+.sidebar-search input::placeholder { color: var(--muted); }
 .search-clear {
   position: absolute;
   right: 16px;
@@ -196,7 +196,7 @@ body.sidebar-hidden:not(.is-mobile) #showSidebarBtn { display: flex; }
 }
 .sidebar-search.has-text .search-clear { display: block; }
 .search-clear:hover { color: #fff; }
-.tree-empty { padding: 12px 8px; color: #777; font-size: 13px; }
+.tree-empty { padding: 12px 8px; color: var(--muted); font-size: 13px; }
 .tree-rename {
   flex: 1;
   min-width: 0;
@@ -265,7 +265,7 @@ body.sidebar-hidden:not(.is-mobile) #showSidebarBtn { display: flex; }
 .col-sort-btn.active { color: var(--text); border-color: var(--border-2, #3a3d41); }
 /* thin paging rail to slide the visible window one column left/right */
 .miller-rail {
-  flex: 0 0 16px;
+  flex: 0 0 24px;          /* wider paging rail — a larger, easier click/touch target */
   display: flex;
   align-items: center;
   justify-content: center;
@@ -367,7 +367,7 @@ body.sidebar-hidden:not(.is-mobile) #showSidebarBtn { display: flex; }
   white-space: nowrap;
   margin-left: 7px;
   vertical-align: middle;
-  font-size: 8px;
+  font-size: 10px;         /* micro-type floor raised for legibility (was 8px) */
   font-weight: 700;
   letter-spacing: 0.8px;
   color: #c9b6ff;
@@ -738,6 +738,19 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   min-height: 40px;        /* one 40px top band shared with the ☰ button + sidebar brand row */
   box-sizing: border-box;
 }
+/* Slow-open affordance: a spinner rides the trailing edge of the tab strip while a
+   page fetch is in flight >250ms (openPage). No layout shift — it's an ::after. */
+.main-tabs.tabs-loading::after {
+  content: '';
+  align-self: center;
+  width: 13px; height: 13px;
+  margin: 0 4px 3px 2px;
+  border: 2px solid var(--border-2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: tab-spin 0.7s linear infinite;
+}
+@keyframes tab-spin { to { transform: rotate(360deg); } }
 .main-tab {
   display: flex;
   align-items: center;
@@ -767,6 +780,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .main-tab-close {
   font-size: 10px;
   color: var(--text-dim);
+  background: none;          /* it's a <button> now — reset the accent button base */
+  border: none;
+  line-height: 1;
   border-radius: 3px;
   padding: 0 3px;
   flex-shrink: 0;
@@ -842,7 +858,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   outline: none;
 }
 .page-search input:focus { border-color: var(--accent); }
-.page-search input::placeholder { color: #777; }
+.page-search input::placeholder { color: var(--muted); }
 .page-search-clear {
   position: absolute;
   right: 9px;
@@ -912,7 +928,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   align-items: center;
   justify-content: center;
   height: 100%;
-  color: #777;
+  color: var(--muted);
   font-size: 14px;
 }
 /* Onboarding empty state — primary CTAs + ⌘K hint for first-run orientation. */
@@ -1012,7 +1028,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .tag-remove {
   cursor: pointer;
   color: #8fb8d8;
-  font-size: 9px;
+  font-size: 10px;         /* micro-type floor raised for legibility (was 9px) */
 }
 .tag-remove:hover { color: #fff; }
 .tag-add {
@@ -1231,7 +1247,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .lang-picker-opt:hover { background: #2a2d2e; }
 .lang-picker-opt.current { background: var(--accent-2); color: #fff; }
 .lang-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
-.lang-picker-empty { padding: 8px; color: #777; font-size: 12px; }
+.lang-picker-empty { padding: 8px; color: var(--muted); font-size: 12px; }
 .block-label {
   background: none;
   border: none;
@@ -1781,6 +1797,33 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   gap: 8px;
 }
 .modal-btns button { padding: 6px 14px; font-size: 13px; }
+
+/* ---- "Move to…" folder picker (command palette) ---- */
+.move-list {
+  margin-top: 10px;
+  max-height: 320px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.move-row {
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text);
+  padding: 7px 10px;
+  border-radius: 5px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.move-row:hover { background: #2a2d2e; }
+.move-row.is-project { color: #c9a3ff; }   /* projects tinted purple, matching the breadcrumb */
+.move-row.active { background: var(--accent); color: #fff; }   /* keyboard-highlighted row (ArrowDown/Up) — wins over the project tint */
+.move-empty { padding: 10px; color: var(--muted); font-size: 12px; }
 
 /* ---- panel modal (trash / history) ---- */
 .panel-modal {

@@ -15,10 +15,10 @@ and reports against this matrix); UI/usability passes are run by the
 
 1. **Automated suites first** (fast, deterministic):
    - **Client units** — open `codeman/tests.html` in a browser. Expect the summary
-     **"N passed, 0 failed"** (currently 205). `window.__testResult = {pass, fail, done}` for
+     **"N passed, 0 failed"** (currently 288). `window.__testResult = {pass, fail, done}` for
      scripting (`done` flips true after the async offline tests finish).
    - **Server API** — `bash codeman/tests-api.sh` (spins a throwaway `php -S` against a temp data
-     dir; exit 0 = all green; currently 66). Override port: `bash codeman/tests-api.sh 8099` —
+     dir; exit 0 = all green; currently 101). Override port: `bash codeman/tests-api.sh 8099` —
      a taken port is skipped automatically (bounded upward hunt), so parallel runs stay green.
    - **CI enforces both** on every push/PR: `.github/workflows/tests.yml` runs `tests-api.sh`
      (`api-tests` job), tests.html headless via Playwright + `php -S`
@@ -151,6 +151,67 @@ and the block **Copy-as `▾`** submenu. No hand-rolled `.mini-menu` remains (gr
 - TC-menu-08 (P, positioning parity): the block **Copy-as `▾`** submenu lands in the identical
   spot as before — left clamped to `max(8, r.right − 200)`, top `r.bottom + 4` — and each item
   still copies via `copyText` (records the copy, "Copied…/Copy failed" toast).
+
+### TC-a11y — Keyboard & screen-reader reach (AC7 / WS-5 P2/P3)
+Tabs, section headers, modals, and transient feedback are operable by keyboard and announced by
+assistive tech; low-contrast text and micro-type meet WCAG AA.
+- TC-a11y-01 (A11y, tab strip): `#mainTabs` is `role="tablist"` (`aria-label="Open pages"`); each
+  open-page tab is `role="tab"` with a unique `id`, `aria-selected` (only the active tab `true`),
+  `aria-controls="page"`, and a **roving tabindex** (active tab `0`, rest `-1`). ArrowLeft/Right move
+  between tabs and **wrap** at the ends, Home/End jump to first/last; moving activates that page
+  (opens it) and keyboard focus follows the newly-selected tab. Enter/Space on a focused tab opens
+  it. The page region `#page` is the paired `role="tabpanel"` (`tabindex=0`,
+  `aria-labelledby=<active tab id>`). The mobile horizontal-scroll strip is unaffected.
+  **[auto: tests.html tabArrowIndex]**
+- TC-a11y-01b (A11y, tabs closable by keyboard): each tab's close **✕ is a real `<button>`**
+  (`aria-label="Close <title>"`) in the Tab order — Enter/Space closes the tab, and focus lands on a
+  surviving tab (not `<body>`), rebuilt via the roving tabindex. **"Close all" is a real `<button>`**
+  (`aria-label="Close all tabs"`); it stays sticky/pinned on the mobile strip and is not a `role=tab`.
+- TC-a11y-02 (A11y, section header): the section disclosure toggle (`.section-toggle`) is
+  `role="button"`, `tabindex=0`, `aria-label="Toggle section: <title>"`, with `aria-expanded`
+  reflecting collapsed/expanded state. Enter/Space toggle collapse (aria-expanded flips, the
+  `.collapsed` class updates, save scheduled); click-to-collapse on the header/toggle still works;
+  the mobile one-row section header is unaffected (role lives on the toggle, not the header — the
+  header holds the title `<input>` + action buttons, so it can't itself be a button).
+- TC-a11y-03 (A11y, modal focus trap): every `showModal` dialog (confirm, prompt, Move-to picker) is
+  `role="dialog"` `aria-modal="true"` named via `aria-labelledby` → its `.modal-title`. On open,
+  focus moves inside; **Tab / Shift-Tab cycle within the dialog** (first↔last, focus can't escape to
+  the page); Escape closes; on close, **focus returns to the invoking element** (fails soft if a
+  re-render dropped it). A dialog with no focusable control focuses the box itself.
+  **[auto: tests.html focusTrapNextIndex]**
+- TC-a11y-04 (A11y, live regions): `toast` and the `flashCopied` bubble are `role="status"
+  aria-live="polite"` (the same polite channel the offline badge joined) — a copy / save / error is
+  announced. `flashCopied` shows the bubble OR falls back to `toast`, never both → no double-announce.
+- TC-a11y-05 (A11y, Move-to command): `> Move current page to…` (palette, only when a page is open)
+  opens a filterable folder picker (root + every folder, current parent excluded, projects tinted);
+  choosing a destination routes through **`moveItem` → `api('move')`** — the project-nesting guard,
+  history migration, and offline write-queue all run exactly as a drag-move. **[auto: tests.html
+  collectFolderPaths]**
+- TC-a11y-05b (A11y, Move-to keyboard model — mirrors the command palette): typing filters; a
+  **highlighted row** (`.move-row.active`) tracks **ArrowDown/Up** (clamped, no wrap); **Enter in the
+  filter selects the highlighted-or-top match** (not a silent cancel — the prior bug); mouse hover
+  re-highlights. **[auto: tests.html paletteArrowIndex]**
+- TC-a11y-06 (E, slow-open affordance): opening a page whose `get_page` takes **>250 ms** shows a
+  spinner on the tab strip (`.main-tabs.tabs-loading::after`) and sets **`aria-busy="true"`** on the
+  strip for SR feedback, both cleared when the open settles; a fast local open never flashes it (the
+  `_openingPages` map still dedups). On the **first** open (strip was `display:none`, no tabs yet) the
+  strip is revealed early so the spinner paints; if that open failed the reveal is undone.
+- TC-a11y-07 (A11y, contrast/micro-type): former `#777` sub-AA text (tree-empty, empty-state,
+  search placeholders, lang-picker-empty) now uses `var(--muted)` (**#9aa0a8 ≈ 6.3:1** on the
+  `#1e1e1e` panel — measured); the smallest micro-type is raised (project badge 8→10px, tag-remove
+  9→10px); Miller paging rails widened (16→24px) for an easier click/touch target.
+- **Accepted variant (non-goal):** tab arrow-keys use **automatic activation** (moving focus opens the
+  page) rather than manual activation — a valid ARIA tabs variant; kept because tab switches are cheap
+  and match the click behavior. Not a defect.
+- **Carried residual (non-goal, UI/UX finding 12):** hover tooltips (`title=`) on icon-only controls
+  are **not reachable on touch** — deliberately not addressed this phase (would need a bespoke
+  long-press/tap-to-reveal tooltip layer). Icon buttons keep `title=` + `aria-label` for pointer +
+  screen-reader users; documented as an accepted limitation.
+- **WCAG 1.4.4 (Resize text) exception — mobile zoom-lock:** the mobile viewport sets
+  `maximum-scale=1, user-scalable=no`, which technically fails SC 1.4.4 (no pinch-zoom). This is an
+  **accepted, in-plan tradeoff** (per plan C7): it kills iOS focus-zoom that otherwise jumps the
+  layout on every input focus, and the editor already renders inputs at **16px** to compensate.
+  Non-goal to revisit unless the focus-zoom mitigation changes.
 
 ### TC-dup — Duplicate content (block / section / page)
 - TC-dup-01 (P): **block** — for all five kinds (code/note/rich/checklist/csv/json), the block ⋯

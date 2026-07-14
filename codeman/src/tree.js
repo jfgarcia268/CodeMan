@@ -166,6 +166,20 @@ function attachRootDrop(container) {
   };
 }
 
+// Pure: every folder (including projects) in the tree, depth-first, as
+// {path, project} — the destination set for the "Move to…" picker. Root ('') is
+// added by the caller. Extracted so it's unit-testable in isolation.
+function collectFolderPaths(nodes, out) {
+  out = out || [];
+  (nodes || []).forEach(n => {
+    if (n.type === 'folder') {
+      out.push({ path: n.path, project: !!n.project });
+      collectFolderPaths(n.children || [], out);
+    }
+  });
+  return out;
+}
+
 // Direct children of a folder path ('' = root).
 function folderChildren(path) {
   if (!path) return treeData;

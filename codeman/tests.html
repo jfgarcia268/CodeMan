@@ -86,6 +86,56 @@
   t('miniMenuWrapIndex empty menu → -1', miniMenuWrapIndex(0, 0), -1);
   t('miniMenuWrapIndex single item stays 0', miniMenuWrapIndex(1, 1), 0);
 
+  // tabArrowIndex: ARIA tablist Left/Right/Home/End index math (Left/Right wrap).
+  t('tabArrowIndex Right advances', tabArrowIndex('ArrowRight', 1, 4), 2);
+  t('tabArrowIndex Right wraps last→first', tabArrowIndex('ArrowRight', 3, 4), 0);
+  t('tabArrowIndex Left retreats', tabArrowIndex('ArrowLeft', 2, 4), 1);
+  t('tabArrowIndex Left wraps first→last', tabArrowIndex('ArrowLeft', 0, 4), 3);
+  t('tabArrowIndex Home → 0', tabArrowIndex('Home', 2, 4), 0);
+  t('tabArrowIndex End → last', tabArrowIndex('End', 1, 4), 3);
+  t('tabArrowIndex other key leaves index', tabArrowIndex('x', 2, 4), 2);
+  t('tabArrowIndex no tabs → -1', tabArrowIndex('ArrowRight', 0, 0), -1);
+  t('tabArrowIndex single tab Right stays 0', tabArrowIndex('ArrowRight', 0, 1), 0);
+
+  // paletteArrowIndex: ArrowDown/Up highlight movement for the Move-to picker (clamps, no wrap).
+  t('paletteArrowIndex Down advances', paletteArrowIndex('ArrowDown', 1, 4), 2);
+  t('paletteArrowIndex Down clamps at last (no wrap)', paletteArrowIndex('ArrowDown', 3, 4), 3);
+  t('paletteArrowIndex Up retreats', paletteArrowIndex('ArrowUp', 2, 4), 1);
+  t('paletteArrowIndex Up clamps at first (no wrap)', paletteArrowIndex('ArrowUp', 0, 4), 0);
+  t('paletteArrowIndex other key leaves index', paletteArrowIndex('x', 2, 4), 2);
+  t('paletteArrowIndex empty list → -1', paletteArrowIndex('ArrowDown', 0, 0), -1);
+
+  // focusTrapNextIndex: Tab / Shift-Tab cycling inside a modal focus trap (wraps).
+  t('focusTrapNextIndex Tab advances', focusTrapNextIndex(1, 4, false), 2);
+  t('focusTrapNextIndex Tab wraps last→first', focusTrapNextIndex(3, 4, false), 0);
+  t('focusTrapNextIndex Shift-Tab retreats', focusTrapNextIndex(2, 4, true), 1);
+  t('focusTrapNextIndex Shift-Tab wraps first→last', focusTrapNextIndex(0, 4, true), 3);
+  t('focusTrapNextIndex not-in-list Tab → first', focusTrapNextIndex(-1, 4, false), 0);
+  t('focusTrapNextIndex not-in-list Shift-Tab → last', focusTrapNextIndex(-1, 4, true), 3);
+  t('focusTrapNextIndex empty → -1', focusTrapNextIndex(0, 0, false), -1);
+  t('focusTrapNextIndex single item stays 0', focusTrapNextIndex(0, 1, false), 0);
+
+  // collectFolderPaths: destination set for the "Move to…" picker (folders only,
+  // depth-first, project flag carried; pages excluded).
+  (function () {
+    const tree = [
+      { type: 'folder', path: 'A', project: false, children: [
+        { type: 'page', path: 'A/p1' },
+        { type: 'folder', path: 'A/B', project: true, children: [
+          { type: 'page', path: 'A/B/p2' },
+        ] },
+      ] },
+      { type: 'page', path: 'top' },
+      { type: 'folder', path: 'C', children: [] },
+    ];
+    const got = collectFolderPaths(tree);
+    t('collectFolderPaths finds every folder (excludes pages)', got.map(f => f.path).join(','), 'A,A/B,C');
+    t('collectFolderPaths carries the project flag', got.find(f => f.path === 'A/B').project, true);
+    t('collectFolderPaths non-project folder → false', got.find(f => f.path === 'A').project, false);
+    t('collectFolderPaths missing project key → false', got.find(f => f.path === 'C').project, false);
+    t('collectFolderPaths empty tree → []', collectFolderPaths([]).length, 0);
+  })();
+
   // miniMenuHasCheck: does a menu reserve the icon column (any checkable row)?
   t('miniMenuHasCheck none checkable → false', miniMenuHasCheck([{ label: 'a' }, { label: 'b' }]), false);
   t('miniMenuHasCheck icon-only is not checkable', miniMenuHasCheck([{ icon: '★', label: 'a' }]), false);

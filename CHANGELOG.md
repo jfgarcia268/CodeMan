@@ -13,7 +13,23 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
 
 ## [Unreleased]
 
+### Added
+- **Accessibility: full keyboard & screen-reader reach.** Page tabs are now a proper tab strip —
+  arrow keys (Left/Right, Home/End) move between them and open the page, each tab announces its
+  selected state, and every tab (and "Close all") can be closed with the keyboard. Collapsible
+  section headers are keyboard-operable (Tab to the disclosure triangle,
+  Enter/Space to collapse/expand) and announce collapsed/expanded. Confirm/prompt dialogs trap focus
+  while open (Tab cycles inside), close on Escape, and return focus to whatever opened them.
+  Copy/save/error feedback (toasts and the "Copied" bubble) is announced to assistive tech.
+- **"Move current page to…" command.** A new command-palette entry (`⌘K`, then `>`) opens a
+  filterable folder picker to move the open page to another folder — the same move (with history
+  preserved) you'd get by dragging it in the sidebar.
+
 ### Changed
+- **Readability & contrast pass.** Faint low-contrast text (empty states, search placeholders) is
+  darkened to meet AA contrast, the smallest labels are enlarged slightly, and the double-column
+  paging rails are widened for an easier click/touch target. A slow page open (>250 ms) now shows a
+  brief spinner on the tab strip.
 - **Faster sidebar & search on large libraries.** The folder tree now builds collapsed subtrees
   only when you open them (instead of building the whole tree up front), and repeated renders reuse
   cached folder counts/tags — so the sidebar stays instant even with thousands of pages. Typing in
