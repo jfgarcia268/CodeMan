@@ -13,6 +13,25 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
 
 ## [Unreleased]
 
+### Security
+- **Tighter path safety.** The server now flatly rejects any request whose path contains a `..`,
+  `.`, or hidden/dotfile segment (e.g. attempts to read `.index.json` or delete `.history` are
+  refused) instead of quietly stripping it — closing read/traversal gaps in page reads, deletes,
+  history listing, and trash restore. Legitimate nested pages are unaffected.
+- **Password no longer accepted in the URL.** The optional password gate now only reads the
+  `X-CodeMan-Auth` header; the old `?token=` query fallback (which could leak the secret into
+  server logs / browser history) was removed.
+- **Content Security Policy.** The app ships a CSP that confines scripts, styles, and images to
+  trusted sources, reducing the blast radius of any injected content. Remote **https** images in
+  note/rich blocks still load; plain-http and other-scheme remote images are blocked.
+- **Hardened desktop wrapper.** The desktop app's internal proxy now confines its privileged
+  endpoints to its own loopback origin (requiring a matching Origin on any state-changing request),
+  rejects duplicated `action` parameters and header-less writes, blocks off-origin navigation and
+  look-alike-host link windows, and only tests http(s) server URLs — defense-in-depth so nothing
+  outside the app can drive it.
+- **Find & Replace regex safety.** A pathological (catastrophic-backtracking) search pattern now
+  fails fast with a clear "regex too complex" message instead of hanging the request.
+
 ## [1.12.0] — 2026-07-13
 
 ### Added

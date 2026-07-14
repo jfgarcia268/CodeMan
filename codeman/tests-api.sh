@@ -10,8 +10,11 @@
 # history-prune + its traversal guard, save-conflict detection (stale baseMtime
 # → conflict; force → history snapshot), the project-nesting move guard, the
 # rename traversal guard, the restore_trash round-trip, replace_content
-# (preview dry-run / literal / regex), rename_tag (rename/merge/delete), and
-# the optional password gate.
+# (preview dry-run / literal / regex / regex-too-complex bound), rename_tag
+# (rename/merge/delete), the safePath reject contract (dotfile reads + traversal
+# rejected at get_page/delete/list_history/restore_trash), the offline-replay
+# reconstruction shapes round-tripping post-safePath, and the optional password
+# gate (header-only; ?token= no longer accepted).
 #
 #   Run:  bash codeman/tests-api.sh           (exit 0 = all green)
 #         bash codeman/tests-api.sh 8099       (override the starting port;
@@ -64,11 +67,13 @@ start_server() { # $1 = optional CODEMAN_PASSWORD (empty = gate off)
 
 # POST helper: post <action> <json-body> [authtoken]  → echoes "<body>\n<httpcode>"
 # (avoids empty-array expansion — macOS bash 3.2 errors on "${arr[@]}" under set -u)
+# Sends X-CodeMan-Request: 1 on every write, mirroring the real client (apiHeaders) —
+# so the suite stays representative when server-side CSRF enforcement lands in R4.
 post() {
   if [ -n "${3:-}" ]; then
-    curl -s -w $'\n%{http_code}' -H "X-CodeMan-Auth: $3" -X POST -H "Content-Type: application/json" -d "$2" "$BASE?action=$1"
+    curl -s -w $'\n%{http_code}' -H "X-CodeMan-Request: 1" -H "X-CodeMan-Auth: $3" -X POST -H "Content-Type: application/json" -d "$2" "$BASE?action=$1"
   else
-    curl -s -w $'\n%{http_code}' -X POST -H "Content-Type: application/json" -d "$2" "$BASE?action=$1"
+    curl -s -w $'\n%{http_code}' -H "X-CodeMan-Request: 1" -X POST -H "Content-Type: application/json" -d "$2" "$BASE?action=$1"
   fi
 }
 body() { printf '%s' "$1" | sed '$d'; }     # all but last line
@@ -274,12 +279,56 @@ test ! -d "$DATA/.history/Mv.json" && ok "dest-exists move removed the stale sou
 destv_after=$(ls "$DATA/.history/MgD/Mv.json" 2>/dev/null | wc -l | tr -d ' ')
 [ "$destv_after" -gt "$destv_before" ] && ok "dest-exists move merged source versions into dest ($destv_before → $destv_after)" || bad "dest-exists move merged source versions into dest" "dest count $destv_before → $destv_after"
 
+# --- safePath reject contract: dotfile reads + traversal are rejected -------------
+# get_page on a dotfile is refused (previously .index.json etc. could be read out)
+r=$(post get_page '{"path":".index.json"}')
+has "get_page dotfile (.index.json) → invalid path" "$(body "$r")" '"error":"invalid path"'
+r=$(post get_page '{"path":"../../etc/passwd"}')
+has "get_page traversal path → invalid path" "$(body "$r")" '"error":"invalid path"'
+# deleting a hidden data dir is refused, and the dir survives
+test -d "$DATA/.history" && ok "history dir present before the delete-dotfile probe" || bad "history dir present" "missing"
+r=$(post delete '{"path":".history"}')
+has "delete dotfile (.history) → invalid path" "$(body "$r")" '"error":"invalid path"'
+test -d "$DATA/.history" && ok "delete .history left the history dir intact" || bad "delete .history left the history dir intact" ".history gone"
+# list_history no longer raw-concats the path → a traversal resolves to nothing ([])
+lh=$(curl -sG "$BASE" --data-urlencode "action=list_history" --data-urlencode "path=../../..")
+eqs "list_history traversal path → empty array" "$lh" "[]"
+# a crafted trash .meta with a traversal origPath stays inert on restore
+mkdir -p "$DATA/.trash/evilr"; echo z > "$DATA/.trash/evilr/z"
+printf '{"origPath":"../../ESC_RESTORE.json","name":"evilr","deletedAt":1,"isDir":false}' > "$DATA/.trash/evilr.meta"
+r=$(post restore_trash '{"id":"evilr"}')
+has "restore_trash traversal origPath → rejected" "$(body "$r")" '"error"'
+test ! -e "$(dirname "$DATA")/ESC_RESTORE.json" && ok "restore_trash traversal wrote nothing outside data" || bad "restore_trash traversal wrote nothing" "ESC_RESTORE.json escaped"
+
+# --- replace_content: a pathological (catastrophic-backtracking) regex fails clean ---
+post create_page '{"name":"Rx","parent":""}' >/dev/null
+post save_page '{"path":"Rx.json","data":{"title":"Rx","sections":[{"title":"S","collapsed":false,"tags":[],"blocks":[{"type":"bash","label":"","code":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaX"}],"subsections":[]}]}}' >/dev/null
+r=$(post replace_content '{"find":"(a+)+$","replace":"z","regex":true,"preview":true}')
+has "pathological regex (backtrack limit) → clean 'regex too complex'" "$(body "$r")" '"error":"regex too complex"'
+
+# --- offline-replay reconstruction shapes still round-trip post-safePath ------------
+# The offline queue replays exactly these bodies (enqueueReconstruct in offline.js); a
+# legitimate nested path MUST still work — only ../ / . / dotfile segments reject.
+post create_project '{"name":"OProj","parent":""}' >/dev/null
+r=$(post create_folder '{"parent":"OProj","name":"OFold"}')
+eqs "replay create_folder (nested) → 200" "$(code "$r")" "200"
+r=$(post save_page '{"path":"OProj/OFold/OPage.json","data":{"title":"OPage","sections":[]},"force":true}')
+eqs "replay save_page (nested, force) → 200" "$(code "$r")" "200"
+test -f "$DATA/OProj/OFold/OPage.json" && ok "replay wrote the nested page on disk" || bad "replay wrote the nested page" "missing"
+r=$(post get_page '{"path":"OProj/OFold/OPage.json"}')
+has "replay round-trips the nested page" "$(body "$r")" '"title":"OPage"'
+# snapshotHistory now routes $rel through safePath internally — a legit nested re-save
+# must still snapshot the prior version (best-effort guard doesn't break valid paths).
+post save_page '{"path":"OProj/OFold/OPage.json","data":{"title":"OPage2","sections":[]},"force":true}' >/dev/null
+test -d "$DATA/.history/OProj/OFold/OPage.json" && ok "snapshotHistory still snapshots a legit nested save" || bad "snapshotHistory still snapshots a legit nested save" "no history dir"
+
 # --- password gate ----------------------------------------------------------
 start_server "testsecret"
 r=$(curl -s -w $'\n%{http_code}' "$BASE?action=tree");                         eqs "gate: no token → 401" "$(code "$r")" "401"
 has "gate: 401 body flags auth" "$(body "$r")" '"auth":true'
 r=$(curl -s -w $'\n%{http_code}' -H "X-CodeMan-Auth: testsecret" "$BASE?action=tree"); eqs "gate: correct header → 200" "$(code "$r")" "200"
-r=$(curl -s -w $'\n%{http_code}' "$BASE?action=tree&token=testsecret");          eqs "gate: correct ?token → 200" "$(code "$r")" "200"
+# ?token= is no longer accepted (secret-in-URL leaks into logs/Referer) — header only.
+r=$(curl -s -w $'\n%{http_code}' "$BASE?action=tree&token=testsecret");          eqs "gate: correct ?token= no longer accepted → 401" "$(code "$r")" "401"
 r=$(curl -s -w $'\n%{http_code}' -H "X-CodeMan-Auth: WRONG" "$BASE?action=tree"); eqs "gate: wrong token → 401" "$(code "$r")" "401"
 
 echo ""

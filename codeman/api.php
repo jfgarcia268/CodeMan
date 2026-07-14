@@ -60,11 +60,20 @@ function safeName($n) {
     return $n;
 }
 
+// Resolve a relative path under $base, or return NULL if any segment is unsafe.
+// A segment that is '.', '..', or dot-prefixed (a hidden/system file) REJECTS the
+// whole path (returns null) — mirroring safeName, so a traversal or a dotfile read
+// can never resolve to a real location. Empty segments (from doubled slashes or a
+// leading/trailing slash) are silently dropped. An empty $rel resolves to $base
+// itself (root operations), never null. EVERY caller must treat null as "reject".
 function safePath($base, $rel) {
     $rel = str_replace('\\', '/', $rel);
-    $parts = array_filter(explode('/', $rel), function($p) {
-        return $p !== '' && $p !== '.' && $p !== '..';
-    });
+    $parts = [];
+    foreach (explode('/', $rel) as $p) {
+        if ($p === '') continue;                                   // doubled/edge slash → drop
+        if ($p === '.' || $p === '..' || $p[0] === '.') return null; // traversal / dotfile → reject
+        $parts[] = $p;
+    }
     return $base . '/' . implode('/', $parts);
 }
 
@@ -98,6 +107,7 @@ function migrateHistory($oldRel, $newRel) {
     global $historyDir;
     $from = safePath($historyDir, $oldRel);
     $to = safePath($historyDir, $newRel);
+    if ($from === null || $to === null) return; // unsafe rel → skip (best-effort, never fail the move)
     if ($from === $to || $from === $historyDir . '/' || !file_exists($from)) return;
     $parent = dirname($to);
     if (!is_dir($parent)) @mkdir($parent, 0777, true);
@@ -383,7 +393,12 @@ function snapshotHistory($base, $rel, $path) {
     if (!file_exists($path)) return;
     $old = @file_get_contents($path);
     if ($old === false) return;
-    $hdir = $historyDir . '/' . $rel;
+    // Confine $rel INSIDE the helper (not just at the callers): today every caller passes
+    // an already-validated path, but this used to be a raw concat — the same latent-trap
+    // class as the list_history hole. safePath returns null for a traversal/dotfile rel →
+    // best-effort no-op so a future unguarded caller can't reintroduce a .history escape.
+    $hdir = safePath($historyDir, $rel);
+    if ($hdir === null) return;
     if (!is_dir($hdir)) mkdir($hdir, 0777, true);
     $stamp = @filemtime($path) ?: time();
     $vfile = $hdir . '/' . $stamp . '.json';
@@ -406,13 +421,14 @@ $input = json_decode(file_get_contents('php://input'), true);
 // Optional shared-secret gate. OFF by default: with no CODEMAN_PASSWORD set the
 // API stays open (the trusted-LAN/NAS assumption). Set CODEMAN_PASSWORD (env or
 // nginx fastcgi_param, same delivery as CODEMAN_DATA) to require it on every
-// request — the client sends it in the X-CodeMan-Auth header (or ?token=). Since
-// page data lives outside the webroot and is only reachable through this script,
-// gating here protects the data. hash_equals avoids timing leaks.
+// request — the client sends it in the X-CodeMan-Auth header. Since page data lives
+// outside the webroot and is only reachable through this script, gating here protects
+// the data. hash_equals avoids timing leaks. (The old ?token= query fallback was
+// removed: a secret in the URL leaks into logs/history/Referer — header only now.)
 $authPass = getenv('CODEMAN_PASSWORD');
 if (!$authPass && !empty($_SERVER['CODEMAN_PASSWORD'])) $authPass = $_SERVER['CODEMAN_PASSWORD'];
 if ($authPass) {
-    $provided = $_SERVER['HTTP_X_CODEMAN_AUTH'] ?? ($_GET['token'] ?? '');
+    $provided = $_SERVER['HTTP_X_CODEMAN_AUTH'] ?? '';
     if (!is_string($provided) || !hash_equals((string)$authPass, $provided)) {
         http_response_code(401);
         echo json_encode(['error' => 'authentication required', 'auth' => true]);
@@ -499,6 +515,13 @@ switch ($action) {
         $built = cm_buildReplace($find, $replace, $isRegex, $ci);
         if ($built === null) jsonError('invalid regular expression');
         list($pat, $repl) = $built;
+        // Bound PCRE so a pathological (catastrophic-backtracking) user regex fails fast
+        // instead of hanging the request. When a match/replace hits the limit PCRE returns
+        // false/null (PREG_BACKTRACK_LIMIT_ERROR) — we surface that as a clean error below
+        // rather than silently skipping the block (which would drop real matches).
+        ini_set('pcre.backtrack_limit', '2000000');
+        ini_set('pcre.recursion_limit', '100000');
+        $regexError = false;
         $totalMatches = 0; $changedPages = 0; $pageList = [];
         $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($base, RecursiveDirectoryIterator::SKIP_DOTS));
         foreach ($it as $file) {
@@ -507,13 +530,20 @@ switch ($action) {
             $data = json_decode(@file_get_contents($file->getPathname()), true);
             if (!is_array($data) || empty($data['sections'])) continue;
             $pageMatches = 0;
-            $cb = function($code) use ($pat, $repl, $preview, &$pageMatches) {
-                if ($preview) { $pageMatches += preg_match_all($pat, $code, $m); return null; }
-                $new = preg_replace($pat, $repl, $code, -1, $c); $pageMatches += $c; return $new;
+            $cb = function($code) use ($pat, $repl, $preview, &$pageMatches, &$regexError) {
+                if ($preview) {
+                    $n = preg_match_all($pat, $code, $m);
+                    if ($n === false) { $regexError = true; return null; }
+                    $pageMatches += $n; return null;
+                }
+                $new = preg_replace($pat, $repl, $code, -1, $c);
+                if ($new === null) { $regexError = true; return null; }
+                $pageMatches += $c; return $new;
             };
             $changed = false;
             foreach ($data['sections'] as &$s) { if (cm_walkBlocks($s, $cb)) $changed = true; }
             unset($s);
+            if ($regexError) jsonError('regex too complex'); // PCRE limit hit → fail cleanly
             if ($pageMatches > 0) {
                 $totalMatches += $pageMatches;
                 $rel = ltrim(substr($file->getPathname(), strlen($base)), '/');
@@ -581,8 +611,10 @@ switch ($action) {
         if ($name === null) jsonError('invalid name');
         $parent = $input['parent'] ?? '';
         $path = safePath($base, $parent . '/' . $name);
+        $parentDir = safePath($base, $parent);
+        if ($path === null || $parentDir === null) jsonError('invalid path');
         if (!is_dir($path)) mkdir($path, 0777, true);
-        prependOrder(safePath($base, $parent), $name); // new folder at top
+        prependOrder($parentDir, $name); // new folder at top
         echo json_encode(['ok' => true]);
         break;
 
@@ -595,10 +627,11 @@ switch ($action) {
         if ($name === null) jsonError('invalid name');
         $parent = $input['parent'] ?? '';
         $parentDir = safePath($base, $parent);
+        $path = safePath($base, $parent . '/' . $name);
+        if ($parentDir === null || $path === null) jsonError('invalid path');
         if ($parent !== '' && !file_exists($parentDir . '/.project')) {
             jsonError('projects can only be created at the top level or inside another project');
         }
-        $path = safePath($base, $parent . '/' . $name);
         if (!is_dir($path)) mkdir($path, 0777, true);
         @file_put_contents($path . '/.project', '');
         prependOrder($parentDir, $name); // new project at top of its parent
@@ -608,6 +641,7 @@ switch ($action) {
     case 'reorder':
         // Persist a folder's child display order. input: { parent, order: [names] }
         $dir = safePath($base, $input['parent'] ?? '');
+        if ($dir === null) jsonError('invalid path');
         if (is_dir(rtrim($dir, '/')) && isset($input['order']) && is_array($input['order'])) {
             writeOrder($dir, $input['order']);
         }
@@ -623,6 +657,7 @@ switch ($action) {
         // Persist (or clear) a column's sort preference. input: { parent, field, dir }.
         // field=manual (or unknown) clears the entry → back to manual/default order.
         $dir = safePath($base, $input['parent'] ?? '');
+        if ($dir === null) jsonError('invalid path');
         if (is_dir(rtrim($dir, '/'))) {
             $key = ltrim(substr(rtrim($dir, '/'), strlen($base)), '/');
             $map = readColSorts($base);
@@ -643,6 +678,7 @@ switch ($action) {
         $name = safeName($input['name']);
         if ($name === null) jsonError('invalid name');
         $path = safePath($base, ($input['parent'] ?? '') . '/' . $name . '.json');
+        if ($path === null) jsonError('invalid path');
         // Parent must exist — otherwise file_put_contents emits a raw PHP warning into
         // the response body (invalid JSON → the client false-trips offline) yet still
         // reports ok. Same guard as save_page.
@@ -656,6 +692,7 @@ switch ($action) {
     case 'get_page':
         $rel = $input['path'] ?? ($_GET['path'] ?? '');
         $path = safePath($base, $rel);
+        if ($path === null) jsonError('invalid path'); // e.g. a dotfile read like .index.json
         if (file_exists($path)) {
             $data = json_decode(file_get_contents($path), true);
             if (!is_array($data)) $data = ['title' => '', 'sections' => []];
@@ -669,6 +706,7 @@ switch ($action) {
     case 'save_page':
         requireFields($input, ['path']);
         $path = safePath($base, $input['path']);
+        if ($path === null) jsonError('invalid path');
         // Optimistic concurrency: if the caller passed the mtime it read and the
         // file has changed since (another tab/device/edit), refuse unless forced.
         if (file_exists($path) && array_key_exists('baseMtime', $input) && $input['baseMtime'] !== null && empty($input['force'])) {
@@ -698,6 +736,7 @@ switch ($action) {
         $newName = safeName($input['newName']);
         if ($newName === null) jsonError('invalid name');
         $oldPath = safePath($base, $input['path']);
+        if ($oldPath === null) jsonError('invalid path');
         if (!file_exists($oldPath)) jsonError('source not found', 404);
         $isFolder = is_dir($oldPath);
         $dir = dirname($oldPath);
@@ -716,6 +755,7 @@ switch ($action) {
         requireFields($input, ['path']);
         $src = safePath($base, $input['path']);
         $destDir = safePath($base, $input['target'] ?? '');
+        if ($src === null || $destDir === null) jsonError('invalid path');
         if (!file_exists($src)) { jsonError('source not found', 404); }
         if (!is_dir($destDir)) { jsonError('target not found', 404); }
         $name = basename($src);
@@ -744,6 +784,7 @@ switch ($action) {
         // Soft delete: move into .trash with a sidecar .meta so it can be restored.
         requireFields($input, ['path']);
         $path = safePath($base, $input['path']);
+        if ($path === null) jsonError('invalid path'); // e.g. delete {path:".history"}
         if (!file_exists($path)) { echo json_encode(['ok' => true]); break; }
         if (!is_dir($trashDir)) mkdir($trashDir, 0777, true);
         $stamp = time();
@@ -792,6 +833,7 @@ switch ($action) {
         $orig = $meta['origPath'] ?? null;
         if (!$orig) jsonError('cannot determine original location');
         $dest = safePath($base, $orig);
+        if ($dest === null) jsonError('invalid original path'); // a crafted/evil .meta stays inert
         $parent = dirname($dest);
         if (!is_dir($parent)) mkdir($parent, 0777, true);
         if (file_exists($dest)) jsonError('an item already exists at the original path');
@@ -813,10 +855,12 @@ switch ($action) {
                 if ($orig !== '') {
                     // Route through safePath (like restore_trash) — origPath is the RAW
                     // client path from delete, so a '../'-bearing value would otherwise
-                    // let rrmdir escape .history. safePath strips '..'; guard the empty
-                    // result so we never rrmdir the whole history root.
+                    // let rrmdir escape .history.
                     $hp = safePath($historyDir, $orig); // page: .history/<rel>.json/ · folder: .history/<rel>/ (subtree)
-                    if ($hp !== $historyDir . '/' && is_dir($hp)) rrmdir($hp);
+                    // safePath now returns null for an unsafe origPath (traversal/dotfile):
+                    // skip the history prune for this entry entirely — NEVER rrmdir a null/bad
+                    // path — while still permanently removing the trash entry itself below.
+                    if ($hp !== null && $hp !== $historyDir . '/' && is_dir($hp)) rrmdir($hp);
                 }
                 rrmdir($trashDir . '/' . $e);
                 @unlink($trashDir . '/' . $e . '.meta');
@@ -828,9 +872,9 @@ switch ($action) {
     case 'list_history':
         // Versions for a page, newest first. input/query: path
         $rel = $input['path'] ?? ($_GET['path'] ?? '');
-        $hdir = $historyDir . '/' . $rel;
+        $hdir = safePath($historyDir, $rel); // was a raw concat → traversal hole; confine it
         $out = [];
-        if (is_dir($hdir)) {
+        if ($hdir !== null && is_dir($hdir)) {
             foreach (glob($hdir . '/*.json') ?: [] as $v) {
                 $ts = (int)basename($v, '.json');
                 $out[] = ['ts' => $ts, 'size' => @filesize($v)];
@@ -843,6 +887,7 @@ switch ($action) {
     case 'get_history_version':
         requireFields($input, ['path', 'ts']);
         $hfile = safePath($historyDir, $input['path'] . '/' . (int)$input['ts'] . '.json');
+        if ($hfile === null) jsonError('invalid path');
         if (!file_exists($hfile)) jsonError('version not found', 404);
         echo file_get_contents($hfile);
         break;
@@ -852,6 +897,7 @@ switch ($action) {
         requireFields($input, ['path', 'ts']);
         $path = safePath($base, $input['path']);
         $hfile = safePath($historyDir, $input['path'] . '/' . (int)$input['ts'] . '.json');
+        if ($path === null || $hfile === null) jsonError('invalid path');
         if (!file_exists($hfile)) jsonError('version not found', 404);
         snapshotHistory($base, $input['path'], $path);
         copy($hfile, $path);

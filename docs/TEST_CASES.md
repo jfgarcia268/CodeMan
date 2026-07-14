@@ -344,13 +344,52 @@ and the block **Copy-as `▾`** submenu. No hand-rolled `.mini-menu` remains (gr
   retry re-enqueue, `__codemanAdoptInto` queue-merge) is **[auto: tests.html dead-letter reducers]**;
   the panel UI + badge keyboard/severity stay manual.
 
+- TC-offline-06 (N): **replay survives the safePath reject tightening.** The offline queue replays
+  `enqueueReconstruct` bodies (`create_project {name,parent}`, `create_folder {parent,name}`,
+  `save_page {path,data,force:true}`); a legitimate nested path (`Proj/Folder/Page.json`) must still
+  round-trip after the safePath change — only `..`/`.`/dotfile segments reject. **[auto: tests-api
+  offline-replay reconstruction shapes]**
+
+### TC-sec — Server path-safety & transport (safePath reject / CSRF / CSP)
+- TC-sec-01 (N): **safePath reject contract.** A dotfile read is refused (`get_page {path:".index.json"}`
+  → `{"error":"invalid path"}`); `delete {path:".history"}` is refused and the dir survives; a
+  traversal `get_page`/`save_page` writes/reads nothing outside the data root. **[auto: tests-api]**
+- TC-sec-02 (N): **`list_history` traversal** (`path=../../..`) resolves to nothing → `[]` (was a raw
+  concat). **[auto: tests-api]**
+- TC-sec-03 (N): **crafted trash `.meta`** with a `../`-bearing `origPath` stays inert — `empty_trash`
+  never `rrmdir`s the escaped path (sentinel outside `.history` survives) and `restore_trash` errors
+  without writing outside the data root. **[auto: tests-api]**
+- TC-sec-04 (N): **regex bounds.** A pathological catastrophic-backtracking find regex (`(a+)+$`) hits
+  the PCRE backtrack limit → clean `{"error":"regex too complex"}` instead of hanging/silent-skip.
+  **[auto: tests-api]**
+- TC-sec-05 (P): **CSRF is SENT everywhere, NOT enforced server-side.** Every request carries
+  `X-CodeMan-Request: 1` (`apiHeaders`), incl. `flushQueue` replay + the keepalive unload-save; a
+  header-less write to `api.php` still SUCCEEDS this release (server enforcement is deferred so older
+  offline queues aren't rejected). Verify via devtools/network that reads + writes carry the header.
+- TC-sec-06 (P): **desktop proxy enforces CSRF + origin + HPP.** In the Electron wrapper, a mutating
+  `/api.php` POST WITHOUT the `X-CodeMan-Request` header → 403 (read actions pass); a **duplicated
+  `action` param** (`?action=tree&action=save_page`, the HPP bypass — PHP takes the last, the proxy
+  the first) → 403 outright; a state-changing request with a **missing/mismatched `Origin`** (or a
+  rebinding `Host`) → 403 (reads may omit Origin); a cross-origin POST to `/__config` or `/__test`
+  → 403; `/__test` rejects a non-http(s) target; navigation off `127.0.0.1:<port>` and a
+  look-alike-host new-window (`http://127.0.0.1.evil.com/`) are blocked. Exercised by `CODEMAN_SMOKE=1`
+  (`writeGuard.blocked` for both the header-less write and the dup-action request). *Extended (needs a
+  running Electron instance).*
+- TC-sec-07 (P): **CSP loads clean.** With the `<meta>` CSP, the app boots (inline loaders + `onclick`
+  handlers run under `'unsafe-inline'`), Prism autoload highlights a code block, a note renders
+  markdown (markdown-it), an export builds, and the SW registers — **no CSP violations** in the
+  console. `img-src 'self' data: https:` — a note referencing a remote **https** image loads it; a
+  plain-**http** remote image is blocked (verify in devtools: an https `![](…)` renders, an http one
+  is refused).
+
 ### TC-colsort — Per-column sort (double layout)
 - TC-colsort-01 (P): Name/Code-type/Kind × asc/desc + Manual order; persists in `.colsort.json`;
   active sort renders a flat intermixed list. **[auto: tests.html sortMillerChildren]**
 
 ### TC-pw — Password gate (optional, `CODEMAN_PASSWORD`)
 - TC-pw-01 (N): gate on, no/blank token → `401 {"error":"authentication required","auth":true}`. **[auto: tests-api]**
-- TC-pw-02 (P): correct secret via `X-CodeMan-Auth` header **and** `?token=` → 200. **[auto: tests-api]**
+- TC-pw-02 (P): correct secret via `X-CodeMan-Auth` header → 200. The `?token=` query fallback is
+  **no longer accepted** — the correct secret via `?token=` → 401 (header-only now). **[auto: tests-api]**
 - TC-pw-03 (P): client — first 401 → prompt → correct → retry succeeds → token stored
   (`codeman.authToken`) → reload replays it (no re-prompt).
 - TC-pw-04 (N): wrong password → blocked (no data), the bad token is **not persisted**, next action

@@ -717,18 +717,57 @@ the server URL or `{offlineOnly:true}`.
 
 ## Security / safety
 
-- `safeName()` rejects path separators, `..`, and leading `.` for all create/rename names;
-  `safePath` confines file access to the data root. `requireFields()` returns clean `{error}`
-  JSON instead of leaking PHP warnings. **`empty_trash` runs the stored (raw, client-supplied)
-  `origPath` through `safePath($historyDir, …)` before `rrmdir`-ing the history subtree** — without
-  it a `../`-bearing `origPath` could escape `.history`. Any new path built from a stored/echoed
-  value must be `safePath`'d the same way.
+- `safeName()` rejects path separators, `..`, and leading `.` for all create/rename names.
+  **`safePath($base, $rel)` now REJECTS the whole path (returns `null`) if ANY segment is `.`,
+  `..`, or dot-prefixed** (a hidden/system file), mirroring `safeName` — empty segments (doubled/
+  edge slashes) still silently drop, and an empty `$rel` still resolves to `$base` (root ops). It
+  used to *strip* `..`/`.` and keep going, which still let a dotfile read/delete resolve (`get_page
+  {path:".index.json"}`, `delete {path:".history"}`) and left `list_history` on a **raw concat**
+  traversal hole. **EVERY caller must treat `null` as reject:** the ~18 action call sites →
+  `jsonError('invalid path')`; the `empty_trash` loop → **skip the entry's history prune, never
+  `rrmdir` a null path**; `restore_trash` → error (a crafted `.meta` `origPath` stays inert);
+  `list_history` → `[]`; `migrateHistory` and `snapshotHistory` route `$rel` through `safePath`
+  INTERNALLY and no-op (best-effort) on `null`, so a future unguarded caller can't reintroduce a
+  `.history` traversal via those helpers. Any new path built from a stored/echoed value must be
+  `safePath`'d and null-checked the same way.
+- **CSRF: send everywhere, enforce at the proxy only (this release).** Every request carries an
+  `X-CodeMan-Request: 1` header, attached at the single choke point `apiHeaders()` (core.js) — so
+  normal calls, `flushQueue` replay (incl. queues parked by an OLDER client — headers attach at SEND
+  time), and the keepalive unload-save all send it. **`api.php` does NOT enforce it yet** —
+  header-less writes still succeed (a deliberate split so in-flight offline queues from older clients
+  aren't rejected; server enforcement is a later release). The **desktop proxy (`main.js`) DOES
+  enforce it**: a mutating action (anything outside the `READ_ONLY_ACTIONS` allowlist — the read
+  actions `tree`/`search_*`/`list_*`/`get_page`/`get_history_version`/`col_sorts`) without the header
+  is 403'd, an anti-trampoline guard that's safe because the renderer always sends it. When the
+  server does start enforcing, mirror the SAME allowlist. **HPP guard:** the proxy classifies the
+  action from `searchParams`, but PHP's `$_GET['action']` takes the LAST value — so `?action=tree&
+  action=save_page` would sneak a write past the read-only check; the proxy therefore **rejects any
+  `/api.php` request carrying more than one `action` param outright** (a legit client never sends two).
+  The proxy also confines `/api.php`, `/__config`, `/__test` to its own loopback origin
+  (`sameOriginOk`: Host must be `127.0.0.1:<port>`; and for STATE-CHANGING requests — non-GET writes,
+  `/__config`, `/__test` — the browser `Origin` must be PRESENT and match, `{requireOrigin:true}`, so a
+  header/Origin-less mutating request can't slip through on Host alone; reads may omit Origin). It pins
+  top-level navigation via a `will-navigate` handler AND matches the `setWindowOpenHandler` origin by
+  **parsed host** (`new URL(url).host === '127.0.0.1:<port>'`), never a string prefix — else
+  `http://127.0.0.1.evil.com/` reads as internal. `/__test` targets are restricted to http(s).
+- **CSP + nosniff.** `index.html` ships a `<meta http-equiv="Content-Security-Policy">`:
+  `default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src
+  'self' data: https:; object-src 'none'; base-uri 'none'`. `'unsafe-inline'` is REQUIRED (no build
+  step): inline `onclick=` handlers, the inline `<script>` loaders, and the inline `ED_*` element
+  styles. All vendored/executable code is same-origin `'self'` (the Prism autoloader injects
+  same-origin `<script src>`; `?v=` cache-bust queries don't change the source origin; markdown-it +
+  the SW are same-origin). **`img-src` includes `https:`** so remote https images referenced in note/
+  rich blocks render (a self-hosted snippet manager legitimately references remote images; plain
+  `http:`/other schemes stay blocked — no mixed content, marginal exfil risk under the trusted
+  single-user model). At the release cut the **NAS nginx** deployment must ALSO send this header +
+  `X-Content-Type-Options: nosniff` in `default.conf` (can't be set from a `<meta>`; deployment step).
 - **Projects nest only in projects:** `create_project` and `move` reject placing a `.project`
   folder anywhere except the root or inside another project (a parent with its own `.project`
   marker) — also guarded client-side via `isValidProjectParent`.
 - **Optional password gate:** set `CODEMAN_PASSWORD` (env or web-server param) and `api.php`
-  requires it on every request via `hash_equals` (`X-CodeMan-Auth` header or `?token=`). **Off by
-  default** (open, trusted-LAN assumption). The client prompts once on a 401, stores the token,
+  requires it on every request via `hash_equals` (`X-CodeMan-Auth` header **only** — the old
+  `?token=` query fallback was removed: a secret in the URL leaks into logs/history/`Referer`).
+  **Off by default** (open, trusted-LAN assumption). The client prompts once on a 401, stores the token,
   retries. Page data lives outside the web root and is only reachable through `api.php`, so gating
   the API protects the data; serve over HTTPS if exposed beyond a trusted network. **A wrong secret
   is NOT persisted** — if the retry after the prompt still 401s, `apiFetch` clears the bad token so

@@ -127,10 +127,15 @@ function signOut() {
 // A 401 means the optional password gate is on: prompt once and retry.
 const API_TIMEOUT_MS = 9000; // abort a hung request so the retry/offline path can run
 
-// The request headers every write shares. One attach point so auth (and, later, a
-// request-id) can't drift between apiFetch and the keepalive unload-save in editor.js.
+// The request headers every request shares. One attach point so auth, the CSRF
+// marker, and the content type can't drift between apiFetch, flushQueue's replay,
+// and the keepalive unload-save in editor.js. X-CodeMan-Request is a same-origin
+// CSRF signal attached at SEND time — so even queues parked by an older client pick
+// it up on replay. NOTE: this release only SENDS it; api.php does NOT yet enforce it
+// (server enforcement is a later release, so in-flight offline queues aren't rejected).
+// The desktop proxy DOES require it on mutating actions (it always sends it).
 function apiHeaders() {
-  const h = {};
+  const h = { 'Content-Type': 'application/json', 'X-CodeMan-Request': '1' };
   if (authToken) h['X-CodeMan-Auth'] = authToken;
   return h;
 }

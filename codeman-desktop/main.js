@@ -28,6 +28,16 @@ app.setName('CodeMan');
 const DEFAULT_SERVER_URL = require('./config').DEFAULT_SERVER_URL || '';
 const BASE_PORT = 47615; // fixed → stable origin → offline cache persists across launches
 
+// Read-only api.php actions — everything else MUTATES and the proxy requires the
+// X-CodeMan-Request CSRF header on it (the renderer always sends it via apiHeaders).
+// This is the desktop-side enforcement of the CSRF signal (an anti-trampoline guard
+// so a header-less cross-origin request can't drive a write through the local proxy
+// to the real server). Kept identical to the server's future allowlist (R4).
+const READ_ONLY_ACTIONS = new Set([
+  'tree', 'search_content', 'search_blocks', 'list_tags', 'col_sorts',
+  'get_page', 'list_trash', 'list_history', 'get_history_version',
+]);
+
 const shellDir = app.isPackaged
   ? path.join(process.resourcesPath, 'codeman')
   : path.join(__dirname, '..', 'codeman');
@@ -45,6 +55,22 @@ let mainWin = null;
 let settingsWin = null;
 
 function hostOf(u) { try { return new URL(u).host || u; } catch (e) { return u || 'the server'; } }
+
+// Confine the privileged local endpoints (/api.php proxy, /__config, /__test) to the
+// app's own origin: the Host must be our loopback origin (blocks DNS-rebinding, where
+// Host would be an attacker domain resolving to 127.0.0.1). For STATE-CHANGING requests
+// (requireOrigin=true — the write path, /__config, /__test) the browser Origin must be
+// PRESENT and match: an absent Origin on a mutating request → reject (a same-origin fetch
+// always sets Origin on non-GET, so the renderer's own writes still pass). For reads,
+// Origin is matched only when present (a same-origin GET may omit it) so normal reads work.
+function sameOriginOk(req, { requireOrigin = false } = {}) {
+  const expect = '127.0.0.1:' + port;
+  if (req.headers['host'] !== expect) return false;
+  const origin = req.headers['origin'];
+  if (requireOrigin) return origin === 'http://' + expect; // mutating: Origin MUST be present + match
+  if (origin && origin !== 'http://' + expect) return false;
+  return true;
+}
 
 // ---------- configuration (persisted in the OS user-data dir) ----------
 // settings.json is one of:  {"serverUrl":"http://…/"}  |  {"offlineOnly":true}
@@ -171,6 +197,7 @@ async function applySwitch(body) {
 async function testServer(url) {
   const target = normalizeUrl(url);
   if (!target) return { ok: false, error: 'empty url' };
+  if (!/^https?:\/\//i.test(target)) return { ok: false, error: 'URL must start with http:// or https://' };
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 5000);
   try {
@@ -327,6 +354,7 @@ function startServer() {
     }
     // ----- reachability test of a candidate server URL -----
     if (u.pathname === '/__test' && req.method === 'POST') {
+      if (!sameOriginOk(req, { requireOrigin: true })) { res.writeHead(403); res.end(); return; }
       try {
         const body = JSON.parse((await readBody(req)).toString() || '{}');
         const out = await testServer(body.url || '');
@@ -340,6 +368,7 @@ function startServer() {
     }
     // ----- apply a settings change (server URL / offline-only), with safe-switch prompts -----
     if (u.pathname === '/__config' && req.method === 'POST') {
+      if (!sameOriginOk(req, { requireOrigin: true })) { res.writeHead(403); res.end(); return; }
       try {
         const body = JSON.parse((await readBody(req)).toString() || '{}');
         const result = await applySwitch(body); // may show native dialogs
@@ -355,15 +384,38 @@ function startServer() {
 
     // ----- proxy the PHP API to the configured server (server-side: no CORS/cert/mixed-content) -----
     if (u.pathname === '/api.php') {
+      // Mutating requests (non-GET/HEAD) must carry a matching Origin; reads may omit it.
+      const isWriteMethod = req.method !== 'GET' && req.method !== 'HEAD';
+      if (!sameOriginOk(req, { requireOrigin: isWriteMethod })) { res.writeHead(403); res.end(); return; }
+      // HPP guard: PHP's $_GET['action'] takes the LAST value while we'd classify on the
+      // first — ?action=tree&action=save_page would otherwise sneak a write past the
+      // read-only allowlist. A legitimate client never sends two, so reject any request
+      // carrying more than one action param outright.
+      const actions = u.searchParams.getAll('action');
+      if (actions.length > 1) {
+        res.writeHead(403, { 'content-type': 'application/json' });
+        res.end('{"error":"duplicate action param"}');
+        return;
+      }
       if (!serverUrl) { // not configured yet → behave as "offline" so the UI prompts/uses cache
         res.writeHead(503, { 'content-type': 'application/json' });
         res.end('{"error":"no server configured"}');
+        return;
+      }
+      // CSRF: a mutating action MUST carry the X-CodeMan-Request marker (the renderer
+      // always sends it). Blocks a header-less write from being trampolined through the
+      // local proxy to the real server — even if the upstream NAS doesn't enforce it yet.
+      const action = actions[0] || '';
+      if (!READ_ONLY_ACTIONS.has(action) && !req.headers['x-codeman-request']) {
+        res.writeHead(403, { 'content-type': 'application/json' });
+        res.end('{"error":"missing X-CodeMan-Request header"}');
         return;
       }
       try {
         const headers = {};
         if (req.headers['content-type']) headers['content-type'] = req.headers['content-type'];
         if (req.headers['x-codeman-auth']) headers['x-codeman-auth'] = req.headers['x-codeman-auth'];
+        if (req.headers['x-codeman-request']) headers['x-codeman-request'] = req.headers['x-codeman-request'];
         const body = (req.method === 'GET' || req.method === 'HEAD') ? undefined : await readBody(req);
         const r = await fetch(serverUrl + 'api.php' + u.search, { method: req.method, headers, body });
         const buf = Buffer.from(await r.arrayBuffer());
@@ -472,10 +524,27 @@ function createWindow() {
     },
   });
 
-  // Real external links (note-block http links) open in the system browser.
+  // Real external links (note-block http links) open in the system browser. Match the
+  // origin by parsed HOST, not a string prefix: `/^https?:\/\/(?!127\.0\.0\.1)/` treated
+  // http://127.0.0.1.evil.com/ as internal (it starts with 127.0.0.1) and would have
+  // opened an attacker domain in an Electron window. Anchored host check (mirrors the
+  // strict will-navigate pin below): only our own loopback origin opens in-app.
   mainWin.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\/(?!127\.0\.0\.1)/i.test(url)) { shell.openExternal(url); return { action: 'deny' }; }
-    return { action: 'allow' };
+    let host = '';
+    try { host = new URL(url).host; } catch (e) {}
+    if (host === '127.0.0.1:' + port) return { action: 'allow' };        // our own origin
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url);              // real external link → system browser
+    return { action: 'deny' };
+  });
+
+  // Pin top-level navigation to our own loopback origin: a stray note link (or an
+  // injected navigation) can never move the app window off the bundled shell. External
+  // http(s) links are handled above (system browser); everything else is blocked here.
+  mainWin.webContents.on('will-navigate', (e, url) => {
+    if (!url.startsWith(`http://127.0.0.1:${port}/`)) {
+      e.preventDefault();
+      if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+    }
   });
 
   // Not configured yet → first-run setup screen; otherwise the app (server or offline-only).
@@ -487,7 +556,20 @@ function createWindow() {
       setTimeout(async () => {
         try {
           const out = await mainWin.webContents.executeJavaScript(
-            '(async () => { let api={}; try { const r = await fetch("api.php?action=tree"); const j = await r.json(); api={ok:r.ok, rootNodes:Array.isArray(j)?j.length:"?"}; } catch(e){ api={err:String(e)}; } return JSON.stringify({path:location.pathname, title:document.title, scripts:document.scripts.length, rows:document.querySelectorAll(".tree-row,.miller-row,.subfolder-card").length, api}); })()'
+            '(async () => {'
+            + ' let api={}, writeGuard={}, dupGuard={};'
+            + ' try { const t0=performance.now(); const r = await fetch("api.php?action=tree"); const j = await r.json();'
+            + '   api={ok:r.ok, rootNodes:Array.isArray(j)?j.length:"?", ms:Math.round(performance.now()-t0)}; } catch(e){ api={err:String(e)}; }'
+            // write-path through the proxy WITHOUT the CSRF header → the proxy must 403 it
+            // (or 503 when offline-only). Proves the mutating-action guard without touching data.
+            + ' try { const r = await fetch("api.php?action=save_page", {method:"POST", body:"{}"});'
+            + '   writeGuard={status:r.status, blocked:r.status===403}; } catch(e){ writeGuard={err:String(e)}; }'
+            // HPP probe: a duplicated action param must be rejected outright (PHP would take
+            // the LAST — save_page — while the read allowlist sees the first, tree).
+            + ' try { const r = await fetch("api.php?action=tree&action=save_page");'
+            + '   dupGuard={status:r.status, blocked:r.status===403}; } catch(e){ dupGuard={err:String(e)}; }'
+            + ' return JSON.stringify({path:location.pathname, title:document.title, scripts:document.scripts.length,'
+            + '   rows:document.querySelectorAll(".tree-row,.miller-row,.subfolder-card").length, api, writeGuard, dupGuard}); })()'
           );
           console.log('SMOKE_RESULT ' + out);
         } catch (e) { console.log('SMOKE_ERROR ' + (e && e.message)); }

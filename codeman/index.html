@@ -2,6 +2,15 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<!-- Content Security Policy. 'unsafe-inline' is required (no build step): the app uses
+     inline event handlers (onclick=…), inline <script> loaders, and inline element
+     styles (the ED_* editor metrics). All executable/vendored code is same-origin
+     ('self'); ?v= cache-bust queries don't change the source origin. img 'self' data:
+     https: covers the favicon + data-URI images + remote https images referenced in
+     note/rich blocks (plain http / other schemes stay blocked — no mixed content).
+     object-src/base-uri locked down. The NAS/nginx deployment ALSO sends this header +
+     X-Content-Type-Options: nosniff (see CLAUDE.md). -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; object-src 'none'; base-uri 'none'">
 <title>CodeMan - Snippet Manager</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <meta name="theme-color" content="#0e639c">
