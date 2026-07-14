@@ -21,6 +21,13 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
   scale. No change to what you see: search, reveal, and keyboard navigation work exactly as before.
 
 ### Security
+- **Server-side CSRF protection.** The API now requires the `X-CodeMan-Request` header on every
+  state-changing action (deny-by-default: reads are allowlisted, every write — including any future
+  one — is protected), rejecting forged/cross-site header-less writes with a clean 403. The web
+  client has been sending this header since the previous release, and the desktop wrapper already
+  enforced it, so normal use is unaffected. A `CODEMAN_CSRF=off` server setting is available as a
+  break-glass during a migration window. **Deploy note:** roll out the updated client/desktop app
+  before enabling enforcement on an existing server.
 - **Tighter path safety.** The server now flatly rejects any request whose path contains a `..`,
   `.`, or hidden/dotfile segment (e.g. attempts to read `.index.json` or delete `.history` are
   refused) instead of quietly stripping it — closing read/traversal gaps in page reads, deletes,

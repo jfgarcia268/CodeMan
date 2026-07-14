@@ -375,10 +375,19 @@ and the block **Copy-as `▾`** submenu. No hand-rolled `.mini-menu` remains (gr
 - TC-sec-04 (N): **regex bounds.** A pathological catastrophic-backtracking find regex (`(a+)+$`) hits
   the PCRE backtrack limit → clean `{"error":"regex too complex"}` instead of hanging/silent-skip.
   **[auto: tests-api]**
-- TC-sec-05 (P): **CSRF is SENT everywhere, NOT enforced server-side.** Every request carries
-  `X-CodeMan-Request: 1` (`apiHeaders`), incl. `flushQueue` replay + the keepalive unload-save; a
-  header-less write to `api.php` still SUCCEEDS this release (server enforcement is deferred so older
-  offline queues aren't rejected). Verify via devtools/network that reads + writes carry the header.
+- TC-sec-05 (P): **CSRF is SENT everywhere.** Every request carries `X-CodeMan-Request: 1`
+  (`apiHeaders`), incl. `flushQueue` replay + the keepalive unload-save. Verify via devtools/network
+  that reads + writes carry the header.
+- TC-sec-05b (N): **server enforces CSRF (deny-by-default).** `api.php` now requires
+  `X-CodeMan-Request` on every action outside the read-only allowlist (`tree`, `col_sorts`,
+  `get_page`, `list_tags`, `list_trash`, `list_history`, `get_history_version`, `search_content`,
+  `search_blocks` — identical to the desktop proxy's `READ_ONLY_ACTIONS`): a header-less mutating
+  POST (`create_page`) → **403** `{"error":"missing request header"}` and writes nothing; a header-less
+  read (`tree`, `get_page`) → **200**; a header-less **unknown/future** action → 403 (fail-closed).
+  The check runs AFTER the auth gate (a gated request with no token still 401s first). Break-glass:
+  with `CODEMAN_CSRF=off` (env or nginx `fastcgi_param`, dual-source read) a header-less write is
+  **accepted → 200**. A 403 is a clean 4xx so a straggler offline client dead-letters the write
+  (recoverable) rather than looping as "offline". **[auto: tests-api]**
 - TC-sec-06 (P): **desktop proxy enforces CSRF + origin + HPP.** In the Electron wrapper, a mutating
   `/api.php` POST WITHOUT the `X-CodeMan-Request` header → 403 (read actions pass); a **duplicated
   `action` param** (`?action=tree&action=save_page`, the HPP bypass — PHP takes the last, the proxy

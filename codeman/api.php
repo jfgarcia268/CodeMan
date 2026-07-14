@@ -436,6 +436,31 @@ if ($authPass) {
     }
 }
 
+// CSRF enforcement (deny-by-default). Every mutating action requires the
+// X-CodeMan-Request header — attached at the client's single choke point
+// apiHeaders() (core.js) on normal calls, offline flushQueue replay, and the
+// keepalive unload-save. The client has been SENDING it since R3, so flipping
+// enforcement on here rejects only header-less cross-site/forged writes.
+// READ-ONLY allowlist mirrors the desktop proxy's READ_ONLY_ACTIONS
+// (codeman-desktop/main.js) EXACTLY — keep the two in sync. Anything NOT on
+// this list (including any future action) needs the header: fail-CLOSED, so a
+// newly added write is protected by default rather than slipping through.
+// Break-glass: set CODEMAN_CSRF=off (env or nginx fastcgi_param, same delivery
+// as CODEMAN_DATA) to accept header-less writes during a migration / straggler
+// window. A rejection is a clean 4xx so a stale offline client DEAD-LETTERS the
+// write (visible/recoverable) rather than treating it as "offline" and retrying.
+$csrfReadOnly = [
+    'tree', 'col_sorts', 'get_page', 'list_tags', 'list_trash', 'list_history',
+    'get_history_version', 'search_content', 'search_blocks',
+];
+$csrfOff = getenv('CODEMAN_CSRF');
+if ($csrfOff === false && isset($_SERVER['CODEMAN_CSRF'])) $csrfOff = $_SERVER['CODEMAN_CSRF'];
+if ($csrfOff !== 'off'
+    && !in_array($action, $csrfReadOnly, true)
+    && empty($_SERVER['HTTP_X_CODEMAN_REQUEST'])) {
+    jsonError('missing request header', 403);
+}
+
 switch ($action) {
     case 'tree':
         $tree = buildTree($base, $base);

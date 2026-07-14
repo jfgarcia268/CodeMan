@@ -46,11 +46,11 @@ trap cleanup EXIT INT TERM
 # taken (a parallel run, a CI neighbor), `php -S` dies instantly on bind — hunt
 # upward for a free port (bounded) instead of failing the whole suite. BASE is
 # recomputed after the port settles so every later request hits the live server.
-start_server() { # $1 = optional CODEMAN_PASSWORD (empty = gate off)
+start_server() { # $1 = optional CODEMAN_PASSWORD (empty = gate off); $2 = optional CODEMAN_CSRF ("off" = break-glass)
   if [ -n "$SERVER_PID" ]; then kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null; SERVER_PID=""; fi
   local tries=0
   while :; do
-    CODEMAN_DATA="$DATA" CODEMAN_PASSWORD="${1:-}" php -S "127.0.0.1:$PORT" -t "$SCRIPT_DIR" >/dev/null 2>&1 &
+    CODEMAN_DATA="$DATA" CODEMAN_PASSWORD="${1:-}" CODEMAN_CSRF="${2:-}" php -S "127.0.0.1:$PORT" -t "$SCRIPT_DIR" >/dev/null 2>&1 &
     SERVER_PID=$!
     sleep 0.3                                   # a failed bind exits immediately
     if kill -0 "$SERVER_PID" 2>/dev/null; then
@@ -321,6 +321,28 @@ has "replay round-trips the nested page" "$(body "$r")" '"title":"OPage"'
 # must still snapshot the prior version (best-effort guard doesn't break valid paths).
 post save_page '{"path":"OProj/OFold/OPage.json","data":{"title":"OPage2","sections":[]},"force":true}' >/dev/null
 test -d "$DATA/.history/OProj/OFold/OPage.json" && ok "snapshotHistory still snapshots a legit nested save" || bad "snapshotHistory still snapshots a legit nested save" "no history dir"
+
+# --- CSRF enforcement: deny-by-default, header-less writes 403, reads 200 ----
+# The post() helper always sends X-CodeMan-Request, so every write test above
+# already exercises the header-carrying (accepted) path. Here we hit the raw
+# header-less path with curl. Enforcement is ON (default server; CSRF unset).
+r=$(curl -s -w $'\n%{http_code}' -X POST -H "Content-Type: application/json" -d '{"name":"NoHdr","parent":""}' "$BASE?action=create_page")
+eqs "csrf: header-less write → 403" "$(code "$r")" "403"
+has "csrf: 403 body is the clean error" "$(body "$r")" '"error":"missing request header"'
+test ! -e "$DATA/NoHdr.json" && ok "csrf: rejected write touched nothing" || bad "csrf: rejected write touched nothing" "NoHdr.json exists"
+# An unknown/future action also needs the header (deny-by-default, fail-closed).
+r=$(curl -s -w $'\n%{http_code}' -X POST -H "Content-Type: application/json" -d '{}' "$BASE?action=some_future_write")
+eqs "csrf: header-less unknown action → 403 (fail-closed, not 404)" "$(code "$r")" "403"
+# Read-only allowlist actions pass without the header.
+r=$(curl -s -w $'\n%{http_code}' "$BASE?action=tree");                         eqs "csrf: header-less read (tree) → 200"     "$(code "$r")" "200"
+r=$(curl -s -w $'\n%{http_code}' "$BASE?action=get_page&path=P1.json");        eqs "csrf: header-less read (get_page) → 200" "$(code "$r")" "200"
+
+# --- CSRF break-glass: CODEMAN_CSRF=off accepts header-less writes -----------
+start_server "" "off"
+r=$(curl -s -w $'\n%{http_code}' -X POST -H "Content-Type: application/json" -d '{"name":"OffHdr","parent":""}' "$BASE?action=create_page")
+eqs "csrf off: header-less write accepted → 200" "$(code "$r")" "200"
+test -f "$DATA/OffHdr.json" && ok "csrf off: header-less write persisted" || bad "csrf off: header-less write persisted" "missing"
+start_server ""   # restore enforcement for any later run
 
 # --- password gate ----------------------------------------------------------
 start_server "testsecret"

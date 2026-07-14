@@ -758,16 +758,27 @@ the server URL or `{offlineOnly:true}`.
   INTERNALLY and no-op (best-effort) on `null`, so a future unguarded caller can't reintroduce a
   `.history` traversal via those helpers. Any new path built from a stored/echoed value must be
   `safePath`'d and null-checked the same way.
-- **CSRF: send everywhere, enforce at the proxy only (this release).** Every request carries an
+- **CSRF: send everywhere, enforce on BOTH the server and the proxy.** Every request carries an
   `X-CodeMan-Request: 1` header, attached at the single choke point `apiHeaders()` (core.js) — so
   normal calls, `flushQueue` replay (incl. queues parked by an OLDER client — headers attach at SEND
-  time), and the keepalive unload-save all send it. **`api.php` does NOT enforce it yet** —
-  header-less writes still succeed (a deliberate split so in-flight offline queues from older clients
-  aren't rejected; server enforcement is a later release). The **desktop proxy (`main.js`) DOES
-  enforce it**: a mutating action (anything outside the `READ_ONLY_ACTIONS` allowlist — the read
-  actions `tree`/`search_*`/`list_*`/`get_page`/`get_history_version`/`col_sorts`) without the header
-  is 403'd, an anti-trampoline guard that's safe because the renderer always sends it. When the
-  server does start enforcing, mirror the SAME allowlist. **HPP guard:** the proxy classifies the
+  time), and the keepalive unload-save all send it. **`api.php` NOW enforces it** (deny-by-default),
+  right AFTER the auth gate (a gated request with no token still 401s first): a `$csrfReadOnly`
+  allowlist (`tree`/`col_sorts`/`get_page`/`list_tags`/`list_trash`/`list_history`/
+  `get_history_version`/`search_content`/`search_blocks`) may run header-less; **every other action —
+  including any FUTURE one — needs the header** (implemented as `!in_array($action, $csrfReadOnly) &&
+  no header → 403`, so a newly added write is fail-CLOSED, never fail-open). The 403 is a **clean 4xx**
+  (`jsonError('missing request header', 403)`) so a straggler offline client DEAD-LETTERS the write
+  (Phase-2 panel, recoverable) instead of treating a 5xx as "offline" and retrying forever.
+  **Break-glass:** `CODEMAN_CSRF=off` (read from BOTH `getenv` AND `$_SERVER` — the PHP-FPM
+  `clear_env` gotcha, deliver via nginx `fastcgi_param` like `CODEMAN_DATA`) accepts header-less
+  writes during a migration/straggler window. **This allowlist mirrors the desktop proxy's
+  `READ_ONLY_ACTIONS` EXACTLY — keep the two in sync; a divergence is a bug.** **Deploy precondition
+  (release-cut checklist):** R3 (header-sending client) must be live on the NAS AND all desktop installs
+  updated BEFORE enabling enforcement, or an older client's writes get 403'd → parked as dead-letters.
+  The **desktop proxy (`main.js`) ALSO enforces it**: a mutating action (anything outside the
+  `READ_ONLY_ACTIONS` allowlist — the read actions `tree`/`search_*`/`list_*`/`get_page`/
+  `get_history_version`/`col_sorts`) without the header is 403'd, an anti-trampoline guard that's safe
+  because the renderer always sends it. **HPP guard:** the proxy classifies the
   action from `searchParams`, but PHP's `$_GET['action']` takes the LAST value — so `?action=tree&
   action=save_page` would sneak a write past the read-only check; the proxy therefore **rejects any
   `/api.php` request carrying more than one `action` param outright** (a legit client never sends two).
