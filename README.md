@@ -122,7 +122,9 @@ tabs are reconciled so stale tags never sneak back in):
 
 ### Productivity
 
-A **command palette (⌘K)** jumps to any page or runs a command; type `>` for command mode:
+A **command palette (⌘K)** jumps to any page or runs a command (type `>` for command mode) —
+including **Move current page to…**, a filterable folder picker that relocates the open page
+(history preserved), and quick access to Trash, the tag manager, and Find & replace:
 
 ![Command palette in command mode](docs/images/command-palette.png)
 
@@ -205,8 +207,19 @@ configure a data directory **outside** the web root (below).
        # --- CodeMan configuration (see step 2) ---
        fastcgi_param CODEMAN_DATA /srv/codeman-data;   # data dir OUTSIDE the web root
        # fastcgi_param CODEMAN_PASSWORD changeme;       # optional auth (see below)
+       # fastcgi_param CODEMAN_CSRF off;                # break-glass only (see below)
+       # fastcgi_param CODEMAN_GZIP 1;                  # only if nginx isn't already gzipping api.php
    }
+
+   # Recommended hardening + the version-keyed cache story (see step 2):
+   location = /codeman/index.html { add_header X-Content-Type-Options "nosniff" always; add_header Cache-Control "no-cache" always; }
+   location = /codeman/version.js { add_header Cache-Control "no-cache" always; }
    ```
+   The app already ships its Content-Security-Policy as a `<meta>` tag, so it's protected
+   out of the box; sending it (and `X-Content-Type-Options: nosniff`) as real headers is
+   belt-and-suspenders. The `no-cache` on the two bootstrap files (`index.html`, `version.js`)
+   lets a version bump be seen immediately while everything else caches hard and is busted by
+   a version-keyed `?v=` query — a near-instant warm boot.
 3. Reload nginx. Visit `http://<host>/codeman/`.
 
 > **Apache:** ensure PHP is enabled, then set the data dir with
@@ -231,6 +244,8 @@ All configuration is environment variables, read by `codeman/api.php`:
 |----------|----------|--------------|
 | `CODEMAN_DATA` | Recommended | Absolute path to the data directory (pages, `.trash/`, `.history/`, index). **Keep it outside the web root** so it's never web-served or committed. Defaults to `codeman/structures/` if unset. |
 | `CODEMAN_PASSWORD` | Optional | If set, the API requires this shared secret on every request via the `X-CodeMan-Auth` header. The browser prompts once and remembers it (sign out any time via **Forget password** in the sidebar `⋯` menu). **Off by default** (open, for a trusted LAN). Set it if the app is reachable beyond your trusted network, and serve over HTTPS. |
+| `CODEMAN_CSRF` | Optional | CSRF protection is **on by default** — the API rejects any state-changing request that lacks the `X-CodeMan-Request` header (the app always sends it; reads are allowlisted) with a clean `403`. Set to `off` only as a **break-glass** while upgrading an existing server, if an older client build isn't sending the header yet; remove it once clients are updated. |
+| `CODEMAN_GZIP` | Optional | Set to `1` to gzip API responses. **Off by default** — enable it only after confirming your web server isn't already compressing `api.php` (double-compression corrupts the body). |
 
 Deliver them however your server passes env to PHP: real env vars (`getenv`),
 `$_SERVER` (nginx `fastcgi_param`, Apache `SetEnv`), etc. `api.php` checks `getenv`
@@ -239,6 +254,12 @@ then `$_SERVER`, then falls back to the local `structures/` dir.
 > **Why outside the web root?** Page data can contain anything you paste in. Keeping
 > `CODEMAN_DATA` outside the served folder means the raw `.json` is never reachable over
 > HTTP and never tracked by git.
+
+> **Security posture.** Out of the box the API confines every filesystem path to the data
+> dir (no `..`/dotfile traversal), enforces a CSRF header on all writes, ships a
+> Content-Security-Policy, and accepts the password only via a header (never a URL). It's
+> built for a **single user on a trusted LAN** with the password gate off; if you expose it
+> beyond that, turn `CODEMAN_PASSWORD` on and serve over HTTPS with a trusted certificate.
 
 #### Backups
 

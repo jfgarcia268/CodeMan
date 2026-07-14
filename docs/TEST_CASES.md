@@ -15,16 +15,18 @@ and reports against this matrix); UI/usability passes are run by the
 
 1. **Automated suites first** (fast, deterministic):
    - **Client units** — open `codeman/tests.html` in a browser. Expect the summary
-     **"N passed, 0 failed"** (currently 288). `window.__testResult = {pass, fail, done}` for
+     **"N passed, 0 failed"** (currently 343). `window.__testResult = {pass, fail, done}` for
      scripting (`done` flips true after the async offline tests finish).
    - **Server API** — `bash codeman/tests-api.sh` (spins a throwaway `php -S` against a temp data
-     dir; exit 0 = all green; currently 101). Override port: `bash codeman/tests-api.sh 8099` —
+     dir; exit 0 = all green; currently 114). Override port: `bash codeman/tests-api.sh 8099` —
      a taken port is skipped automatically (bounded upward hunt), so parallel runs stay green.
    - **CI enforces both** on every push/PR: `.github/workflows/tests.yml` runs `tests-api.sh`
      (`api-tests` job), tests.html headless via Playwright + `php -S`
      (`client-tests` job — fails on any assertion failure, a 60s hang, **or a pass count below
      the FLOOR** in `.github/scripts/run-client-tests.mjs`; bump FLOOR when you add assertions),
-     and a grep-based `invariants` job (sw.js version single-sourcing, api.php never precached).
+     and a grep-based `invariants` job (sw.js version single-sourcing, api.php never precached,
+     atomic JSON writes, single `setTreeData` write point, and CSRF read-only allowlist parity
+     between `api.php` and the desktop proxy).
 2. **Then the manual/driven Core suite below**, against a running dev server
    (`cd codeman && php -S localhost:8090`, data falls back to `structures/`). Drive via the
    browser-preview MCP and/or Chrome MCP. Test **both layouts** (single + double/Miller) and
@@ -83,7 +85,9 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
   guarded client + server (create_project, move). **[auto: tests.html isValidProjectParent + tests-api move guard]**
 
 ### TC-search — Search
-- TC-search-01 (P): name/tag/code-type filter; results render in both layouts.
+- TC-search-01 (P): name/tag/code-type filter; results render in both layouts. Matching by name
+  substring / tag / lang key + display label, and folder pruning to a materialized (non-lazy) subtree,
+  is **[auto: tests.html pageMatches/filterTree]**; the rendered result rows stay manual.
 - TC-search-02 (P): deep content search (`⊃`) matches page content, incl. **unicode/emoji/CJK**. **[auto: tests-api search_content]**
 - TC-search-03 (E): **deep-search cap** — a broad term matching > `DEEP_MATCH_CAP` (200) renders only
   the cap and shows the "Showing first N of M — refine your search" banner; banner hides when the
@@ -324,6 +328,8 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
 
 ### TC-vars — Variables / copy-as
 - TC-vars-01 (P): `_V_NAME_V_` fill-ins block- or section-level (mutually exclusive); toggle on/off.
+  Parsing/substitution (`parseVars` dedup + first-seen order; `substituteVars` fill + `MISSING VALUE`
+  fallback) is **[auto: tests.html parseVars/substituteVars]**; the picker UI stays manual.
 - TC-vars-02 (P): Copy-as raw/fenced/escaped/one-line/vars-filled; all route through `copyText()`
   (works in insecure context via execCommand fallback) + `flashCopied`/toast feedback.
 
@@ -448,7 +454,9 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   The check runs AFTER the auth gate (a gated request with no token still 401s first). Break-glass:
   with `CODEMAN_CSRF=off` (env or nginx `fastcgi_param`, dual-source read) a header-less write is
   **accepted → 200**. A 403 is a clean 4xx so a straggler offline client dead-letters the write
-  (recoverable) rather than looping as "offline". **[auto: tests-api]**
+  (recoverable) rather than looping as "offline". **[auto: tests-api server enforcement;
+  tests.html flushQueue parks a 403 `missing request header` as a terminal dead-letter; CI
+  `invariants` job asserts the `$csrfReadOnly` ↔ `READ_ONLY_ACTIONS` allowlists stay identical]**
 - TC-sec-06 (P): **desktop proxy enforces CSRF + origin + HPP.** In the Electron wrapper, a mutating
   `/api.php` POST WITHOUT the `X-CodeMan-Request` header → 403 (read actions pass); a **duplicated
   `action` param** (`?action=tree&action=save_page`, the HPP bypass — PHP takes the last, the proxy
@@ -496,6 +504,12 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   completes the missing path on retry without double-appending the done one. The offline history
   reducers (`recordLocalHistory`/`offlineListHistory`/`offlineGetHistory`/`offlineRestoreHistory`) all
   read/write the per-page keys. **[auto: tests.html]**
+- TC-transport-05 (E): **offline namespace boundary.** The IndexedDB mirror/queue/dead-letters/history
+  are keyed per server so a queue can never replay against the wrong one: `computeNS()` = `ns:local`
+  with no server URL else `ns:<nsHash(url)>`; `nsHash` separates distinct URLs; `kvKey`/`pageKey` carry
+  the `NS + \x1F` prefix and two servers never collide on the same logical key. The dead-letter cascade
+  helpers (`dlCreatedPath`/`dlCascadeParent`) and the pre-mutation re-key capture (`collectRepathPairs`)
+  are covered here too. **[auto: tests.html computeNS/nsHash/kvKey/pageKey + dl cascade + collectRepathPairs]**
 
 ### TC-colsort — Per-column sort (double layout)
 - TC-colsort-01 (P): Name/Code-type/Kind × asc/desc + Manual order; persists in `.colsort.json`;
