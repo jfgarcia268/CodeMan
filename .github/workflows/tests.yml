@@ -64,3 +64,15 @@ jobs:
             echo 'Bare file_put_contents(..., json_encode(...)) found — route it through writeJsonAtomic'
             exit 1
           fi
+      - name: treeData is only written through setTreeData (memo invalidation)
+        run: |
+          # setTreeData() is the SINGLE write point for the sidebar treeData global: it sets
+          # the value AND invalidates the folderCounts/folderMeta memos in lockstep. A bare
+          # `treeData = …` statement anywhere else leaves those per-node aggregates stale.
+          # `[^=]` after the `=` excludes comparisons (==/===/!==); the declaration and the
+          # setTreeData definition itself are the only allowed lines.
+          if grep -rnE 'treeData[[:space:]]*=[^=]' codeman/src \
+             | grep -vE 'function setTreeData|let treeData|var treeData'; then
+            echo 'Direct `treeData =` assignment found — route it through setTreeData() (memo invalidation)'
+            exit 1
+          fi

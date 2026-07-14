@@ -66,7 +66,7 @@ story is squarely "non-trivial."
 
 | File | Role |
 |------|------|
-| `index.html` | Markup; loads **vendored** Prism + **markdown-it** (offline), then `version.js`, then the 7 ordered `src/*.js` scripts (via the dynamic loader array — `version.js` is first so `CODEMAN_VERSION` exists before the modules run). Cache-busts CSS/JS with a `?v=` query over http(s); on `file://` the query is skipped (Chromium won't resolve `foo.js?v=…` off disk). The stylesheet is a plain `<link>` whose href gets `?v=` appended by JS — **never** `document.write` (that wipes the document under a `file://` load). |
+| `index.html` | Markup; loads **vendored** Prism + **markdown-it** (offline). `version.js` is a **static `<script src>`** in `<head>` (so `CODEMAN_VERSION` exists before anything else), then the 7 ordered `src/*.js` scripts via the dynamic loader array (NOT `version.js` — it's static now). Cache-busts CSS/JS with a **version-keyed 3-way `?v=`** via the shared `cacheBustKey()`: `''` on `file://`, `Date.now()` on localhost/desktop, `CODEMAN_VERSION` on a real server (see the cache-bust gotcha). The stylesheet is a plain `<link>` whose href gets the same key appended by JS — **never** `document.write` (that wipes the document under a `file://` load). |
 | `version.js` | **Single version source of truth.** `self.CODEMAN_VERSION = 'X.Y.Z'` — read by the footer (`init.js`) and `importScripts`-ed by `sw.js` for the cache name. Bump this one file per release (CI also syncs it from the git tag for the packaged desktop build). |
 | `src/core.js` | Languages, global state, the `api()` wrapper (offline-aware) + `apiFetch`, toast, `flashCopied`, the `copyText()` clipboard helper (see gotcha), themed modals. `apiFetch` builds a relative `api.php?...` URL, or prefixes `window.CODEMAN_API_BASE` if non-empty — but it's `''` everywhere today (unset in a browser; the desktop preload sets it to `''` so the renderer keeps using the relative, proxied `api.php`), so the URL is effectively always relative. |
 | `src/tree.js` | Sidebar tree (single column) + Miller columns (double, **always exactly 2** — `MILLER_COLS`) + drag-to-sort. `effectiveMode()` forces single-column when `body.is-mobile`, without changing the persisted `sidebarMode` (which **defaults to `double`** on desktop). Project helpers: `pathPrefixes`, `projectChain` (the project-ancestor chain), `isValidProjectParent`; the project-chain banner + color-coded breadcrumb live here. Page rows carry a discreet `❐` (`.tree-dup`) → `duplicatePageFromTree` (both layouts). |
@@ -330,8 +330,24 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
 ## Gotchas / lessons learned
 
 - **Stale cached JS/CSS** caused repeated "still broken" reports (browser served old modules).
-  Fixed via the `?v=Date.now()` cache-bust loader (http(s) only). If you ever see stale behavior,
-  a one-time hard reload loads the new `index.html`.
+  Fixed via the `?v=` cache-bust loader (http(s) only). If you ever see stale behavior, a one-time
+  hard reload loads the new `index.html`.
+- **Cache-bust is version-keyed (3-way) via one `cacheBustKey()` (index.html `<head>`).** `version.js`
+  is a **static `<script src="version.js">`** in `<head>` (NOT in the dynamic loader array) so
+  `self.CODEMAN_VERSION` exists before the key is computed and before any module runs. `cacheBustKey()`
+  returns: `''` on `file://` (Chromium won't resolve `foo.js?v=…` off disk — the desktop wrapper),
+  `'?v=' + Date.now()` on `localhost`/`127.0.0.1`/`::1` (dev + the desktop 127.0.0.1 proxy — SW
+  `ignoreSearch` makes the per-load key free and edits never serve stale), else `'?v=' +
+  CODEMAN_VERSION` on a real hostname (the NAS: assets cache hard, the key only moves on a release
+  bump → a near-instant warm boot, only the two un-keyed bootstrap files travel the wire). BOTH the
+  stylesheet `<link>` bust and the JS module loader call `cacheBustKey()` — one source of truth. **The
+  desktop 127.0.0.1 keeping `Date.now()` is intentional.** **Deploy step (NAS nginx):** serve
+  `= /codeman/index.html` and `= /codeman/version.js` with `Cache-Control: no-cache` (the two un-keyed
+  bootstrap files) so a version bump is always seen; everything else caches hard + is busted by `?v=`.
+  `sw.js` is untouched — its `CACHE_VERSION` still comes from `importScripts('version.js')`.
+- **`document.write` for the stylesheet wiped the document under Electron's `file://` load**
+  (an implicit `document.open()`), and `file://` won't resolve `foo.js?v=…` query URLs — hence
+  the localhost-server approach in the desktop wrapper and the `file://`-aware loader in `index.html`.
 - **`document.write` for the stylesheet wiped the document under Electron's `file://` load**
   (an implicit `document.open()`), and `file://` won't resolve `foo.js?v=…` query URLs — hence
   the localhost-server approach in the desktop wrapper and the `file://`-aware loader in `index.html`.
@@ -477,6 +493,37 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   since folder activation re-renders via `selectFolder`); single-column also gets Up/Down/Home/End +
   Left/Right expand-collapse/parent. It bails when `e.target` is an INPUT (don't hijack inline
   rename/create). A global `:focus-visible` ring lives near the base `button{}` rule.
+- **Page tabs are an ARIA tablist; the section toggle is the accessible collapse button.**
+  `renderMainTabs` (editor.js) marks `#mainTabs` `role="tablist"` and each `.main-tab`
+  `role="tab"` + `aria-selected` + a **roving tabindex** (only the active tab is `0`), carrying
+  `data-path`. Left/Right **wrap** and Home/End jump via the pure `tabArrowIndex(key,i,n)`;
+  arrow-move uses **automatic activation** (opens that page) then `focusTabByPath` re-focuses the
+  rebuilt tab (activation re-renders the strip). Enter/Space open a focused tab. Each tab's **close ✕
+  is a real `<button>`** (in the Tab order, `aria-label="Close <title>"`) so tabs are keyboard-closable;
+  its click closes then moves focus to a surviving tab (never `<body>`). **"Close all" is a real
+  `<button>`** (`aria-label`), NOT a `role=tab`, and stays sticky-pinned on the mobile strip. Full APG
+  pairing: `#mainTabs` carries `aria-label="Open pages"`, each tab an `id` + `aria-controls="page"`,
+  and `#page` is the `role="tabpanel"` (`tabindex=0`, `aria-labelledby=<active tab id>`), set in
+  `renderMainTabs` (persists across `renderPage`'s innerHTML rewrite). The mobile horizontal-scroll
+  strip is untouched. The slow-open affordance (`openPage`) adds `.tabs-loading` + `aria-busy="true"`
+  to the strip after 250 ms, revealing a hidden (first-open) strip early so the spinner paints.
+  For section collapse, `role="button"` + `tabindex=0` + `aria-expanded` + Enter/Space live on the
+  **`.section-toggle`** span, NOT the `.section-header` — the header contains the title `<input>`
+  and action buttons, and a `role=button` MUST NOT wrap interactive descendants. A shared
+  `toggleCollapse()` closure backs both the header click and the toggle keydown so aria-expanded +
+  the `.collapsed` class + save stay in lockstep. `tabArrowIndex` is pure → unit-tested.
+- **`showModal` (core.js) is a real focus-trapping dialog.** The box is `role="dialog"`
+  `aria-modal="true"`, named via `aria-labelledby`→its `.modal-title` (auto-assigned an id after
+  `buildBody`). It captures `document.activeElement` as the **invoker BEFORE** opening and restores
+  focus to it on close (guarded by `document.contains` — a re-render that dropped it fails soft).
+  `onKey` handles **Tab** (`preventDefault` + cycle within the dialog's focusables via the pure
+  `focusTrapNextIndex(i,n,shift)`, wrapping first↔last), Escape (close), Enter (submit) — same as
+  before. On open a `setTimeout(0)` moves focus inside only if `buildBody` didn't already (its own
+  `setTimeout(0)` focus registers first, so this is a fallback); a dialog with no focusable control
+  focuses the `tabIndex=-1` box itself. Every themed confirm/prompt AND the palette's Move-to picker
+  inherit this. `focusTrapNextIndex` is pure → unit-tested. Toast + the `flashCopied` bubble are
+  `role="status" aria-live="polite"` (the offline badge's channel) — one announces per action
+  (flashCopied shows the bubble OR falls back to toast, never both).
 - **Delete buttons are de-emphasized at rest.** `button.danger` is neutral (`#3a3d41` / dim-red
   text) until `:hover`/`:focus-visible` (then full red). The empty page is an **onboarding** state
   (`.empty-state.onboard`: + New Project / + New Page CTAs, ⌘K hint, "Open the sidebar" nudge when
@@ -630,6 +677,34 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   at 1200 pages). `updateSearchCapNote` (tree.js, called from `renderTree`) shows the
   `#searchCapNote` "Showing first N of M — refine your search" banner when capped, hidden otherwise.
   It's a render cap, not a server cap (search_content still scans everything) — don't remove it.
+- **`setTreeData(t)` is the SINGLE write point for `treeData` (tree.js) — no bare `treeData = …`
+  survives outside it (grep-verified).** It sets the global AND calls `invalidateTreeMemos()`, which
+  drops the `folderCounts`/`folderMeta` WeakMap caches (memoized by node identity — those aggregates
+  recurse the whole subtree, so re-render/resize/Miller-paging would otherwise re-walk it every
+  time). Every writer routes through it: `loadTree` and the four offline.js paths (`probeBackend`,
+  `flushQueue` reconcile, `restoreNodeToTree`, `mutateTreeCache`). The WeakMap is safe **because**
+  each write either replaces node objects (fresh from IndexedDB/server) or mutates in place then
+  immediately calls `setTreeData` — so a cached value can never outlive the node it summarised. **A
+  future direct `treeData =` assignment = stale counts/tags; always go through `setTreeData`.** A CI
+  grep invariant (`.github/workflows/tests.yml` `invariants` job) fails the build on any bare
+  `treeData =` in `codeman/src/` outside the declaration + `setTreeData` definition — mirroring the
+  `writeJsonAtomic` invariant; keep source comments free of a literal `treeData =` token so they
+  don't trip it.
+- **Single-column tree is LAZY-built — a collapsed folder's `.tree-children` is left unbuilt
+  (`data-lazy="1"`, empty) and constructed on first expand (tree.js `renderTreeNode` folder branch +
+  its `toggleExpand`).** This is what stops the sidebar scaling with library size (collapsed
+  `renderTree()` dropped ~12ms→~0.2ms at 1200 pages). **Consumer-path contract — anything that must
+  reach a collapsed row MUST force the build first or operate on DATA, not the DOM:** a non-empty
+  search sets `forceOpen` (filtered tree via `filterTree` is always fully built — laziness never
+  hides a result); `openPage`/`revealTreeRow`/duplicate flows call `expandAncestors` (→
+  `expandedFolders` → `renderTree` builds the chain eagerly) BEFORE scrolling to the row; persisted
+  `expandedFolders` build eagerly; keyboard ArrowRight-expand routes through `activateTreeItem →
+  click → toggleExpand` (children exist before the next `visibleTreeItems` query); drag/reorder +
+  `primeOfflineCache` walk `treeData`, not the DOM. **`toggleExpand` re-runs
+  `initRovingTabindex(#tree)` after a lazy build** so the freshly-built rows join keyboard traversal
+  with exactly one `tabindex=0` preserved (it bails when one already exists). Miller (double) already
+  renders only its 2 visible columns, so laziness there is inherent — its win is the memoized
+  aggregates. Don't add a path that touches a collapsed subtree's rows without expanding it first.
 - **`openPage` dedups concurrent/rapid opens.** It's async (awaits `get_page`), so a rapid
   double-click or N calls in one tick would each pass the "already open?" check before any push and
   create duplicate tabs. An in-flight `_openingPages` Map (editor.js) makes concurrent opens of the
@@ -644,6 +719,40 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   invisible to `buildTree`. A **CI invariant** greps that no bare `file_put_contents(…, json_encode(…))`
   survives outside the helper — route new JSON writes through it. (Linux/macOS only; Windows can't
   `rename()` over an existing file, but api.php never runs there.)
+- **`.index.json` is read LAZILY via `loadIndex()` (api.php).** Only the three index-using actions
+  — `tree`, `rebuild_index`, `list_tags` — call `loadIndex()` (idempotent, guarded by `$indexLoaded`);
+  EVERY other request skips the (potentially large) index read entirely. `list_tags` is now
+  index-backed (`pageMetaIndexed` + `flushIndex`, mirroring `tree`) — a warm call reuses cached
+  tags/langs and only re-parses pages whose mtime moved (target ≤5 ms warm). Don't reintroduce an
+  eager top-level index read; a new index-consuming action must call `loadIndex()` first.
+- **`search_content` has a raw `stripos` fast path (api.php).** Pages are stored `JSON_UNESCAPED_UNICODE`
+  (`save_page`), so most content — incl. UTF-8 — matches the raw JSON directly without a decode. The
+  expensive decode-and-re-encode-unescaped fallback runs ONLY when the raw haystack MISSES **and** the
+  query is non-ASCII **or contains `/`/`\`** (`preg_match('/[^\x00-\x7F]/', $q) || strpbrk($q, '/\\')`).
+  Both conditions matter: a page written with `\uXXXX` escapes needs the non-ASCII branch; a page whose
+  content has a `/` written with **bare** `JSON_PRETTY_PRINT` stores it as `\/` on disk, so a slash-bearing
+  ASCII query (`api/v1`, `TCP/IP`) raw-misses and needs the slash branch (WITHOUT it the page is silently
+  hidden from the search — do NOT narrow this back to non-ASCII only). The pinned tests-api cases (a
+  `\uXXXX`-on-disk file AND an escaped-`\/` file, both exercising the fallback) must stay green. Common
+  ASCII-no-slash queries keep the fast path. **Also:** `replace_content`/`rename_tag` now write
+  `JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES` (matching `save_page`) so a
+  *rewritten* page re-stores `/`/UTF-8 literally and matches via the fast path — but this does NOT
+  retroactively fix pages already on disk with escaped slashes, so the fallback broadening is the
+  necessary fix; the writer normalization just stops new escaped-slash/unicode writes.
+- **The five content-scanning actions skip dot-dirs via `contentFileIterator($base)` (api.php).**
+  `list_tags`, `search_content`, `search_blocks`, `replace_content`, `rename_tag` all iterate through it
+  — a `RecursiveCallbackFilterIterator` that returns false for any dot-prefixed entry, so it NEVER
+  descends into `.history`/`.trash` (which on a mature library hold ~20 versions/page = tens of thousands
+  of hidden files that would otherwise be stat'd, blowing the ≤5 ms warm `list_tags` target). Each caller
+  keeps its in-loop `/.'`-in-path skip as belt-and-suspenders. **`rrmdir`'s iterator is deliberately NOT
+  filtered** — the delete path MUST walk dot-dirs. Route a new content-scanning action through
+  `contentFileIterator`, never a bare `RecursiveDirectoryIterator($base, …)`.
+- **API-response gzip is OPT-IN behind `CODEMAN_GZIP=1` (api.php, OFF by default).** `ob_gzhandler` is
+  engaged only when the env/`$_SERVER` flag is `'1'` (and `zlib.output_compression` is off). It's a
+  **deploy gate**: a NAS nginx might already gzip PHP output, and double-compression corrupts the body
+  — enable it ONLY after confirming nginx isn't compressing `api.php`. The desktop path is always safe:
+  the proxy's `fetch()` (undici) decompresses transparently and re-serves identity, so the renderer
+  never sees gzip — `CODEMAN_SMOKE=1`'s `gzip` probe asserts a well-formed body + no round-trip regression.
 - **`rename`/`move` migrate the `.history` subtree (api.php `migrateHistory`).** After the main
   `rename()`, the page's/folder's `.history/<rel>` is `@rename`d to the new rel (best-effort — a
   missing/locked history never fails the action; both rels `safePath`'d). If the **destination history
@@ -661,8 +770,8 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   bug). Each is its own kv entry keyed `kvKey('dl:'+id)` = `<NS>\x1F dl:<id>` — so retry is
   **namespace-locked by construction** (the `dl*` helpers + `kvEnumerate('dl:')` only ever touch the
   ACTIVE namespace; a parked op can't replay against the wrong server, same guarantee as the queue).
-  Key shape mirrors WS-6's planned `history:<path>` keys (`<NS>\x1F<kind>:<suffix>`) so `kvEnumerate`
-  serves both — no second migration. `flushQueue` classifies via `res._transient` (set by core.js on a
+  Key shape is shared with the **now-live** per-page `history:<path>` keys (`<NS>\x1F<kind>:<suffix>`)
+  so `kvEnumerate` serves both — no second migration. `flushQueue` classifies via `res._transient` (set by core.js on a
   malformed body), NOT string-matching — and both the normal path AND the **conflict-force resend** run
   the same 3-attempt retry before parking a transient (only a genuine terminal parks immediately). The
   `openDeadLetterPanel` (features.js) groups by `cascadeOf` with the **failed parent `create_*` hoisted
@@ -673,6 +782,22 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   distinct **`.danger` (red)** state for dead-letters (louder than routine amber offline/queued); the
   panel is also reachable from the command palette + sidebar `⋯` menu, both gated on `dlCountCached()>0`
   (a sync cache refreshed by `updateOfflineBadge`).
+- **Local history is per-page `history:<path>` kv keys, not one `history` blob (offline.js).** Each
+  page's version log is its own kv entry (`kvKey('history:'+path)` = `<NS>\x1F history:<path>`, the same
+  `<kind>:<suffix>` seam as `dl:`), same `{ts,size,data}` array shape. The four reducers
+  (`recordLocalHistory`/`offlineListHistory`/`offlineGetHistory`/`offlineRestoreHistory`), the offline
+  rename/move re-key (`rekeyCachedPaths`), and `__codemanAdoptInto`'s history merge all read/write per-page
+  keys — one place each; don't reintroduce the single-blob reads. **`migrateHistoryKeys()` (boot IIFE,
+  after `migrateLegacy`) is the one-time fold off the old blob and is the highest-risk item — its three
+  invariants are load-bearing:** (a) **ALL NAMESPACES** — it cursors every `<ns>\x1F history` blob (not
+  just the active one) so a stranded namespace's local history migrates too; (b) **IDEMPOTENT** — it
+  writes a `history:<path>` key ONLY where the target is ABSENT, so a re-run or a crash-then-retry never
+  double-appends or clobbers newer per-path data; (c) **LEGACY-RETAINED** — it leaves the `history` blob
+  in place (rollback-safe: reverting the code restores the old read path losslessly, mirroring
+  `migrateLegacy`) and sets a per-ns `__history_migrated` flag **only after** that namespace's paths are
+  all written — so a mid-transform crash (flag never set) is safe to retry on the next boot, and a second
+  boot is a cheap no-op. Unit-tested in tests.html (per-path keys, legacy intact, flag, no-op re-run,
+  present-target-no-clobber, mid-transform retry).
 - **`flushSave` is dirty-guarded; unload uses keepalive, not `sendBeacon` (editor.js).** `pageDirty`
   (a Set of paths) is marked in `scheduleSave` (the one choke point every mutation funnels through) and
   cleared in `savePage` ONLY on a successful non-conflict save (mtime OR queued-offline branch; and NOT
@@ -708,27 +833,78 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
 `favorites`, `recentCopies`, `authToken` (only when the password gate is on), `exportNudgeAt` +
 `exportNudgeOff` (offline-only desktop backup nudge).
 **IndexedDB `codeman`:** store `kv` holds `tree`, `queue` (pending writes), `trash` (local
-recoverable deletes), `history` (per-page local version log), and per-op `dl:<id>` **dead-letters**
-(writes the server rejected, awaiting review) — all keys namespaced per server (`<NS>\x1F…`); store
-`pages` holds cached page content. **Desktop wrapper:** `settings.json` in the OS user-data dir holds
+recoverable deletes), per-page `history:<path>` **local version logs**, per-op `dl:<id>`
+**dead-letters** (writes the server rejected, awaiting review), and a `__history_migrated` flag — all
+keys namespaced per server (`<NS>\x1F…`); the legacy single `history` blob is retained (rollback-safe)
+after `migrateHistoryKeys` folds it into the per-page keys. Store `pages` holds cached page content. **Desktop wrapper:** `settings.json` in the OS user-data dir holds
 the server URL or `{offlineOnly:true}`.
 
 ---
 
 ## Security / safety
 
-- `safeName()` rejects path separators, `..`, and leading `.` for all create/rename names;
-  `safePath` confines file access to the data root. `requireFields()` returns clean `{error}`
-  JSON instead of leaking PHP warnings. **`empty_trash` runs the stored (raw, client-supplied)
-  `origPath` through `safePath($historyDir, …)` before `rrmdir`-ing the history subtree** — without
-  it a `../`-bearing `origPath` could escape `.history`. Any new path built from a stored/echoed
-  value must be `safePath`'d the same way.
+- `safeName()` rejects path separators, `..`, and leading `.` for all create/rename names.
+  **`safePath($base, $rel)` now REJECTS the whole path (returns `null`) if ANY segment is `.`,
+  `..`, or dot-prefixed** (a hidden/system file), mirroring `safeName` — empty segments (doubled/
+  edge slashes) still silently drop, and an empty `$rel` still resolves to `$base` (root ops). It
+  used to *strip* `..`/`.` and keep going, which still let a dotfile read/delete resolve (`get_page
+  {path:".index.json"}`, `delete {path:".history"}`) and left `list_history` on a **raw concat**
+  traversal hole. **EVERY caller must treat `null` as reject:** the ~18 action call sites →
+  `jsonError('invalid path')`; the `empty_trash` loop → **skip the entry's history prune, never
+  `rrmdir` a null path**; `restore_trash` → error (a crafted `.meta` `origPath` stays inert);
+  `list_history` → `[]`; `migrateHistory` and `snapshotHistory` route `$rel` through `safePath`
+  INTERNALLY and no-op (best-effort) on `null`, so a future unguarded caller can't reintroduce a
+  `.history` traversal via those helpers. Any new path built from a stored/echoed value must be
+  `safePath`'d and null-checked the same way.
+- **CSRF: send everywhere, enforce on BOTH the server and the proxy.** Every request carries an
+  `X-CodeMan-Request: 1` header, attached at the single choke point `apiHeaders()` (core.js) — so
+  normal calls, `flushQueue` replay (incl. queues parked by an OLDER client — headers attach at SEND
+  time), and the keepalive unload-save all send it. **`api.php` NOW enforces it** (deny-by-default),
+  right AFTER the auth gate (a gated request with no token still 401s first): a `$csrfReadOnly`
+  allowlist (`tree`/`col_sorts`/`get_page`/`list_tags`/`list_trash`/`list_history`/
+  `get_history_version`/`search_content`/`search_blocks`) may run header-less; **every other action —
+  including any FUTURE one — needs the header** (implemented as `!in_array($action, $csrfReadOnly) &&
+  no header → 403`, so a newly added write is fail-CLOSED, never fail-open). The 403 is a **clean 4xx**
+  (`jsonError('missing request header', 403)`) so a straggler offline client DEAD-LETTERS the write
+  (Phase-2 panel, recoverable) instead of treating a 5xx as "offline" and retrying forever.
+  **Break-glass:** `CODEMAN_CSRF=off` (read from BOTH `getenv` AND `$_SERVER` — the PHP-FPM
+  `clear_env` gotcha, deliver via nginx `fastcgi_param` like `CODEMAN_DATA`) accepts header-less
+  writes during a migration/straggler window. **This allowlist mirrors the desktop proxy's
+  `READ_ONLY_ACTIONS` EXACTLY — keep the two in sync; a divergence is a bug.** **Deploy precondition
+  (release-cut checklist):** R3 (header-sending client) must be live on the NAS AND all desktop installs
+  updated BEFORE enabling enforcement, or an older client's writes get 403'd → parked as dead-letters.
+  The **desktop proxy (`main.js`) ALSO enforces it**: a mutating action (anything outside the
+  `READ_ONLY_ACTIONS` allowlist — the read actions `tree`/`search_*`/`list_*`/`get_page`/
+  `get_history_version`/`col_sorts`) without the header is 403'd, an anti-trampoline guard that's safe
+  because the renderer always sends it. **HPP guard:** the proxy classifies the
+  action from `searchParams`, but PHP's `$_GET['action']` takes the LAST value — so `?action=tree&
+  action=save_page` would sneak a write past the read-only check; the proxy therefore **rejects any
+  `/api.php` request carrying more than one `action` param outright** (a legit client never sends two).
+  The proxy also confines `/api.php`, `/__config`, `/__test` to its own loopback origin
+  (`sameOriginOk`: Host must be `127.0.0.1:<port>`; and for STATE-CHANGING requests — non-GET writes,
+  `/__config`, `/__test` — the browser `Origin` must be PRESENT and match, `{requireOrigin:true}`, so a
+  header/Origin-less mutating request can't slip through on Host alone; reads may omit Origin). It pins
+  top-level navigation via a `will-navigate` handler AND matches the `setWindowOpenHandler` origin by
+  **parsed host** (`new URL(url).host === '127.0.0.1:<port>'`), never a string prefix — else
+  `http://127.0.0.1.evil.com/` reads as internal. `/__test` targets are restricted to http(s).
+- **CSP + nosniff.** `index.html` ships a `<meta http-equiv="Content-Security-Policy">`:
+  `default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src
+  'self' data: https:; object-src 'none'; base-uri 'none'`. `'unsafe-inline'` is REQUIRED (no build
+  step): inline `onclick=` handlers, the inline `<script>` loaders, and the inline `ED_*` element
+  styles. All vendored/executable code is same-origin `'self'` (the Prism autoloader injects
+  same-origin `<script src>`; `?v=` cache-bust queries don't change the source origin; markdown-it +
+  the SW are same-origin). **`img-src` includes `https:`** so remote https images referenced in note/
+  rich blocks render (a self-hosted snippet manager legitimately references remote images; plain
+  `http:`/other schemes stay blocked — no mixed content, marginal exfil risk under the trusted
+  single-user model). At the release cut the **NAS nginx** deployment must ALSO send this header +
+  `X-Content-Type-Options: nosniff` in `default.conf` (can't be set from a `<meta>`; deployment step).
 - **Projects nest only in projects:** `create_project` and `move` reject placing a `.project`
   folder anywhere except the root or inside another project (a parent with its own `.project`
   marker) — also guarded client-side via `isValidProjectParent`.
 - **Optional password gate:** set `CODEMAN_PASSWORD` (env or web-server param) and `api.php`
-  requires it on every request via `hash_equals` (`X-CodeMan-Auth` header or `?token=`). **Off by
-  default** (open, trusted-LAN assumption). The client prompts once on a 401, stores the token,
+  requires it on every request via `hash_equals` (`X-CodeMan-Auth` header **only** — the old
+  `?token=` query fallback was removed: a secret in the URL leaks into logs/history/`Referer`).
+  **Off by default** (open, trusted-LAN assumption). The client prompts once on a 401, stores the token,
   retries. Page data lives outside the web root and is only reachable through `api.php`, so gating
   the API protects the data; serve over HTTPS if exposed beyond a trusted network. **A wrong secret
   is NOT persisted** — if the retry after the prompt still 401s, `apiFetch` clears the bad token so

@@ -25,13 +25,22 @@ function runDeepSearch() {
   }, 220);
 }
 
+// Coalesce the sidebar re-render (and, in deep-search mode, the open page's block
+// filter) off the keystroke hot path — a large library renders too slowly to run
+// per key. The renderPage rides the SAME debounce window (never dropped) so the
+// in-page filter still reflects the query well within ~250 ms; deepSearch is read at
+// fire time so a toggle mid-window is honoured. runDeepSearch keeps its own 220 ms
+// fetch debounce (and its own trailing renderTree once results land).
+const debouncedSearchRender = debounce(() => {
+  renderTree();
+  if (deepSearch) renderPage();
+}, 120);
 function updateSearch() {
   searchQuery = searchInput.value;
   document.querySelector('.sidebar-search').classList.toggle('has-text', searchQuery !== '');
   if (!searchQuery.trim()) { deepMatches = new Set(); deepMatchTotal = 0; }
   else runDeepSearch();
-  renderTree();
-  if (deepSearch) renderPage(); // keep the open page's block filter in sync/locked
+  debouncedSearchRender();
 }
 
 function setDeepSearch(on) {
@@ -71,7 +80,8 @@ document.getElementById('layoutToggle').addEventListener('click', (e) => {
 });
 
 // Re-render the Miller window on viewport changes (e.g. sidebar resize/orientation).
-window.addEventListener('resize', () => { if (sidebarMode === 'double') renderTree(); });
+// Debounced (~120 ms) so a continuous drag/rotate coalesces to one render.
+window.addEventListener('resize', debounce(() => { if (sidebarMode === 'double') renderTree(); }, 120));
 
 /* ---------- EXPAND / COLLAPSE ALL ---------- */
 
@@ -126,14 +136,24 @@ function applySidebarWidth(w) {
   const sidebar = document.querySelector('.sidebar');
   let startX, startW;
 
+  // rAF-coalesce the double-layout re-render during a drag: at most one renderTree per
+  // frame (Miller renderTree is heavy on a large library — running it on every
+  // mousemove stutters the drag). The width itself applies live via flex on each move.
+  let renderRaf = null;
+  function scheduleColumnRender() {
+    if (renderRaf) return;
+    renderRaf = requestAnimationFrame(() => { renderRaf = null; renderTree(); });
+  }
   function onMove(e) {
     applySidebarWidth(startW + (e.clientX - startX));
     // columns reflow via flex live; re-render so the slider's fit clamp keeps up
-    if (sidebarMode === 'double') renderTree();
+    if (sidebarMode === 'double') scheduleColumnRender();
   }
   function onUp() {
     document.removeEventListener('mousemove', onMove);
     document.removeEventListener('mouseup', onUp);
+    if (renderRaf) { cancelAnimationFrame(renderRaf); renderRaf = null; }
+    if (sidebarMode === 'double') renderTree(); // final settle at the released width
     document.body.classList.remove('resizing');
     resizer.classList.remove('dragging');
     const w = sidebar.getBoundingClientRect().width;

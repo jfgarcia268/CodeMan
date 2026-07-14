@@ -13,6 +13,70 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
 
 ## [Unreleased]
 
+## [1.13.0] — 2026-07-14
+
+### Added
+- **Accessibility: full keyboard & screen-reader reach.** Page tabs are now a proper tab strip —
+  arrow keys (Left/Right, Home/End) move between them and open the page, each tab announces its
+  selected state, and every tab (and "Close all") can be closed with the keyboard. Collapsible
+  section headers are keyboard-operable (Tab to the disclosure triangle,
+  Enter/Space to collapse/expand) and announce collapsed/expanded. Confirm/prompt dialogs trap focus
+  while open (Tab cycles inside), close on Escape, and return focus to whatever opened them.
+  Copy/save/error feedback (toasts and the "Copied" bubble) is announced to assistive tech.
+- **"Move current page to…" command.** A new command-palette entry (`⌘K`, then `>`) opens a
+  filterable folder picker to move the open page to another folder — the same move (with history
+  preserved) you'd get by dragging it in the sidebar.
+
+### Changed
+- **Readability & contrast pass.** Faint low-contrast text (empty states, search placeholders) is
+  darkened to meet AA contrast, the smallest labels are enlarged slightly, and the double-column
+  paging rails are widened for an easier click/touch target. A slow page open (>250 ms) now shows a
+  brief spinner on the tab strip.
+- **Faster sidebar & search on large libraries.** The folder tree now builds collapsed subtrees
+  only when you open them (instead of building the whole tree up front), and repeated renders reuse
+  cached folder counts/tags — so the sidebar stays instant even with thousands of pages. Typing in
+  search and dragging the sidebar divider are also smoothed (coalesced) so they don't stutter at
+  scale. No change to what you see: search, reveal, and keyboard navigation work exactly as before.
+- **Faster warm boot & server responses.** On a hosted (non-localhost) server the app now
+  cache-busts its scripts/styles by *version* instead of a per-load timestamp, so after the first
+  visit the browser reuses the cached files until the next release — a near-instant warm boot with
+  almost nothing re-downloaded. The tag list is now served from the same metadata index the sidebar
+  uses (fast even with thousands of pages), and deep content search takes a quicker path on the
+  common case. An optional gzip of API responses can be enabled server-side (`CODEMAN_GZIP=1`) once
+  you've confirmed your web server isn't already compressing. No change to what you see.
+
+### Fixed
+- **Content search finds pages with a slash in the text again.** A deep (content) search for a term
+  containing a `/` (e.g. `api/v1`, `TCP/IP`) could miss pages — especially ones recently touched by the
+  tag manager or find-&-replace — because of how the slash was stored on disk. Slash searches now return
+  all matching pages, and pages rewritten by those tools are re-saved so they stay findable.
+
+### Security
+- **Server-side CSRF protection.** The API now requires the `X-CodeMan-Request` header on every
+  state-changing action (deny-by-default: reads are allowlisted, every write — including any future
+  one — is protected), rejecting forged/cross-site header-less writes with a clean 403. The web
+  client has been sending this header since the previous release, and the desktop wrapper already
+  enforced it, so normal use is unaffected. A `CODEMAN_CSRF=off` server setting is available as a
+  break-glass during a migration window. **Deploy note:** roll out the updated client/desktop app
+  before enabling enforcement on an existing server.
+- **Tighter path safety.** The server now flatly rejects any request whose path contains a `..`,
+  `.`, or hidden/dotfile segment (e.g. attempts to read `.index.json` or delete `.history` are
+  refused) instead of quietly stripping it — closing read/traversal gaps in page reads, deletes,
+  history listing, and trash restore. Legitimate nested pages are unaffected.
+- **Password no longer accepted in the URL.** The optional password gate now only reads the
+  `X-CodeMan-Auth` header; the old `?token=` query fallback (which could leak the secret into
+  server logs / browser history) was removed.
+- **Content Security Policy.** The app ships a CSP that confines scripts, styles, and images to
+  trusted sources, reducing the blast radius of any injected content. Remote **https** images in
+  note/rich blocks still load; plain-http and other-scheme remote images are blocked.
+- **Hardened desktop wrapper.** The desktop app's internal proxy now confines its privileged
+  endpoints to its own loopback origin (requiring a matching Origin on any state-changing request),
+  rejects duplicated `action` parameters and header-less writes, blocks off-origin navigation and
+  look-alike-host link windows, and only tests http(s) server URLs — defense-in-depth so nothing
+  outside the app can drive it.
+- **Find & Replace regex safety.** A pathological (catastrophic-backtracking) search pattern now
+  fails fast with a clear "regex too complex" message instead of hanging the request.
+
 ## [1.12.0] — 2026-07-13
 
 ### Added

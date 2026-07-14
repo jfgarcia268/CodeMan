@@ -1,6 +1,19 @@
 <?php
 header('Content-Type: application/json');
 
+// Optional gzip of API responses. OFF by default — a NAS deploy might already gzip
+// PHP output at the nginx layer, and double-compressing would corrupt the body. Turn
+// it on with CODEMAN_GZIP=1 (env or fastcgi_param) ONLY after confirming nginx isn't
+// compressing api.php (see the deploy gate in CLAUDE.md / docs/TEST_CASES.md).
+// ob_gzhandler self-skips when the client sends no `Accept-Encoding: gzip`, and the
+// desktop proxy's fetch() decompresses transparently then re-serves identity content,
+// so enabling it never affects the desktop wrapper (CODEMAN_SMOKE asserts that).
+$gzipOn = getenv('CODEMAN_GZIP');
+if (!$gzipOn && isset($_SERVER['CODEMAN_GZIP'])) $gzipOn = $_SERVER['CODEMAN_GZIP'];
+if ($gzipOn === '1' && !ini_get('zlib.output_compression') && function_exists('ob_gzhandler')) {
+    @ob_start('ob_gzhandler');
+}
+
 // Storage location for persisted pages/folders.
 // Set CODEMAN_DATA (e.g. /config/data/codeman on the NAS) to keep data
 // OUTSIDE the cloned repo so git operations never touch it and the files
@@ -29,9 +42,19 @@ $indexFile = $base . '/.index.json';
 $index = [];           // path => ['tags'=>[], 'langs'=>[], 'mtime'=>int]
 $indexDirty = false;   // set when an entry is added/updated/pruned
 $indexSeen = [];       // paths encountered this request (for pruning)
-if (file_exists($indexFile)) {
-    $loaded = json_decode(@file_get_contents($indexFile), true);
-    if (is_array($loaded)) $index = $loaded;
+$indexLoaded = false;  // read from disk lazily — see loadIndex()
+
+// Lazily read .index.json into $index. Only the index-using actions (tree,
+// rebuild_index, list_tags) call this, so EVERY other request skips the
+// (potentially large) index read entirely. Idempotent within a request.
+function loadIndex() {
+    global $index, $indexFile, $indexLoaded;
+    if ($indexLoaded) return;
+    $indexLoaded = true;
+    if (file_exists($indexFile)) {
+        $loaded = json_decode(@file_get_contents($indexFile), true);
+        if (is_array($loaded)) $index = $loaded;
+    }
 }
 
 // Emit an error response and stop. Keeps PHP warnings out of the JSON body.
@@ -60,11 +83,20 @@ function safeName($n) {
     return $n;
 }
 
+// Resolve a relative path under $base, or return NULL if any segment is unsafe.
+// A segment that is '.', '..', or dot-prefixed (a hidden/system file) REJECTS the
+// whole path (returns null) — mirroring safeName, so a traversal or a dotfile read
+// can never resolve to a real location. Empty segments (from doubled slashes or a
+// leading/trailing slash) are silently dropped. An empty $rel resolves to $base
+// itself (root operations), never null. EVERY caller must treat null as "reject".
 function safePath($base, $rel) {
     $rel = str_replace('\\', '/', $rel);
-    $parts = array_filter(explode('/', $rel), function($p) {
-        return $p !== '' && $p !== '.' && $p !== '..';
-    });
+    $parts = [];
+    foreach (explode('/', $rel) as $p) {
+        if ($p === '') continue;                                   // doubled/edge slash → drop
+        if ($p === '.' || $p === '..' || $p[0] === '.') return null; // traversal / dotfile → reject
+        $parts[] = $p;
+    }
     return $base . '/' . implode('/', $parts);
 }
 
@@ -98,6 +130,7 @@ function migrateHistory($oldRel, $newRel) {
     global $historyDir;
     $from = safePath($historyDir, $oldRel);
     $to = safePath($historyDir, $newRel);
+    if ($from === null || $to === null) return; // unsafe rel → skip (best-effort, never fail the move)
     if ($from === $to || $from === $historyDir . '/' || !file_exists($from)) return;
     $parent = dirname($to);
     if (!is_dir($parent)) @mkdir($parent, 0777, true);
@@ -363,6 +396,23 @@ function flushIndex() {
     }
 }
 
+// A recursive file iterator over the data root that NEVER descends into hidden
+// dot-directories (.history/.trash/.index.json/…). The content-scanning actions
+// (list_tags, search_content, search_blocks, replace_content, rename_tag) use this so
+// they don't stat tens of thousands of history/trash files on a mature library (history
+// keeps up to 20 versions per page). The delete path (rrmdir) deliberately does NOT use
+// it — it MUST walk dot-dirs. Each caller keeps its in-loop "/."-in-path skip as
+// belt-and-suspenders; buildTree is already immune (scandir + dot-skip).
+function contentFileIterator($base) {
+    $dir = new RecursiveDirectoryIterator($base, RecursiveDirectoryIterator::SKIP_DOTS);
+    // Returning false for a dot-dir prevents descent into it entirely (not just skipping
+    // the entry) — so .history/.trash subtrees are never walked.
+    $filter = new RecursiveCallbackFilterIterator($dir, function ($current) {
+        return substr($current->getFilename(), 0, 1) !== '.';
+    });
+    return new RecursiveIteratorIterator($filter);
+}
+
 // Recursively remove a directory and its contents.
 function rrmdir($path) {
     if (is_dir($path)) {
@@ -383,7 +433,12 @@ function snapshotHistory($base, $rel, $path) {
     if (!file_exists($path)) return;
     $old = @file_get_contents($path);
     if ($old === false) return;
-    $hdir = $historyDir . '/' . $rel;
+    // Confine $rel INSIDE the helper (not just at the callers): today every caller passes
+    // an already-validated path, but this used to be a raw concat — the same latent-trap
+    // class as the list_history hole. safePath returns null for a traversal/dotfile rel →
+    // best-effort no-op so a future unguarded caller can't reintroduce a .history escape.
+    $hdir = safePath($historyDir, $rel);
+    if ($hdir === null) return;
     if (!is_dir($hdir)) mkdir($hdir, 0777, true);
     $stamp = @filemtime($path) ?: time();
     $vfile = $hdir . '/' . $stamp . '.json';
@@ -406,13 +461,14 @@ $input = json_decode(file_get_contents('php://input'), true);
 // Optional shared-secret gate. OFF by default: with no CODEMAN_PASSWORD set the
 // API stays open (the trusted-LAN/NAS assumption). Set CODEMAN_PASSWORD (env or
 // nginx fastcgi_param, same delivery as CODEMAN_DATA) to require it on every
-// request — the client sends it in the X-CodeMan-Auth header (or ?token=). Since
-// page data lives outside the webroot and is only reachable through this script,
-// gating here protects the data. hash_equals avoids timing leaks.
+// request — the client sends it in the X-CodeMan-Auth header. Since page data lives
+// outside the webroot and is only reachable through this script, gating here protects
+// the data. hash_equals avoids timing leaks. (The old ?token= query fallback was
+// removed: a secret in the URL leaks into logs/history/Referer — header only now.)
 $authPass = getenv('CODEMAN_PASSWORD');
 if (!$authPass && !empty($_SERVER['CODEMAN_PASSWORD'])) $authPass = $_SERVER['CODEMAN_PASSWORD'];
 if ($authPass) {
-    $provided = $_SERVER['HTTP_X_CODEMAN_AUTH'] ?? ($_GET['token'] ?? '');
+    $provided = $_SERVER['HTTP_X_CODEMAN_AUTH'] ?? '';
     if (!is_string($provided) || !hash_equals((string)$authPass, $provided)) {
         http_response_code(401);
         echo json_encode(['error' => 'authentication required', 'auth' => true]);
@@ -420,8 +476,34 @@ if ($authPass) {
     }
 }
 
+// CSRF enforcement (deny-by-default). Every mutating action requires the
+// X-CodeMan-Request header — attached at the client's single choke point
+// apiHeaders() (core.js) on normal calls, offline flushQueue replay, and the
+// keepalive unload-save. The client has been SENDING it since R3, so flipping
+// enforcement on here rejects only header-less cross-site/forged writes.
+// READ-ONLY allowlist mirrors the desktop proxy's READ_ONLY_ACTIONS
+// (codeman-desktop/main.js) EXACTLY — keep the two in sync. Anything NOT on
+// this list (including any future action) needs the header: fail-CLOSED, so a
+// newly added write is protected by default rather than slipping through.
+// Break-glass: set CODEMAN_CSRF=off (env or nginx fastcgi_param, same delivery
+// as CODEMAN_DATA) to accept header-less writes during a migration / straggler
+// window. A rejection is a clean 4xx so a stale offline client DEAD-LETTERS the
+// write (visible/recoverable) rather than treating it as "offline" and retrying.
+$csrfReadOnly = [
+    'tree', 'col_sorts', 'get_page', 'list_tags', 'list_trash', 'list_history',
+    'get_history_version', 'search_content', 'search_blocks',
+];
+$csrfOff = getenv('CODEMAN_CSRF');
+if ($csrfOff === false && isset($_SERVER['CODEMAN_CSRF'])) $csrfOff = $_SERVER['CODEMAN_CSRF'];
+if ($csrfOff !== 'off'
+    && !in_array($action, $csrfReadOnly, true)
+    && empty($_SERVER['HTTP_X_CODEMAN_REQUEST'])) {
+    jsonError('missing request header', 403);
+}
+
 switch ($action) {
     case 'tree':
+        loadIndex();
         $tree = buildTree($base, $base);
         flushIndex();
         echo json_encode($tree);
@@ -429,6 +511,7 @@ switch ($action) {
 
     case 'rebuild_index':
         // Force a full re-parse: drop the index, then rebuild from disk.
+        loadIndex();
         $index = [];
         $indexDirty = true;
         $indexSeen = [];
@@ -442,7 +525,7 @@ switch ($action) {
         $q = strtolower(trim($_GET['q'] ?? ''));
         $matches = [];
         if ($q !== '') {
-            $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($base, RecursiveDirectoryIterator::SKIP_DOTS));
+            $it = contentFileIterator($base);
             foreach ($it as $file) {
                 if (substr($file->getFilename(), 0, 1) === '.') continue;
                 // skip anything inside hidden dirs (.trash/.history)
@@ -450,12 +533,24 @@ switch ($action) {
                 if (substr($file->getFilename(), -5) !== '.json') continue;
                 $content = @file_get_contents($file->getPathname());
                 if ($content === false) continue;
-                // Decode then re-encode unescaped so a literal UTF-8 query matches
-                // content stored with \uXXXX JSON escaping (search_blocks decodes
-                // too — keep the two search surfaces consistent on Unicode).
-                $decoded = json_decode($content, true);
-                $hay = $decoded === null ? $content : json_encode($decoded, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-                if (stripos($hay, $q) !== false) {
+                // Fast path: scan the raw JSON directly (save_page stores
+                // JSON_UNESCAPED_UNICODE, so most content — incl. UTF-8 — matches as-is).
+                $matched = stripos($content, $q) !== false;
+                // Only when the raw haystack MISSES and the query could differ from what's on
+                // disk do we pay for a decode + re-encode-unescaped: non-ASCII (a page written
+                // with \uXXXX escapes) OR a query containing '/' or '\' (JSON_PRETTY_PRINT
+                // escapes '/' → '\/', so a page last written by replace_content / rename_tag /
+                // an external editor stores the slash escaped and the raw query would miss).
+                // Keeps the fast path for the common ASCII-no-slash query. Preserves the pinned
+                // Unicode search cases (search_blocks decodes too — consistent on Unicode).
+                if (!$matched && (preg_match('/[^\x00-\x7F]/', $q) || strpbrk($q, '/\\') !== false)) {
+                    $decoded = json_decode($content, true);
+                    if ($decoded !== null) {
+                        $hay = json_encode($decoded, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                        $matched = stripos($hay, $q) !== false;
+                    }
+                }
+                if ($matched) {
                     $rel = ltrim(substr($file->getPathname(), strlen($base)), '/');
                     $matches[] = $rel;
                 }
@@ -470,7 +565,7 @@ switch ($action) {
         $q = strtolower(trim($_GET['q'] ?? ''));
         $out = [];
         if ($q !== '') {
-            $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($base, RecursiveDirectoryIterator::SKIP_DOTS));
+            $it = contentFileIterator($base);
             foreach ($it as $file) {
                 if (count($out) >= 100) break;
                 if (substr($file->getFilename(), -5) !== '.json') continue;
@@ -499,28 +594,45 @@ switch ($action) {
         $built = cm_buildReplace($find, $replace, $isRegex, $ci);
         if ($built === null) jsonError('invalid regular expression');
         list($pat, $repl) = $built;
+        // Bound PCRE so a pathological (catastrophic-backtracking) user regex fails fast
+        // instead of hanging the request. When a match/replace hits the limit PCRE returns
+        // false/null (PREG_BACKTRACK_LIMIT_ERROR) — we surface that as a clean error below
+        // rather than silently skipping the block (which would drop real matches).
+        ini_set('pcre.backtrack_limit', '2000000');
+        ini_set('pcre.recursion_limit', '100000');
+        $regexError = false;
         $totalMatches = 0; $changedPages = 0; $pageList = [];
-        $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($base, RecursiveDirectoryIterator::SKIP_DOTS));
+        $it = contentFileIterator($base);
         foreach ($it as $file) {
             if (substr($file->getFilename(), -5) !== '.json') continue;
             if (strpos(str_replace('\\', '/', $file->getPathname()), '/.') !== false) continue;
             $data = json_decode(@file_get_contents($file->getPathname()), true);
             if (!is_array($data) || empty($data['sections'])) continue;
             $pageMatches = 0;
-            $cb = function($code) use ($pat, $repl, $preview, &$pageMatches) {
-                if ($preview) { $pageMatches += preg_match_all($pat, $code, $m); return null; }
-                $new = preg_replace($pat, $repl, $code, -1, $c); $pageMatches += $c; return $new;
+            $cb = function($code) use ($pat, $repl, $preview, &$pageMatches, &$regexError) {
+                if ($preview) {
+                    $n = preg_match_all($pat, $code, $m);
+                    if ($n === false) { $regexError = true; return null; }
+                    $pageMatches += $n; return null;
+                }
+                $new = preg_replace($pat, $repl, $code, -1, $c);
+                if ($new === null) { $regexError = true; return null; }
+                $pageMatches += $c; return $new;
             };
             $changed = false;
             foreach ($data['sections'] as &$s) { if (cm_walkBlocks($s, $cb)) $changed = true; }
             unset($s);
+            if ($regexError) jsonError('regex too complex'); // PCRE limit hit → fail cleanly
             if ($pageMatches > 0) {
                 $totalMatches += $pageMatches;
                 $rel = ltrim(substr($file->getPathname(), strlen($base)), '/');
                 $pageList[] = ['path' => $rel, 'matches' => $pageMatches];
                 if (!$preview && $changed) {
                     snapshotHistory($base, $rel, $file->getPathname());
-                    writeJsonAtomic($file->getPathname(), json_encode($data, JSON_PRETTY_PRINT));
+                    // Match save_page's on-disk encoding (unescaped unicode + slashes) so a
+                    // rewritten page stores '/' and UTF-8 literally — keeps the search_content
+                    // raw fast path matching without a decode (see the search_content fallback).
+                    writeJsonAtomic($file->getPathname(), json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
                     clearstatcache(true, $file->getPathname());
                     $changedPages++;
                 }
@@ -532,15 +644,21 @@ switch ($action) {
 
     case 'list_tags':
         // Aggregate every tag across all pages → [{tag, count}] (count = pages
-        // using it), sorted by frequency then name.
+        // using it), sorted by frequency then name. Index-backed (pageMetaIndexed +
+        // flushIndex, mirroring `tree`) so a warm call reuses cached tags and only
+        // re-parses pages whose mtime moved.
+        loadIndex();
         $counts = [];
-        $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($base, RecursiveDirectoryIterator::SKIP_DOTS));
+        $it = contentFileIterator($base);
         foreach ($it as $file) {
+            $full = $file->getPathname();
             if (substr($file->getFilename(), -5) !== '.json') continue;
-            if (strpos(str_replace('\\', '/', $file->getPathname()), '/.') !== false) continue;
-            $meta = pageMeta($file->getPathname());
+            if (strpos(str_replace('\\', '/', $full), '/.') !== false) continue;
+            $rel = ltrim(substr($full, strlen($base)), '/');
+            $meta = pageMetaIndexed($full, $rel);
             foreach ($meta['tags'] as $t) { $counts[$t] = ($counts[$t] ?? 0) + 1; }
         }
+        flushIndex();
         $out = [];
         foreach ($counts as $t => $c) $out[] = ['tag' => $t, 'count' => $c];
         usort($out, function($a, $b) { return $b['count'] <=> $a['count'] ?: strcasecmp($a['tag'], $b['tag']); });
@@ -554,7 +672,7 @@ switch ($action) {
         $from = (string)$input['from'];
         $to = isset($input['to']) ? trim((string)$input['to']) : '';
         $changedPages = 0;
-        $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($base, RecursiveDirectoryIterator::SKIP_DOTS));
+        $it = contentFileIterator($base);
         foreach ($it as $file) {
             $full = $file->getPathname();
             if (substr($file->getFilename(), -5) !== '.json') continue;
@@ -567,7 +685,10 @@ switch ($action) {
             if ($changed) {
                 $rel = ltrim(substr($full, strlen($base)), '/');
                 snapshotHistory($base, $rel, $full);
-                writeJsonAtomic($full, json_encode($data, JSON_PRETTY_PRINT));
+                // Match save_page's on-disk encoding (unescaped unicode + slashes) — see the
+                // matching note in replace_content: keeps '/' and UTF-8 literal on disk so the
+                // search_content raw fast path matches a rewritten page without a decode.
+                writeJsonAtomic($full, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
                 clearstatcache(true, $full);
                 $changedPages++;
             }
@@ -581,8 +702,10 @@ switch ($action) {
         if ($name === null) jsonError('invalid name');
         $parent = $input['parent'] ?? '';
         $path = safePath($base, $parent . '/' . $name);
+        $parentDir = safePath($base, $parent);
+        if ($path === null || $parentDir === null) jsonError('invalid path');
         if (!is_dir($path)) mkdir($path, 0777, true);
-        prependOrder(safePath($base, $parent), $name); // new folder at top
+        prependOrder($parentDir, $name); // new folder at top
         echo json_encode(['ok' => true]);
         break;
 
@@ -595,10 +718,11 @@ switch ($action) {
         if ($name === null) jsonError('invalid name');
         $parent = $input['parent'] ?? '';
         $parentDir = safePath($base, $parent);
+        $path = safePath($base, $parent . '/' . $name);
+        if ($parentDir === null || $path === null) jsonError('invalid path');
         if ($parent !== '' && !file_exists($parentDir . '/.project')) {
             jsonError('projects can only be created at the top level or inside another project');
         }
-        $path = safePath($base, $parent . '/' . $name);
         if (!is_dir($path)) mkdir($path, 0777, true);
         @file_put_contents($path . '/.project', '');
         prependOrder($parentDir, $name); // new project at top of its parent
@@ -608,6 +732,7 @@ switch ($action) {
     case 'reorder':
         // Persist a folder's child display order. input: { parent, order: [names] }
         $dir = safePath($base, $input['parent'] ?? '');
+        if ($dir === null) jsonError('invalid path');
         if (is_dir(rtrim($dir, '/')) && isset($input['order']) && is_array($input['order'])) {
             writeOrder($dir, $input['order']);
         }
@@ -623,6 +748,7 @@ switch ($action) {
         // Persist (or clear) a column's sort preference. input: { parent, field, dir }.
         // field=manual (or unknown) clears the entry → back to manual/default order.
         $dir = safePath($base, $input['parent'] ?? '');
+        if ($dir === null) jsonError('invalid path');
         if (is_dir(rtrim($dir, '/'))) {
             $key = ltrim(substr(rtrim($dir, '/'), strlen($base)), '/');
             $map = readColSorts($base);
@@ -643,6 +769,7 @@ switch ($action) {
         $name = safeName($input['name']);
         if ($name === null) jsonError('invalid name');
         $path = safePath($base, ($input['parent'] ?? '') . '/' . $name . '.json');
+        if ($path === null) jsonError('invalid path');
         // Parent must exist — otherwise file_put_contents emits a raw PHP warning into
         // the response body (invalid JSON → the client false-trips offline) yet still
         // reports ok. Same guard as save_page.
@@ -656,6 +783,7 @@ switch ($action) {
     case 'get_page':
         $rel = $input['path'] ?? ($_GET['path'] ?? '');
         $path = safePath($base, $rel);
+        if ($path === null) jsonError('invalid path'); // e.g. a dotfile read like .index.json
         if (file_exists($path)) {
             $data = json_decode(file_get_contents($path), true);
             if (!is_array($data)) $data = ['title' => '', 'sections' => []];
@@ -669,6 +797,7 @@ switch ($action) {
     case 'save_page':
         requireFields($input, ['path']);
         $path = safePath($base, $input['path']);
+        if ($path === null) jsonError('invalid path');
         // Optimistic concurrency: if the caller passed the mtime it read and the
         // file has changed since (another tab/device/edit), refuse unless forced.
         if (file_exists($path) && array_key_exists('baseMtime', $input) && $input['baseMtime'] !== null && empty($input['force'])) {
@@ -698,6 +827,7 @@ switch ($action) {
         $newName = safeName($input['newName']);
         if ($newName === null) jsonError('invalid name');
         $oldPath = safePath($base, $input['path']);
+        if ($oldPath === null) jsonError('invalid path');
         if (!file_exists($oldPath)) jsonError('source not found', 404);
         $isFolder = is_dir($oldPath);
         $dir = dirname($oldPath);
@@ -716,6 +846,7 @@ switch ($action) {
         requireFields($input, ['path']);
         $src = safePath($base, $input['path']);
         $destDir = safePath($base, $input['target'] ?? '');
+        if ($src === null || $destDir === null) jsonError('invalid path');
         if (!file_exists($src)) { jsonError('source not found', 404); }
         if (!is_dir($destDir)) { jsonError('target not found', 404); }
         $name = basename($src);
@@ -744,6 +875,7 @@ switch ($action) {
         // Soft delete: move into .trash with a sidecar .meta so it can be restored.
         requireFields($input, ['path']);
         $path = safePath($base, $input['path']);
+        if ($path === null) jsonError('invalid path'); // e.g. delete {path:".history"}
         if (!file_exists($path)) { echo json_encode(['ok' => true]); break; }
         if (!is_dir($trashDir)) mkdir($trashDir, 0777, true);
         $stamp = time();
@@ -792,6 +924,7 @@ switch ($action) {
         $orig = $meta['origPath'] ?? null;
         if (!$orig) jsonError('cannot determine original location');
         $dest = safePath($base, $orig);
+        if ($dest === null) jsonError('invalid original path'); // a crafted/evil .meta stays inert
         $parent = dirname($dest);
         if (!is_dir($parent)) mkdir($parent, 0777, true);
         if (file_exists($dest)) jsonError('an item already exists at the original path');
@@ -813,10 +946,12 @@ switch ($action) {
                 if ($orig !== '') {
                     // Route through safePath (like restore_trash) — origPath is the RAW
                     // client path from delete, so a '../'-bearing value would otherwise
-                    // let rrmdir escape .history. safePath strips '..'; guard the empty
-                    // result so we never rrmdir the whole history root.
+                    // let rrmdir escape .history.
                     $hp = safePath($historyDir, $orig); // page: .history/<rel>.json/ · folder: .history/<rel>/ (subtree)
-                    if ($hp !== $historyDir . '/' && is_dir($hp)) rrmdir($hp);
+                    // safePath now returns null for an unsafe origPath (traversal/dotfile):
+                    // skip the history prune for this entry entirely — NEVER rrmdir a null/bad
+                    // path — while still permanently removing the trash entry itself below.
+                    if ($hp !== null && $hp !== $historyDir . '/' && is_dir($hp)) rrmdir($hp);
                 }
                 rrmdir($trashDir . '/' . $e);
                 @unlink($trashDir . '/' . $e . '.meta');
@@ -828,9 +963,9 @@ switch ($action) {
     case 'list_history':
         // Versions for a page, newest first. input/query: path
         $rel = $input['path'] ?? ($_GET['path'] ?? '');
-        $hdir = $historyDir . '/' . $rel;
+        $hdir = safePath($historyDir, $rel); // was a raw concat → traversal hole; confine it
         $out = [];
-        if (is_dir($hdir)) {
+        if ($hdir !== null && is_dir($hdir)) {
             foreach (glob($hdir . '/*.json') ?: [] as $v) {
                 $ts = (int)basename($v, '.json');
                 $out[] = ['ts' => $ts, 'size' => @filesize($v)];
@@ -843,6 +978,7 @@ switch ($action) {
     case 'get_history_version':
         requireFields($input, ['path', 'ts']);
         $hfile = safePath($historyDir, $input['path'] . '/' . (int)$input['ts'] . '.json');
+        if ($hfile === null) jsonError('invalid path');
         if (!file_exists($hfile)) jsonError('version not found', 404);
         echo file_get_contents($hfile);
         break;
@@ -852,6 +988,7 @@ switch ($action) {
         requireFields($input, ['path', 'ts']);
         $path = safePath($base, $input['path']);
         $hfile = safePath($historyDir, $input['path'] . '/' . (int)$input['ts'] . '.json');
+        if ($path === null || $hfile === null) jsonError('invalid path');
         if (!file_exists($hfile)) jsonError('version not found', 404);
         snapshotHistory($base, $input['path'], $path);
         copy($hfile, $path);

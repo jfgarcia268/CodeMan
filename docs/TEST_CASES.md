@@ -15,10 +15,10 @@ and reports against this matrix); UI/usability passes are run by the
 
 1. **Automated suites first** (fast, deterministic):
    - **Client units** — open `codeman/tests.html` in a browser. Expect the summary
-     **"N passed, 0 failed"** (currently 205). `window.__testResult = {pass, fail, done}` for
+     **"N passed, 0 failed"** (currently 288). `window.__testResult = {pass, fail, done}` for
      scripting (`done` flips true after the async offline tests finish).
    - **Server API** — `bash codeman/tests-api.sh` (spins a throwaway `php -S` against a temp data
-     dir; exit 0 = all green; currently 66). Override port: `bash codeman/tests-api.sh 8099` —
+     dir; exit 0 = all green; currently 101). Override port: `bash codeman/tests-api.sh 8099` —
      a taken port is skipped automatically (bounded upward hunt), so parallel runs stay green.
    - **CI enforces both** on every push/PR: `.github/workflows/tests.yml` runs `tests-api.sh`
      (`api-tests` job), tests.html headless via Playwright + `php -S`
@@ -48,6 +48,17 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
 - TC-tree-04 (P): keyboard nav — Enter/Space activate (both layouts); single-column Up/Down/Home/
   End + Left/Right expand-collapse/parent; bail when focus is in an INPUT (don't hijack rename).
 - TC-tree-05 (E): hide sidebar → desktop rail; mobile → floating hamburger + drawer + backdrop.
+- TC-tree-06 (P/A11y): **lazy-build** — a COLLAPSED single-column folder leaves its `.tree-children`
+  unbuilt (`data-lazy="1"`, empty); first expand (row click OR keyboard ArrowRight) builds the
+  children, drops the flag, sets `aria-expanded="true"`, and keeps **exactly one** `[role=treeitem]`
+  at `tabindex=0` (re-runs `initRovingTabindex`). Arrow Up/Down/Home/End then traverse the
+  newly-built rows. Both single-column AND double/Miller.
+- TC-tree-07 (P): **search-while-collapsed** — with all folders collapsed, a query surfacing a deep
+  page (e.g. a `PageN` name match nested 2 folders down) renders its row **visible** in both layouts;
+  the filtered tree is fully built (no `.tree-children[data-lazy]` remains) so no result is hidden.
+- TC-tree-08 (P): **reveal-into-unbuilt-subtree** — opening a deep page from a cleared/collapsed
+  tree (from search, favorites, or a duplicate) expands its ancestor chain, **builds** the subtree,
+  and the page row is visible + reachable; roving tabindex stays singular. Single + Miller.
 
 ### TC-crud — Create / rename / delete (inline rows)
 - TC-crud-01 (P): create project/folder/page targets the selected folder; new items prepend.
@@ -77,7 +88,9 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
 - TC-search-03 (E): **deep-search cap** — a broad term matching > `DEEP_MATCH_CAP` (200) renders only
   the cap and shows the "Showing first N of M — refine your search" banner; banner hides when the
   result set ≤ cap or search cleared. **[auto: tests.html updateSearchCapNote]**
-- TC-search-04 (Pe): name search + tree render stay snappy at ~1200 pages (< ~100ms render).
+- TC-search-04 (Pe): name search + tree render stay snappy at ~1200 pages (< ~100ms render). Search
+  keystrokes now **coalesce** the sidebar re-render (`debounce` ~120ms trailing); the in-page block
+  filter (deep-search) rides the same window so it still reflects the query within ~250ms.
 
 ### TC-tabs — Page tabs
 - TC-tabs-01 (P): open pages as tabs; persist across reload; close / close-all.
@@ -138,6 +151,67 @@ and the block **Copy-as `▾`** submenu. No hand-rolled `.mini-menu` remains (gr
 - TC-menu-08 (P, positioning parity): the block **Copy-as `▾`** submenu lands in the identical
   spot as before — left clamped to `max(8, r.right − 200)`, top `r.bottom + 4` — and each item
   still copies via `copyText` (records the copy, "Copied…/Copy failed" toast).
+
+### TC-a11y — Keyboard & screen-reader reach (AC7 / WS-5 P2/P3)
+Tabs, section headers, modals, and transient feedback are operable by keyboard and announced by
+assistive tech; low-contrast text and micro-type meet WCAG AA.
+- TC-a11y-01 (A11y, tab strip): `#mainTabs` is `role="tablist"` (`aria-label="Open pages"`); each
+  open-page tab is `role="tab"` with a unique `id`, `aria-selected` (only the active tab `true`),
+  `aria-controls="page"`, and a **roving tabindex** (active tab `0`, rest `-1`). ArrowLeft/Right move
+  between tabs and **wrap** at the ends, Home/End jump to first/last; moving activates that page
+  (opens it) and keyboard focus follows the newly-selected tab. Enter/Space on a focused tab opens
+  it. The page region `#page` is the paired `role="tabpanel"` (`tabindex=0`,
+  `aria-labelledby=<active tab id>`). The mobile horizontal-scroll strip is unaffected.
+  **[auto: tests.html tabArrowIndex]**
+- TC-a11y-01b (A11y, tabs closable by keyboard): each tab's close **✕ is a real `<button>`**
+  (`aria-label="Close <title>"`) in the Tab order — Enter/Space closes the tab, and focus lands on a
+  surviving tab (not `<body>`), rebuilt via the roving tabindex. **"Close all" is a real `<button>`**
+  (`aria-label="Close all tabs"`); it stays sticky/pinned on the mobile strip and is not a `role=tab`.
+- TC-a11y-02 (A11y, section header): the section disclosure toggle (`.section-toggle`) is
+  `role="button"`, `tabindex=0`, `aria-label="Toggle section: <title>"`, with `aria-expanded`
+  reflecting collapsed/expanded state. Enter/Space toggle collapse (aria-expanded flips, the
+  `.collapsed` class updates, save scheduled); click-to-collapse on the header/toggle still works;
+  the mobile one-row section header is unaffected (role lives on the toggle, not the header — the
+  header holds the title `<input>` + action buttons, so it can't itself be a button).
+- TC-a11y-03 (A11y, modal focus trap): every `showModal` dialog (confirm, prompt, Move-to picker) is
+  `role="dialog"` `aria-modal="true"` named via `aria-labelledby` → its `.modal-title`. On open,
+  focus moves inside; **Tab / Shift-Tab cycle within the dialog** (first↔last, focus can't escape to
+  the page); Escape closes; on close, **focus returns to the invoking element** (fails soft if a
+  re-render dropped it). A dialog with no focusable control focuses the box itself.
+  **[auto: tests.html focusTrapNextIndex]**
+- TC-a11y-04 (A11y, live regions): `toast` and the `flashCopied` bubble are `role="status"
+  aria-live="polite"` (the same polite channel the offline badge joined) — a copy / save / error is
+  announced. `flashCopied` shows the bubble OR falls back to `toast`, never both → no double-announce.
+- TC-a11y-05 (A11y, Move-to command): `> Move current page to…` (palette, only when a page is open)
+  opens a filterable folder picker (root + every folder, current parent excluded, projects tinted);
+  choosing a destination routes through **`moveItem` → `api('move')`** — the project-nesting guard,
+  history migration, and offline write-queue all run exactly as a drag-move. **[auto: tests.html
+  collectFolderPaths]**
+- TC-a11y-05b (A11y, Move-to keyboard model — mirrors the command palette): typing filters; a
+  **highlighted row** (`.move-row.active`) tracks **ArrowDown/Up** (clamped, no wrap); **Enter in the
+  filter selects the highlighted-or-top match** (not a silent cancel — the prior bug); mouse hover
+  re-highlights. **[auto: tests.html paletteArrowIndex]**
+- TC-a11y-06 (E, slow-open affordance): opening a page whose `get_page` takes **>250 ms** shows a
+  spinner on the tab strip (`.main-tabs.tabs-loading::after`) and sets **`aria-busy="true"`** on the
+  strip for SR feedback, both cleared when the open settles; a fast local open never flashes it (the
+  `_openingPages` map still dedups). On the **first** open (strip was `display:none`, no tabs yet) the
+  strip is revealed early so the spinner paints; if that open failed the reveal is undone.
+- TC-a11y-07 (A11y, contrast/micro-type): former `#777` sub-AA text (tree-empty, empty-state,
+  search placeholders, lang-picker-empty) now uses `var(--muted)` (**#9aa0a8 ≈ 6.3:1** on the
+  `#1e1e1e` panel — measured); the smallest micro-type is raised (project badge 8→10px, tag-remove
+  9→10px); Miller paging rails widened (16→24px) for an easier click/touch target.
+- **Accepted variant (non-goal):** tab arrow-keys use **automatic activation** (moving focus opens the
+  page) rather than manual activation — a valid ARIA tabs variant; kept because tab switches are cheap
+  and match the click behavior. Not a defect.
+- **Carried residual (non-goal, UI/UX finding 12):** hover tooltips (`title=`) on icon-only controls
+  are **not reachable on touch** — deliberately not addressed this phase (would need a bespoke
+  long-press/tap-to-reveal tooltip layer). Icon buttons keep `title=` + `aria-label` for pointer +
+  screen-reader users; documented as an accepted limitation.
+- **WCAG 1.4.4 (Resize text) exception — mobile zoom-lock:** the mobile viewport sets
+  `maximum-scale=1, user-scalable=no`, which technically fails SC 1.4.4 (no pinch-zoom). This is an
+  **accepted, in-plan tradeoff** (per plan C7): it kills iOS focus-zoom that otherwise jumps the
+  layout on every input focus, and the editor already renders inputs at **16px** to compensate.
+  Non-goal to revisit unless the focus-zoom mitigation changes.
 
 ### TC-dup — Duplicate content (block / section / page)
 - TC-dup-01 (P): **block** — for all five kinds (code/note/rich/checklist/csv/json), the block ⋯
@@ -344,13 +418,93 @@ and the block **Copy-as `▾`** submenu. No hand-rolled `.mini-menu` remains (gr
   retry re-enqueue, `__codemanAdoptInto` queue-merge) is **[auto: tests.html dead-letter reducers]**;
   the panel UI + badge keyboard/severity stay manual.
 
+- TC-offline-06 (N): **replay survives the safePath reject tightening.** The offline queue replays
+  `enqueueReconstruct` bodies (`create_project {name,parent}`, `create_folder {parent,name}`,
+  `save_page {path,data,force:true}`); a legitimate nested path (`Proj/Folder/Page.json`) must still
+  round-trip after the safePath change — only `..`/`.`/dotfile segments reject. **[auto: tests-api
+  offline-replay reconstruction shapes]**
+
+### TC-sec — Server path-safety & transport (safePath reject / CSRF / CSP)
+- TC-sec-01 (N): **safePath reject contract.** A dotfile read is refused (`get_page {path:".index.json"}`
+  → `{"error":"invalid path"}`); `delete {path:".history"}` is refused and the dir survives; a
+  traversal `get_page`/`save_page` writes/reads nothing outside the data root. **[auto: tests-api]**
+- TC-sec-02 (N): **`list_history` traversal** (`path=../../..`) resolves to nothing → `[]` (was a raw
+  concat). **[auto: tests-api]**
+- TC-sec-03 (N): **crafted trash `.meta`** with a `../`-bearing `origPath` stays inert — `empty_trash`
+  never `rrmdir`s the escaped path (sentinel outside `.history` survives) and `restore_trash` errors
+  without writing outside the data root. **[auto: tests-api]**
+- TC-sec-04 (N): **regex bounds.** A pathological catastrophic-backtracking find regex (`(a+)+$`) hits
+  the PCRE backtrack limit → clean `{"error":"regex too complex"}` instead of hanging/silent-skip.
+  **[auto: tests-api]**
+- TC-sec-05 (P): **CSRF is SENT everywhere.** Every request carries `X-CodeMan-Request: 1`
+  (`apiHeaders`), incl. `flushQueue` replay + the keepalive unload-save. Verify via devtools/network
+  that reads + writes carry the header.
+- TC-sec-05b (N): **server enforces CSRF (deny-by-default).** `api.php` now requires
+  `X-CodeMan-Request` on every action outside the read-only allowlist (`tree`, `col_sorts`,
+  `get_page`, `list_tags`, `list_trash`, `list_history`, `get_history_version`, `search_content`,
+  `search_blocks` — identical to the desktop proxy's `READ_ONLY_ACTIONS`): a header-less mutating
+  POST (`create_page`) → **403** `{"error":"missing request header"}` and writes nothing; a header-less
+  read (`tree`, `get_page`) → **200**; a header-less **unknown/future** action → 403 (fail-closed).
+  The check runs AFTER the auth gate (a gated request with no token still 401s first). Break-glass:
+  with `CODEMAN_CSRF=off` (env or nginx `fastcgi_param`, dual-source read) a header-less write is
+  **accepted → 200**. A 403 is a clean 4xx so a straggler offline client dead-letters the write
+  (recoverable) rather than looping as "offline". **[auto: tests-api]**
+- TC-sec-06 (P): **desktop proxy enforces CSRF + origin + HPP.** In the Electron wrapper, a mutating
+  `/api.php` POST WITHOUT the `X-CodeMan-Request` header → 403 (read actions pass); a **duplicated
+  `action` param** (`?action=tree&action=save_page`, the HPP bypass — PHP takes the last, the proxy
+  the first) → 403 outright; a state-changing request with a **missing/mismatched `Origin`** (or a
+  rebinding `Host`) → 403 (reads may omit Origin); a cross-origin POST to `/__config` or `/__test`
+  → 403; `/__test` rejects a non-http(s) target; navigation off `127.0.0.1:<port>` and a
+  look-alike-host new-window (`http://127.0.0.1.evil.com/`) are blocked. Exercised by `CODEMAN_SMOKE=1`
+  (`writeGuard.blocked` for both the header-less write and the dup-action request). *Extended (needs a
+  running Electron instance).*
+- TC-sec-07 (P): **CSP loads clean.** With the `<meta>` CSP, the app boots (inline loaders + `onclick`
+  handlers run under `'unsafe-inline'`), Prism autoload highlights a code block, a note renders
+  markdown (markdown-it), an export builds, and the SW registers — **no CSP violations** in the
+  console. `img-src 'self' data: https:` — a note referencing a remote **https** image loads it; a
+  plain-**http** remote image is blocked (verify in devtools: an https `![](…)` renders, an http one
+  is refused).
+
+### TC-transport — WS-6 transport & server efficiency (cache-bust / index / search / history keys)
+- TC-transport-01 (N): **version-keyed cache-bust, 3-way.** Boot `index.html`: `version.js` loads as a
+  STATIC `<script src="version.js">` (no `?v=`) so `self.CODEMAN_VERSION` exists before the modules;
+  `src/*.js` + `style.css` carry a `?v=` from `cacheBustKey()` — on `localhost`/`127.0.0.1` a
+  `Date.now()` value, on a real hostname `?v=<CODEMAN_VERSION>`, and on `file://` **no query** (the
+  desktop wrapper — Chromium won't resolve `foo.js?v=…` off disk). SW registers; footer shows the
+  version; no console errors. *Verified this phase (headless Chrome, localhost):* version.js un-keyed,
+  modules `?v=<Date.now()>`, `swController:true`, 0 console errors, a code + note block render
+  (Prism `.token` present, markdown-it `<h1>` in the note).
+- TC-transport-02 (N): **search_content raw fast path + fallback (unicode AND slash).** A `save_page`-stored
+  page (unescaped UTF-8 + slashes) matches an emoji/`café`/CJK/ASCII query via the raw `stripos` fast
+  path. The decode-and-recheck fallback fires when the raw haystack MISSES **and** the query is
+  non-ASCII **or contains `/`/`\`**: a page stored with `\uXXXX` escapes still matches a literal UTF-8
+  query, and a page stored with an escaped `\/` (an interior-slash query like `api/v1` — the shape the
+  OLD `replace_content`/`rename_tag` `JSON_PRETTY_PRINT` writes and external editors produce) is still
+  found (before the broadening it returned **zero** — a page silently hidden from a slash search).
+  Common ASCII-no-slash queries keep the fast path. **Writer normalization:** `replace_content` and
+  `rename_tag` now write `JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES` (matching `save_page`), so a
+  rewritten page re-stores `/`/UTF-8 literally and matches via the fast path without a decode. **[auto:
+  tests-api]**
+- TC-transport-03 (N): **list_tags is index-backed.** Returns correct `[{tag,count}]` (count = pages
+  using it) via `pageMetaIndexed` + `flushIndex` (mirrors `tree`); a warm call reuses cached tags and
+  populates `.index.json`. **[auto: tests-api]**
+- TC-transport-04 (N): **per-page history-key boot migration** (`migrateHistoryKeys`): idempotent,
+  all-namespaces, legacy-retained. Seeding a legacy `history` blob then migrating creates
+  `history:<path>` keys with the same entries, leaves the legacy blob intact (rollback-safe), sets a
+  per-ns `__history_migrated` flag; a second run is a no-op (no double-append); a present target is
+  never clobbered; a mid-transform crash (flag never set, one path written, one missing) safely
+  completes the missing path on retry without double-appending the done one. The offline history
+  reducers (`recordLocalHistory`/`offlineListHistory`/`offlineGetHistory`/`offlineRestoreHistory`) all
+  read/write the per-page keys. **[auto: tests.html]**
+
 ### TC-colsort — Per-column sort (double layout)
 - TC-colsort-01 (P): Name/Code-type/Kind × asc/desc + Manual order; persists in `.colsort.json`;
   active sort renders a flat intermixed list. **[auto: tests.html sortMillerChildren]**
 
 ### TC-pw — Password gate (optional, `CODEMAN_PASSWORD`)
 - TC-pw-01 (N): gate on, no/blank token → `401 {"error":"authentication required","auth":true}`. **[auto: tests-api]**
-- TC-pw-02 (P): correct secret via `X-CodeMan-Auth` header **and** `?token=` → 200. **[auto: tests-api]**
+- TC-pw-02 (P): correct secret via `X-CodeMan-Auth` header → 200. The `?token=` query fallback is
+  **no longer accepted** — the correct secret via `?token=` → 401 (header-only now). **[auto: tests-api]**
 - TC-pw-03 (P): client — first 401 → prompt → correct → retry succeeds → token stored
   (`codeman.authToken`) → reload replays it (no re-prompt).
 - TC-pw-04 (N): wrong password → blocked (no data), the bad token is **not persisted**, next action
@@ -390,6 +544,56 @@ say so in the report rather than implying full coverage.**
   `manifest.webmanifest` install. *Why:* emulated viewport ≠ a real device.
 - TC-ext-perf (scale): seed ~1200+ pages; measure tree/search/page-render + the deep-search cap.
   *Why:* slow to seed/run; covered ad-hoc, not every time.
+- TC-ext-perf-tree (lazy-build + memo, AC6): seed ~1200 pages (10 top folders/projects × 4 subs ×
+  30 pages, warm `.index.json`), then time `renderTree()` (avg of ≥10 warm runs via
+  `performance.now()`) in each state. **Targets:** collapsed single-column ≤5ms; Miller/double
+  ≤60ms; a search/resize burst = **one** render per debounce window; a sidebar-resize drag = **one**
+  render per animation frame. *Measured (1,200 pages, headless Chrome, this phase):* collapsed
+  **12.04ms → 0.24ms**; Miller **0.76 → 1.02ms** (both ≪60ms; memoized folder aggregates); expanded
+  single-column (all folders open, full build) **36.5 → 39.4ms** (unchanged — same DOM work).
+  *Why extended:* needs a seeded large dataset + a driven browser for timing.
+  - **TC-ext-perf-tree-a (DOM-node cap — proves lazy-build intact):** at ~1,200 pages, a
+    fully-collapsed single-column `#tree` holds **≤~500 descendant nodes** (measured **110** with
+    10 top folders; a regression to eager-build would balloon it to ~18,550). Assert
+    `#tree.querySelectorAll('*').length` stays small when collapsed, then expanding one folder
+    **builds its children on demand** (the folder's `.tree-children` goes from `data-lazy="1"`/empty
+    to populated). A future eager-build regression fails the node-count ceiling.
+  - **TC-ext-perf-tree-b (coalescing render-count):** wrap `renderTree` with a counter. A burst of
+    search keystrokes (`updateSearch` typed rapidly) fires **exactly one** `renderTree` per ~120ms
+    debounce window (not one per key); a sidebar-resize drag (a stream of `mousemove`) fires **one**
+    `renderTree` per animation frame (rAF-coalesced), not one per event. A regression that drops the
+    debounce/rAF (rendering per event) fails the count.
+  - **TC-ext-perf-tree-c (folder-click single build):** clicking a collapsed folder builds its direct
+    children **once** (`selectFolder→renderTree`), not twice — instrument `renderTreeNode` and assert
+    each direct child is constructed a single time per click (measured 4 for a 4-child folder;
+    the pre-fix double-build produced 8). Guards against reintroducing the redundant inline build.
+- TC-ext-perf-transport (WS-6 server efficiency): measure on a seeded large library (~1200 pages,
+  warm `.index.json`). **Targets:** (a) **`list_tags` ≤5 ms warm** — after one warming call, the
+  index-backed aggregate reuses cached tags (only mtime-moved pages re-parse); measure the warm
+  round-trip server-side. (b) **Warm-boot shell transfer <50 KB on the NAS/hosted path** — with
+  version-keyed `?v=`, a second visit (no release bump) serves `src/*.js` + `style.css` from browser
+  cache (304/`from cache`); only the two un-cached bootstrap files (`index.html`, `version.js`, sent
+  `Cache-Control: no-cache`) travel the wire. Verify in devtools Network (disable "disable cache"):
+  total transferred on a warm reload is a few KB, not the full ~hundreds-of-KB shell. (c) **No
+  `search_content` regression** — the raw fast path should equal or beat the old always-decode path
+  on ASCII/UTF-8 queries; confirm result parity + no slowdown. *Why extended:* needs a seeded dataset
+  + a driven browser/timed server. **Owner for measured before/after: senior-performance-engineer.**
+- TC-ext-gzip (deploy gate — `CODEMAN_GZIP`): API-response gzip is **OFF by default** and shipped
+  behind an env gate. **Pre-flight before enabling `CODEMAN_GZIP=1` on the NAS:** confirm the nginx
+  layer is NOT already gzipping `api.php` output (else double-compression corrupts the body — check
+  `default.conf` `gzip`/`gzip_types` for `application/json`, or `curl -H 'Accept-Encoding: gzip' -I`
+  the API and verify a single `Content-Encoding: gzip`). Desktop path is always safe: the proxy's
+  `fetch()` decompresses transparently and re-serves identity — `CODEMAN_SMOKE=1` asserts the `gzip`
+  probe still parses a well-formed body with no round-trip regression. *Why extended:* needs the real
+  NAS/nginx deployment to validate the pre-flight; can't be checked from the repo.
+- TC-ext-perf-iter (dot-dir skip on content scans): the five content-scanning actions (`list_tags`,
+  `search_content`, `search_blocks`, `replace_content`, `rename_tag`) go through `contentFileIterator`,
+  which never DESCENDS into `.history`/`.trash`. On a mature library (history keeps up to 20 versions
+  per page → ~24k hidden files at 1,200 pages) this keeps **warm `list_tags` ≤5 ms independent of
+  history depth** (before, the iterators stat'd every hidden file — measured ~24 ms, could exceed
+  100 ms). Verify: seed pages with deep history, then confirm warm `list_tags`/`search_content` timing
+  doesn't grow with history depth. The delete path (`rrmdir`) still walks dot-dirs (must). *Why
+  extended:* needs a seeded large/deep-history dataset. **Owner for measured numbers: senior-performance-engineer.**
 - TC-ext-desktop-sync (native data-sync dialogs): all three `dialog.showMessageBox` branches —
   Local→Server ("Push to server / Keep"), Server→Local ("Sync now / Switch anyway"), Server A→B —
   with a queued change. *Why:* needs a running Electron instance + native-dialog interaction.

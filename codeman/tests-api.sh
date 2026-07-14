@@ -10,8 +10,11 @@
 # history-prune + its traversal guard, save-conflict detection (stale baseMtime
 # → conflict; force → history snapshot), the project-nesting move guard, the
 # rename traversal guard, the restore_trash round-trip, replace_content
-# (preview dry-run / literal / regex), rename_tag (rename/merge/delete), and
-# the optional password gate.
+# (preview dry-run / literal / regex / regex-too-complex bound), rename_tag
+# (rename/merge/delete), the safePath reject contract (dotfile reads + traversal
+# rejected at get_page/delete/list_history/restore_trash), the offline-replay
+# reconstruction shapes round-tripping post-safePath, and the optional password
+# gate (header-only; ?token= no longer accepted).
 #
 #   Run:  bash codeman/tests-api.sh           (exit 0 = all green)
 #         bash codeman/tests-api.sh 8099       (override the starting port;
@@ -43,11 +46,11 @@ trap cleanup EXIT INT TERM
 # taken (a parallel run, a CI neighbor), `php -S` dies instantly on bind — hunt
 # upward for a free port (bounded) instead of failing the whole suite. BASE is
 # recomputed after the port settles so every later request hits the live server.
-start_server() { # $1 = optional CODEMAN_PASSWORD (empty = gate off)
+start_server() { # $1 = optional CODEMAN_PASSWORD (empty = gate off); $2 = optional CODEMAN_CSRF ("off" = break-glass)
   if [ -n "$SERVER_PID" ]; then kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null; SERVER_PID=""; fi
   local tries=0
   while :; do
-    CODEMAN_DATA="$DATA" CODEMAN_PASSWORD="${1:-}" php -S "127.0.0.1:$PORT" -t "$SCRIPT_DIR" >/dev/null 2>&1 &
+    CODEMAN_DATA="$DATA" CODEMAN_PASSWORD="${1:-}" CODEMAN_CSRF="${2:-}" php -S "127.0.0.1:$PORT" -t "$SCRIPT_DIR" >/dev/null 2>&1 &
     SERVER_PID=$!
     sleep 0.3                                   # a failed bind exits immediately
     if kill -0 "$SERVER_PID" 2>/dev/null; then
@@ -64,11 +67,13 @@ start_server() { # $1 = optional CODEMAN_PASSWORD (empty = gate off)
 
 # POST helper: post <action> <json-body> [authtoken]  → echoes "<body>\n<httpcode>"
 # (avoids empty-array expansion — macOS bash 3.2 errors on "${arr[@]}" under set -u)
+# Sends X-CodeMan-Request: 1 on every write, mirroring the real client (apiHeaders) —
+# so the suite stays representative when server-side CSRF enforcement lands in R4.
 post() {
   if [ -n "${3:-}" ]; then
-    curl -s -w $'\n%{http_code}' -H "X-CodeMan-Auth: $3" -X POST -H "Content-Type: application/json" -d "$2" "$BASE?action=$1"
+    curl -s -w $'\n%{http_code}' -H "X-CodeMan-Request: 1" -H "X-CodeMan-Auth: $3" -X POST -H "Content-Type: application/json" -d "$2" "$BASE?action=$1"
   else
-    curl -s -w $'\n%{http_code}' -X POST -H "Content-Type: application/json" -d "$2" "$BASE?action=$1"
+    curl -s -w $'\n%{http_code}' -H "X-CodeMan-Request: 1" -X POST -H "Content-Type: application/json" -d "$2" "$BASE?action=$1"
   fi
 }
 body() { printf '%s' "$1" | sed '$d'; }     # all but last line
@@ -107,6 +112,48 @@ has "search_content matches CJK '日本語'"     "$(sc '日本語')" "Uni.json"
 has "search_content matches ASCII 'echo'"    "$(sc 'echo')" "Uni.json"
 sb=$(curl -sG "$BASE" --data-urlencode "action=search_blocks" --data-urlencode "q=café")
 has "search_blocks matches 'café'" "$sb" "Uni.json"
+
+# A page stored with \uXXXX-ESCAPED unicode (an external editor / a create_page-style
+# JSON_PRETTY_PRINT write). The raw stripos fast path MISSES the literal UTF-8 query,
+# so this exercises the decode-and-recheck fallback that keeps unicode search correct.
+printf '%s' '{"title":"UniEsc","sections":[{"title":"S","collapsed":false,"tags":[],"blocks":[{"type":"bash","label":"","code":"marker \u65e5\u672c\u8a9e end"}],"subsections":[]}]}' > "$DATA/UniEsc.json"
+has "search_content decode-fallback matches \uXXXX-escaped CJK" "$(sc '日本語')" "UniEsc.json"
+has "search_content raw fast-path matches ASCII in an escaped file" "$(sc 'marker')" "UniEsc.json"
+
+# --- slash-query search parity (fallback broadening + writer normalization) --
+# A page with an interior slash in content, stored with '\/' ESCAPED on disk — as the
+# OLD replace_content/rename_tag (bare JSON_PRETTY_PRINT) writes did, and external editors
+# do. The raw stripos fast path MISSES "api/v1" (disk holds "api\/v1"); the broadened
+# fallback (query contains '/') decodes-and-rechecks → the page must still be found
+# (before the fix this returned zero — a page silently hidden from a slash search).
+printf '%s' '{"title":"Slash","sections":[{"title":"S","collapsed":false,"tags":["slashtag"],"blocks":[{"type":"bash","label":"","code":"GET api\/v1\/users"}],"subsections":[]}]}' > "$DATA/Slash.json"
+has "search_content slash-query matches an escaped-slash file (fallback)" "$(sc 'api/v1')" "Slash.json"
+# Writer normalization: rewriting the page via rename_tag (routine tag manager) must
+# re-store it with UNESCAPED slashes, so the raw fast path matches WITHOUT a decode.
+post rename_tag '{"from":"slashtag","to":"slashtag2"}' >/dev/null
+has "search_content slash-query matches after rename_tag rewrite" "$(sc 'api/v1')" "Slash.json"
+grep -q 'api/v1' "$DATA/Slash.json" && ok "rename_tag re-stores slashes UNESCAPED on disk" || bad "rename_tag re-stores slashes UNESCAPED on disk" "still escaped"
+# Same via replace_content (find & replace): change unrelated text → forces a rewrite.
+post replace_content '{"find":"users","replace":"accounts"}' >/dev/null
+has "search_content slash-query matches after replace_content rewrite" "$(sc 'api/v1')" "Slash.json"
+grep -q 'api/v1' "$DATA/Slash.json" && ok "replace_content re-stores slashes UNESCAPED on disk" || bad "replace_content re-stores slashes UNESCAPED on disk" "still escaped"
+# Sanity: the non-ASCII fallback + ASCII-no-slash fast path are unaffected by the change.
+has "search_content non-ASCII still matches (fallback intact)" "$(sc '日本語')" "UniEsc.json"
+has "search_content ASCII-no-slash still matches (fast path intact)" "$(sc 'echo')" "Uni.json"
+
+# --- list_tags (index-backed: pageMetaIndexed + flushIndex) ----------------
+post save_page '{"path":"TagA.json","data":{"title":"TagA","sections":[{"title":"S","collapsed":false,"tags":["alpha","shared"],"blocks":[],"subsections":[]}]}}' >/dev/null
+post save_page '{"path":"TagB.json","data":{"title":"TagB","sections":[{"title":"S","collapsed":false,"tags":["shared"],"blocks":[],"subsections":[]}]}}' >/dev/null
+lt=$(curl -sG "$BASE" --data-urlencode "action=list_tags")
+has "list_tags returns tag 'alpha'"             "$lt" '"tag":"alpha"'
+has "list_tags counts 'shared' across 2 pages"  "$lt" '"tag":"shared","count":2'
+# Warm the index, then confirm a warm call is still correct (index-backed, cached
+# tags). The ≤5 ms warm-timing target is validated separately (see docs/TEST_CASES.md
+# Extended perf) — a hard ms assertion here would be flaky across CI/macOS.
+curl -sG "$BASE" --data-urlencode "action=list_tags" >/dev/null   # warm the mtime index
+lt2=$(curl -sG "$BASE" --data-urlencode "action=list_tags")
+has "list_tags warm call still counts 'shared'" "$lt2" '"tag":"shared","count":2'
+test -f "$DATA/.index.json" && ok "list_tags populated the metadata index" || bad "list_tags populated the metadata index" "no .index.json"
 
 # --- same-second history retention (collision bump, no silent drop) --------
 post create_page '{"name":"Hist","parent":""}' >/dev/null
@@ -274,12 +321,78 @@ test ! -d "$DATA/.history/Mv.json" && ok "dest-exists move removed the stale sou
 destv_after=$(ls "$DATA/.history/MgD/Mv.json" 2>/dev/null | wc -l | tr -d ' ')
 [ "$destv_after" -gt "$destv_before" ] && ok "dest-exists move merged source versions into dest ($destv_before → $destv_after)" || bad "dest-exists move merged source versions into dest" "dest count $destv_before → $destv_after"
 
+# --- safePath reject contract: dotfile reads + traversal are rejected -------------
+# get_page on a dotfile is refused (previously .index.json etc. could be read out)
+r=$(post get_page '{"path":".index.json"}')
+has "get_page dotfile (.index.json) → invalid path" "$(body "$r")" '"error":"invalid path"'
+r=$(post get_page '{"path":"../../etc/passwd"}')
+has "get_page traversal path → invalid path" "$(body "$r")" '"error":"invalid path"'
+# deleting a hidden data dir is refused, and the dir survives
+test -d "$DATA/.history" && ok "history dir present before the delete-dotfile probe" || bad "history dir present" "missing"
+r=$(post delete '{"path":".history"}')
+has "delete dotfile (.history) → invalid path" "$(body "$r")" '"error":"invalid path"'
+test -d "$DATA/.history" && ok "delete .history left the history dir intact" || bad "delete .history left the history dir intact" ".history gone"
+# list_history no longer raw-concats the path → a traversal resolves to nothing ([])
+lh=$(curl -sG "$BASE" --data-urlencode "action=list_history" --data-urlencode "path=../../..")
+eqs "list_history traversal path → empty array" "$lh" "[]"
+# a crafted trash .meta with a traversal origPath stays inert on restore
+mkdir -p "$DATA/.trash/evilr"; echo z > "$DATA/.trash/evilr/z"
+printf '{"origPath":"../../ESC_RESTORE.json","name":"evilr","deletedAt":1,"isDir":false}' > "$DATA/.trash/evilr.meta"
+r=$(post restore_trash '{"id":"evilr"}')
+has "restore_trash traversal origPath → rejected" "$(body "$r")" '"error"'
+test ! -e "$(dirname "$DATA")/ESC_RESTORE.json" && ok "restore_trash traversal wrote nothing outside data" || bad "restore_trash traversal wrote nothing" "ESC_RESTORE.json escaped"
+
+# --- replace_content: a pathological (catastrophic-backtracking) regex fails clean ---
+post create_page '{"name":"Rx","parent":""}' >/dev/null
+post save_page '{"path":"Rx.json","data":{"title":"Rx","sections":[{"title":"S","collapsed":false,"tags":[],"blocks":[{"type":"bash","label":"","code":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaX"}],"subsections":[]}]}}' >/dev/null
+r=$(post replace_content '{"find":"(a+)+$","replace":"z","regex":true,"preview":true}')
+has "pathological regex (backtrack limit) → clean 'regex too complex'" "$(body "$r")" '"error":"regex too complex"'
+
+# --- offline-replay reconstruction shapes still round-trip post-safePath ------------
+# The offline queue replays exactly these bodies (enqueueReconstruct in offline.js); a
+# legitimate nested path MUST still work — only ../ / . / dotfile segments reject.
+post create_project '{"name":"OProj","parent":""}' >/dev/null
+r=$(post create_folder '{"parent":"OProj","name":"OFold"}')
+eqs "replay create_folder (nested) → 200" "$(code "$r")" "200"
+r=$(post save_page '{"path":"OProj/OFold/OPage.json","data":{"title":"OPage","sections":[]},"force":true}')
+eqs "replay save_page (nested, force) → 200" "$(code "$r")" "200"
+test -f "$DATA/OProj/OFold/OPage.json" && ok "replay wrote the nested page on disk" || bad "replay wrote the nested page" "missing"
+r=$(post get_page '{"path":"OProj/OFold/OPage.json"}')
+has "replay round-trips the nested page" "$(body "$r")" '"title":"OPage"'
+# snapshotHistory now routes $rel through safePath internally — a legit nested re-save
+# must still snapshot the prior version (best-effort guard doesn't break valid paths).
+post save_page '{"path":"OProj/OFold/OPage.json","data":{"title":"OPage2","sections":[]},"force":true}' >/dev/null
+test -d "$DATA/.history/OProj/OFold/OPage.json" && ok "snapshotHistory still snapshots a legit nested save" || bad "snapshotHistory still snapshots a legit nested save" "no history dir"
+
+# --- CSRF enforcement: deny-by-default, header-less writes 403, reads 200 ----
+# The post() helper always sends X-CodeMan-Request, so every write test above
+# already exercises the header-carrying (accepted) path. Here we hit the raw
+# header-less path with curl. Enforcement is ON (default server; CSRF unset).
+r=$(curl -s -w $'\n%{http_code}' -X POST -H "Content-Type: application/json" -d '{"name":"NoHdr","parent":""}' "$BASE?action=create_page")
+eqs "csrf: header-less write → 403" "$(code "$r")" "403"
+has "csrf: 403 body is the clean error" "$(body "$r")" '"error":"missing request header"'
+test ! -e "$DATA/NoHdr.json" && ok "csrf: rejected write touched nothing" || bad "csrf: rejected write touched nothing" "NoHdr.json exists"
+# An unknown/future action also needs the header (deny-by-default, fail-closed).
+r=$(curl -s -w $'\n%{http_code}' -X POST -H "Content-Type: application/json" -d '{}' "$BASE?action=some_future_write")
+eqs "csrf: header-less unknown action → 403 (fail-closed, not 404)" "$(code "$r")" "403"
+# Read-only allowlist actions pass without the header.
+r=$(curl -s -w $'\n%{http_code}' "$BASE?action=tree");                         eqs "csrf: header-less read (tree) → 200"     "$(code "$r")" "200"
+r=$(curl -s -w $'\n%{http_code}' "$BASE?action=get_page&path=P1.json");        eqs "csrf: header-less read (get_page) → 200" "$(code "$r")" "200"
+
+# --- CSRF break-glass: CODEMAN_CSRF=off accepts header-less writes -----------
+start_server "" "off"
+r=$(curl -s -w $'\n%{http_code}' -X POST -H "Content-Type: application/json" -d '{"name":"OffHdr","parent":""}' "$BASE?action=create_page")
+eqs "csrf off: header-less write accepted → 200" "$(code "$r")" "200"
+test -f "$DATA/OffHdr.json" && ok "csrf off: header-less write persisted" || bad "csrf off: header-less write persisted" "missing"
+start_server ""   # restore enforcement for any later run
+
 # --- password gate ----------------------------------------------------------
 start_server "testsecret"
 r=$(curl -s -w $'\n%{http_code}' "$BASE?action=tree");                         eqs "gate: no token → 401" "$(code "$r")" "401"
 has "gate: 401 body flags auth" "$(body "$r")" '"auth":true'
 r=$(curl -s -w $'\n%{http_code}' -H "X-CodeMan-Auth: testsecret" "$BASE?action=tree"); eqs "gate: correct header → 200" "$(code "$r")" "200"
-r=$(curl -s -w $'\n%{http_code}' "$BASE?action=tree&token=testsecret");          eqs "gate: correct ?token → 200" "$(code "$r")" "200"
+# ?token= is no longer accepted (secret-in-URL leaks into logs/Referer) — header only.
+r=$(curl -s -w $'\n%{http_code}' "$BASE?action=tree&token=testsecret");          eqs "gate: correct ?token= no longer accepted → 401" "$(code "$r")" "401"
 r=$(curl -s -w $'\n%{http_code}' -H "X-CodeMan-Auth: WRONG" "$BASE?action=tree"); eqs "gate: wrong token → 401" "$(code "$r")" "401"
 
 echo ""

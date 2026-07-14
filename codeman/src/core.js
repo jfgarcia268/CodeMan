@@ -71,6 +71,20 @@ function langColor(id) {
   return 'hsl(' + h + ', 45%, 32%)';
 }
 
+// Trailing-edge debounce: coalesce a burst of calls into one, `wait` ms after the
+// last. Used to keep sidebar renderTree() off the keystroke/resize hot paths (a big
+// library renders too slowly to run per event). `.cancel()` drops a pending call.
+// Pure/timer-only → unit-tested in tests.html.
+function debounce(fn, wait) {
+  let timer = null;
+  const wrapped = function (...args) {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => { timer = null; fn.apply(this, args); }, wait);
+  };
+  wrapped.cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+  return wrapped;
+}
+
 let currentPagePath = null;
 let currentPageData = null;
 let saveTimer = null;
@@ -127,10 +141,15 @@ function signOut() {
 // A 401 means the optional password gate is on: prompt once and retry.
 const API_TIMEOUT_MS = 9000; // abort a hung request so the retry/offline path can run
 
-// The request headers every write shares. One attach point so auth (and, later, a
-// request-id) can't drift between apiFetch and the keepalive unload-save in editor.js.
+// The request headers every request shares. One attach point so auth, the CSRF
+// marker, and the content type can't drift between apiFetch, flushQueue's replay,
+// and the keepalive unload-save in editor.js. X-CodeMan-Request is a same-origin
+// CSRF signal attached at SEND time — so even queues parked by an older client pick
+// it up on replay. NOTE: this release only SENDS it; api.php does NOT yet enforce it
+// (server enforcement is a later release, so in-flight offline queues aren't rejected).
+// The desktop proxy DOES require it on mutating actions (it always sends it).
 function apiHeaders() {
-  const h = {};
+  const h = { 'Content-Type': 'application/json', 'X-CodeMan-Request': '1' };
   if (authToken) h['X-CodeMan-Auth'] = authToken;
   return h;
 }
@@ -210,6 +229,11 @@ function toast(msg) {
   if (!t) {
     t = document.createElement('div');
     t.className = 'toast';
+    // Announce transient feedback (saved / copied / errors) to assistive tech — same
+    // polite live channel the offline badge already uses (offline.js). role=status
+    // implies aria-live=polite; both set explicitly to match the badge's convention.
+    t.setAttribute('role', 'status');
+    t.setAttribute('aria-live', 'polite');
     document.body.appendChild(t);
   }
   t.textContent = msg;
@@ -254,6 +278,11 @@ function flashCopied(anchorEl, msg) {
   if (!anchorEl) { toast(msg || 'Copied to clipboard'); return; }
   const pop = document.createElement('div');
   pop.className = 'copy-pop';
+  // Announced on the same polite live channel as toast (flashCopied only shows the
+  // bubble when it has an anchor; otherwise it falls back to toast — never both, so
+  // no double-announce).
+  pop.setAttribute('role', 'status');
+  pop.setAttribute('aria-live', 'polite');
   pop.textContent = msg || 'Copied to clipboard';
   document.body.appendChild(pop);
   const r = anchorEl.getBoundingClientRect();
@@ -271,21 +300,56 @@ function flashCopied(anchorEl, msg) {
 
 /* ---------- MODALS (themed replacements for prompt/confirm) ---------- */
 
+// Pure: the next focus index for a Tab/Shift-Tab cycle within a trap of n
+// focusables. Wraps first↔last so focus can't escape the dialog; when the current
+// element isn't in the list (i<0) it lands on the first (or last, shift). Extracted
+// so it's unit-testable in isolation.
+function focusTrapNextIndex(i, n, shift) {
+  if (!n) return -1;
+  if (i < 0) return shift ? n - 1 : 0;
+  return shift ? (i === 0 ? n - 1 : i - 1) : (i === n - 1 ? 0 : i + 1);
+}
+
 function showModal(buildBody, onSubmit) {
+  // Restore focus on close to whatever launched the modal (the invoker) — captured
+  // BEFORE the dialog steals focus.
+  const invoker = document.activeElement;
   return new Promise(resolve => {
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
     const box = document.createElement('div');
     box.className = 'modal';
+    // ARIA dialog: modal semantics so assistive tech traps into it and treats the
+    // rest of the page as inert. tabIndex=-1 lets us focus the box itself when it
+    // holds no focusable controls (the guard below).
+    box.setAttribute('role', 'dialog');
+    box.setAttribute('aria-modal', 'true');
+    box.tabIndex = -1;
     overlay.appendChild(box);
+
+    // Every focusable control currently inside the dialog (visible + enabled).
+    const focusables = () => Array.from(box.querySelectorAll(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    )).filter(el => !el.disabled && el.offsetParent !== null);
 
     function close(value) {
       overlay.remove();
       document.removeEventListener('keydown', onKey);
+      // Return focus to the invoker if it's still in the document (a re-render could
+      // have dropped it — fail soft rather than throw / yank focus to <body>).
+      if (invoker && document.contains(invoker) && typeof invoker.focus === 'function') invoker.focus();
       resolve(value);
     }
     function onKey(e) {
       if (e.key === 'Escape') close(null);
+      else if (e.key === 'Tab') {
+        // Focus trap: cycle Tab / Shift-Tab within the dialog's focusables.
+        const f = focusables();
+        e.preventDefault();
+        if (!f.length) { box.focus(); return; }
+        const next = focusTrapNextIndex(f.indexOf(document.activeElement), f.length, e.shiftKey);
+        f[next].focus();
+      }
       else if (e.key === 'Enter') { e.preventDefault(); submit(); }
     }
     function submit() { close(onSubmit()); }
@@ -294,7 +358,22 @@ function showModal(buildBody, onSubmit) {
     document.addEventListener('keydown', onKey);
 
     buildBody(box, submit, () => close(null));
+    // Name the dialog from its title (a .modal-title built by buildBody) for a
+    // screen reader, else it announces as an unlabeled dialog.
+    const titleEl = box.querySelector('.modal-title');
+    if (titleEl) {
+      if (!titleEl.id) titleEl.id = 'modalTitle_' + Math.random().toString(36).slice(2, 8);
+      box.setAttribute('aria-labelledby', titleEl.id);
+    }
     document.body.appendChild(overlay);
+    // Move focus into the dialog if buildBody didn't already (it often focuses an
+    // input/OK via its own setTimeout(0), which registers before this one and so
+    // runs first — this only fires when nothing inside grabbed focus).
+    setTimeout(() => {
+      if (box.contains(document.activeElement)) return;
+      const f = focusables();
+      (f[0] || box).focus();
+    }, 0);
   });
 }
 

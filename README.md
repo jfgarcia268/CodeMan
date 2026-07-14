@@ -135,6 +135,10 @@ commit (and each changed page is snapshotted to history first):
 
 ![Find & replace with a match preview](docs/images/find-replace.png)
 
+The whole app is **keyboard- and screen-reader-operable** — the tree, page tabs, section
+headers, dialogs, and every `⋯`/overflow menu have arrow-key navigation, focus management,
+and ARIA roles.
+
 ### Data safety
 
 Nothing is lost by accident. Deletes go to a restorable **Trash**, every save snapshots the
@@ -226,7 +230,7 @@ All configuration is environment variables, read by `codeman/api.php`:
 | Variable | Required | What it does |
 |----------|----------|--------------|
 | `CODEMAN_DATA` | Recommended | Absolute path to the data directory (pages, `.trash/`, `.history/`, index). **Keep it outside the web root** so it's never web-served or committed. Defaults to `codeman/structures/` if unset. |
-| `CODEMAN_PASSWORD` | Optional | If set, the API requires this shared secret on every request (`X-CodeMan-Auth` header, or `?token=`). The browser prompts once and remembers it (sign out any time via **Forget password** in the sidebar `⋯` menu). **Off by default** (open, for a trusted LAN). Set it if the app is reachable beyond your trusted network, and serve over HTTPS. |
+| `CODEMAN_PASSWORD` | Optional | If set, the API requires this shared secret on every request via the `X-CodeMan-Auth` header. The browser prompts once and remembers it (sign out any time via **Forget password** in the sidebar `⋯` menu). **Off by default** (open, for a trusted LAN). Set it if the app is reachable beyond your trusted network, and serve over HTTPS. |
 
 Deliver them however your server passes env to PHP: real env vars (`getenv`),
 `$_SERVER` (nginx `fastcgi_param`, Apache `SetEnv`), etc. `api.php` checks `getenv`

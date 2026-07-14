@@ -86,10 +86,60 @@ async function migrateLegacy() {
   } catch (e) {}
 }
 
+// One-time migration: fold the single per-namespace `history` blob ({ path: [versions] })
+// into per-page `history:<path>` kv keys (the <NS>\x1F<kind>:<suffix> seam kvEnumerate
+// already serves). Runs in the boot IIFE after migrateLegacy. Design constraints:
+//  (a) ALL NAMESPACES — cursor every `<ns>\x1F history` blob, not just the active one,
+//      so a stranded namespace's local history migrates too;
+//  (b) IDEMPOTENT — write a `history:<path>` key ONLY where it's absent, so a re-run or
+//      a crash-then-retry never double-appends or clobbers newer per-path data;
+//  (c) LEGACY-RETAINED — leave the `history` blob in place (rollback-safe: reverting the
+//      code restores the old read path losslessly), mirroring migrateLegacy;
+//  (d) a per-ns `__history_migrated` flag set AFTER a namespace's paths are all written,
+//      so a second boot is a cheap no-op — and a mid-transform failure (flag never set)
+//      is safe to retry, the absent-only writes making the retry lossless.
+async function migrateHistoryKeys() {
+  try {
+    const db = await idbOpen();
+    // Collect every namespace's legacy history blob (key === '<ns>\x1F history').
+    const blobs = await new Promise((resolve) => {
+      const found = [];
+      const cur = db.transaction('kv', 'readonly').objectStore('kv').openCursor();
+      cur.onsuccess = (e) => {
+        const c = e.target.result;
+        if (!c) return resolve(found);
+        const key = String(c.key);
+        const i = key.indexOf(NS_SEP);
+        if (i !== -1 && key.slice(i + NS_SEP.length) === 'history') {
+          found.push({ ns: key.slice(0, i), value: c.value });
+        }
+        c.continue();
+      };
+      cur.onerror = () => resolve(found);
+    });
+    for (const { ns, value } of blobs) {
+      const flagKey = ns + NS_SEP + '__history_migrated';
+      if (await idbGet('kv', flagKey)) continue;              // (d) already done → no-op
+      if (value && typeof value === 'object') {
+        for (const path of Object.keys(value)) {
+          const perKey = ns + NS_SEP + 'history:' + path;
+          if ((await idbGet('kv', perKey)) === undefined) {   // (b) absent-only write
+            await idbSet('kv', perKey, value[path] || []);
+          }
+        }
+      }
+      // (c) legacy blob left in place; (d) flag set only after all paths are written,
+      // so a crash before here leaves the flag unset → next boot safely retries.
+      await idbSet('kv', flagKey, true);
+    }
+  } catch (e) {}
+}
+
 let offlineState = false;
 let syncQueue = [];
 (async () => {
   try { await migrateLegacy(); } catch (e) {}
+  try { await migrateHistoryKeys(); } catch (e) {}
   try { syncQueue = (await kvGet('queue')) || []; } catch (e) {}
   updateOfflineBadge();
   // A queue can survive a reload (writes parked offline, a switched server, a
@@ -124,19 +174,35 @@ if (typeof window !== 'undefined') {
       // trash: concat (newest-first lists; order isn't load-bearing for restore).
       const srcTrash = (await get(fromNS, 'trash')) || [];
       if (srcTrash.length) { const dst = (await get(toNS, 'trash')) || []; await set(toNS, 'trash', dst.concat(srcTrash)); }
-      // history: per-path merge of the two { path: [versions] } maps, capped.
-      const srcHist = await get(fromNS, 'history');
-      if (srcHist && typeof srcHist === 'object') {
-        const dst = (await get(toNS, 'history')) || {};
-        for (const p of Object.keys(srcHist)) dst[p] = (dst[p] || []).concat(srcHist[p] || []).slice(0, LOCAL_HISTORY_KEEP);
-        await set(toNS, 'history', dst);
-      }
       // tree / colsorts: only seed the target if it has none (else it reconciles from
       // the server on the next flush — the source tree could be stale for that server).
       for (const k of ['tree', 'colsorts']) {
         if ((await get(toNS, k)) === undefined) { const v = await get(fromNS, k); if (v !== undefined) await set(toNS, k, v); }
       }
       const db = await idbOpen();
+      // history: per-page merge — each fromNS `history:<path>` key concatenated (capped)
+      // onto the toNS one, never overwriting the target namespace's own local history.
+      // Cursors the new per-page key shape (post-migrateHistoryKeys), not the old blob.
+      await new Promise((resolve) => {
+        const cur = db.transaction('kv', 'readonly').objectStore('kv').openCursor();
+        const jobs = [];
+        const srcPrefix = fromNS + NS_SEP + 'history:';
+        cur.onsuccess = (e) => {
+          const c = e.target.result;
+          if (!c) { Promise.all(jobs).then(resolve, resolve); return; }
+          const key = String(c.key);
+          if (key.startsWith(srcPrefix)) {
+            const dstKey = toNS + NS_SEP + key.slice(fromNS.length + NS_SEP.length);
+            const src = c.value || [];
+            jobs.push((async () => {
+              const dst = (await idbGet('kv', dstKey)) || [];
+              await idbSet('kv', dstKey, dst.concat(src).slice(0, LOCAL_HISTORY_KEEP));
+            })());
+          }
+          c.continue();
+        };
+        cur.onerror = () => resolve();
+      });
       // Dead-letters are unsynced work too — carry each per-op entry across.
       await new Promise((resolve) => {
         const cur = db.transaction('kv', 'readonly').objectStore('kv').openCursor();
@@ -275,7 +341,7 @@ async function probeBackend() {
   try {
     const fresh = await apiFetch('tree');         // reachable? (throws/aborts if not)
     await kvSet('tree', fresh);
-    treeData = fresh; renderTree();
+    setTreeData(fresh); renderTree();
     setOffline(false);                            // clears state + flushes the queue
     return true;
   } catch (e) {
@@ -357,7 +423,7 @@ async function flushQueue() {
     if (!syncQueue.length) {
       const fresh = await apiFetch('tree');     // reconcile cache with server truth
       await kvSet('tree', fresh);
-      treeData = fresh; renderTree();
+      setTreeData(fresh); renderTree();
       if (dead) toast('Synced — ' + dead + ' change' + (dead === 1 ? '' : 's') + ' could not sync (review)');
       else if (conflicts) toast('Synced — ' + conflicts + ' conflict' + (conflicts === 1 ? '' : 's') + ' overwritten (prior versions in History)');
       else toast('Synced');
@@ -494,7 +560,7 @@ async function restoreNodeToTree(entry) {
     }
   }
   await kvSet('tree', tree);
-  treeData = tree; renderTree();
+  setTreeData(tree); renderTree();
 }
 
 // When a delete already reached the server, restoring means recreating the item.
@@ -530,32 +596,34 @@ async function offlineEmptyTrash() {
 /* ---------- OFFLINE HISTORY (local snapshot log) ---------- */
 
 const LOCAL_HISTORY_KEEP = 20;
+// Local history is stored per page under a `history:<path>` kv key (the
+// <NS>\x1F<kind>:<suffix> seam), NOT the single `history` blob any more — see
+// migrateHistoryKeys for the boot migration off the old shape. Same {ts,size,data}
+// entry shape; the array itself IS the key's value.
 async function recordLocalHistory(path, content) {
   try {
-    const all = (await kvGet('history')) || {};
     const json = JSON.stringify(content);
-    const list = all[path] || [];
+    const list = (await kvGet('history:' + path)) || [];
     list.unshift({ ts: Math.floor(Date.now() / 1000), size: json.length, data: content });
-    all[path] = list.slice(0, LOCAL_HISTORY_KEEP);
-    await kvSet('history', all);
+    await kvSet('history:' + path, list.slice(0, LOCAL_HISTORY_KEEP));
   } catch (e) {}
 }
 
 async function offlineListHistory(path) {
-  const all = (await kvGet('history')) || {};
-  return (all[path] || []).map(v => ({ ts: v.ts, size: v.size }));
+  const list = (await kvGet('history:' + path)) || [];
+  return list.map(v => ({ ts: v.ts, size: v.size }));
 }
 
 async function offlineGetHistory(path, ts) {
-  const all = (await kvGet('history')) || {};
-  const v = (all[path] || []).find(x => String(x.ts) === String(ts));
+  const list = (await kvGet('history:' + path)) || [];
+  const v = list.find(x => String(x.ts) === String(ts));
   return v ? v.data : { error: 'offline: version not found' };
 }
 
 async function offlineRestoreHistory(body) {
   const path = body && body.path, ts = body && body.ts;
-  const all = (await kvGet('history')) || {};
-  const v = (all[path] || []).find(x => String(x.ts) === String(ts));
+  const list = (await kvGet('history:' + path)) || [];
+  const v = list.find(x => String(x.ts) === String(ts));
   if (!v) return { error: 'offline: version not found' };
   const cur = await pageGet(path);
   if (cur) await recordLocalHistory(path, cur); // snapshot current so restore is undoable
@@ -652,6 +720,10 @@ async function mutateTreeCache(action, body) {
     removeFromTree(tree, body.path); await pageDel(body.path);
   } else if (action === 'rename') {
     const node = findInTree(tree, body.path); if (!node) return;
+    // Defensive: a malformed offline op with no newName would set node.name = undefined
+    // and corrupt the cached card. The live rename always sends it, but skip the mutation
+    // (leave the node intact) rather than trust the field — same posture as the DLQ guards.
+    if (!body.newName) return;
     const parent = body.path.includes('/') ? body.path.slice(0, body.path.lastIndexOf('/')) : '';
     node.name = body.newName;
     const newPath = (parent ? parent + '/' : '') + (node.type === 'folder' ? body.newName : body.newName + '.json');
@@ -674,7 +746,9 @@ async function mutateTreeCache(action, body) {
     list.sort((a, b) => body.order.indexOf(key(a)) - body.order.indexOf(key(b)));
   }
   await kvSet('tree', tree);
-  treeData = tree; renderTree();
+  // In-place mutation above → route through setTreeData so the folder-aggregate memos
+  // (keyed by node) are dropped; a stale count/tag summary would otherwise survive.
+  setTreeData(tree); renderTree();
 }
 function findInTree(tree, path) { for (const n of tree) { if (n.path === path) return n; if (n.children) { const f = findInTree(n.children, path); if (f) return f; } } return null; }
 function removeFromTree(tree, path) {
@@ -704,15 +778,19 @@ function collectRepathPairs(node, newPath) {
 // keeps its History — instead of a blank page keyed by a name that no longer exists.
 async function rekeyCachedPaths(pairs) {
   try {
-    const hist = (await kvGet('history')) || {};
-    let histChanged = false;
     for (const { old, neu } of pairs) {
       if (old === neu) continue;
       const page = await pageGet(old);
       if (page !== undefined) { await pageSet(neu, page); await pageDel(old); }
-      if (hist[old]) { hist[neu] = (hist[neu] || []).concat(hist[old]); delete hist[old]; histChanged = true; }
+      // Local history moved with the page: per-page `history:<path>` keys (concat onto
+      // any the destination already holds, then drop the old key).
+      const hist = await kvGet('history:' + old);
+      if (hist !== undefined) {
+        const dst = (await kvGet('history:' + neu)) || [];
+        await kvSet('history:' + neu, dst.concat(hist));
+        await kvDel('history:' + old);
+      }
     }
-    if (histChanged) await kvSet('history', hist);
   } catch (e) {}
 }
 

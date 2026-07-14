@@ -397,6 +397,8 @@ function openCommandPalette() {
     { name: 'Find & replace…', run: () => openReplace() },
     { name: 'Quick-paste a block…', run: () => openBlockPalette() },
     { name: 'Manage tags…', run: () => openTagManager() },
+    // Move the open page to another folder — only offered when a page is open.
+    ...(currentPagePath ? [{ name: 'Move current page to…', run: () => openMovePicker() }] : []),
     { name: 'Toggle outline', run: () => toggleOutline() },
     { name: 'Toggle layout (single / double)', run: () => setSidebarMode(sidebarMode === 'single' ? 'double' : 'single') },
     { name: 'Rebuild index', run: () => rebuildIndex() },
@@ -455,6 +457,76 @@ function openCommandPalette() {
   input.addEventListener('input', render);
   render();
   input.focus();
+}
+
+// Pure: the next highlighted-row index for a filterable palette-style list —
+// ArrowDown/Up clamp within [0, n) (no wrap, matching the command palette). Any
+// other key leaves the index unchanged. Extracted so it's unit-testable.
+function paletteArrowIndex(key, i, n) {
+  if (!n) return -1;
+  if (key === 'ArrowDown') return Math.min(i + 1, n - 1);
+  if (key === 'ArrowUp') return Math.max(i - 1, 0);
+  return i;
+}
+
+// Move the currently-open page to another folder, chosen from a filterable picker.
+// Reuses moveItem (tree.js) so the project-nesting guard + history migration + the
+// offline write-queue path all run exactly as a drag-move would — nothing bypassed.
+// Keyboard model mirrors the command palette: type to filter, ArrowDown/Up move a
+// highlighted row, Enter selects the highlighted (or top) match — so the natural
+// filter-then-Enter gesture picks a destination instead of silently cancelling.
+function openMovePicker() {
+  if (!currentPagePath) { toast('Open a page to move first'); return; }
+  const srcPath = currentPagePath;
+  const srcParent = srcPath.includes('/') ? srcPath.slice(0, srcPath.lastIndexOf('/')) : '';
+  // Root + every folder, minus the page's current parent (moving there is a no-op).
+  const dests = [{ path: '', label: 'Top level', project: false }]
+    .concat(collectFolderPaths(treeData)
+      .sort((a, b) => a.path.localeCompare(b.path))
+      .map(f => ({ path: f.path, label: f.path, project: f.project })))
+    .filter(d => d.path !== srcParent);
+  let active = 0, visible = [];
+  const chosen = () => visible[active] || null;   // the row Enter/submit will pick
+  showModal((box, submit) => {
+    const title = document.createElement('div'); title.className = 'modal-title';
+    title.textContent = 'Move “' + nameFromPath(srcPath) + '” to…';
+    const filter = document.createElement('input'); filter.className = 'modal-input';
+    filter.placeholder = 'Filter folders…';
+    const listWrap = document.createElement('div'); listWrap.className = 'move-list';
+    function renderList() {
+      const q = filter.value.trim().toLowerCase();
+      visible = dests.filter(d => !q || d.label.toLowerCase().includes(q));
+      if (active >= visible.length) active = Math.max(0, visible.length - 1);
+      listWrap.innerHTML = '';
+      visible.forEach((d, i) => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'move-row' + (d.project ? ' is-project' : '') + (i === active ? ' active' : '');
+        row.textContent = d.label;
+        row.addEventListener('mousemove', () => { if (active !== i) { active = i; renderList(); } });
+        row.onclick = () => { active = i; submit(); };
+        listWrap.appendChild(row);
+      });
+      if (!visible.length) {
+        const e = document.createElement('div'); e.className = 'move-empty'; e.textContent = 'No matching folders';
+        listWrap.appendChild(e);
+      }
+      const act = listWrap.querySelector('.move-row.active');
+      if (act) act.scrollIntoView({ block: 'nearest' });
+    }
+    filter.addEventListener('input', () => { active = 0; renderList(); });
+    // Arrow keys move the highlight (the modal's own onKey handles Enter→submit and
+    // Escape→close); handled here so they don't move the text cursor in the filter.
+    filter.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+      e.preventDefault();
+      active = paletteArrowIndex(e.key, active, visible.length);
+      renderList();
+    });
+    box.append(title, filter, listWrap);
+    renderList();
+    setTimeout(() => filter.focus(), 0);
+  }, () => chosen()).then(dest => { if (dest) moveItem(srcPath, dest.path); });
 }
 
 document.addEventListener('keydown', (e) => {

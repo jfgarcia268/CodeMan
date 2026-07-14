@@ -242,7 +242,30 @@ async function openPage(path) {
         return t;
       })();
       _openingPages.set(path, p);
-      try { tab = await p; } finally { _openingPages.delete(path); }
+      // Loading affordance: only reveal a spinner if the fetch is actually slow
+      // (>250 ms) so a fast local open never flashes. The tab element doesn't exist
+      // until the fetch resolves, so the indicator lives on the tab strip; aria-busy
+      // gives screen-reader feedback. On the very first open the strip is display:none
+      // (no tabs yet) — reveal it early so the spinner paints; the reveal is undone in
+      // the finally if the open failed (a success re-renders the strip visible anyway).
+      const bar = document.getElementById('mainTabs');
+      let revealedForSpin = false;
+      const spinTimer = setTimeout(() => {
+        if (!bar) return;
+        bar.classList.add('tabs-loading');
+        bar.setAttribute('aria-busy', 'true');
+        if (getComputedStyle(bar).display === 'none') { bar.style.display = 'flex'; revealedForSpin = true; }
+      }, 250);
+      try { tab = await p; }
+      finally {
+        _openingPages.delete(path);
+        clearTimeout(spinTimer);
+        if (bar) {
+          bar.classList.remove('tabs-loading');
+          bar.removeAttribute('aria-busy');
+          if (revealedForSpin) bar.style.display = openPages.length ? 'flex' : 'none';
+        }
+      }
     }
   }
   activateTab(tab);
@@ -317,31 +340,105 @@ function closeUnder(path) {
     .forEach(t => closePage(t.path));
 }
 
+// Pure: the next tab index for the ARIA tablist arrow keys. Left/Right wrap around
+// the ends; Home/End jump to first/last. Any other key leaves the index unchanged.
+// Extracted so it's unit-testable in isolation.
+function tabArrowIndex(key, i, n) {
+  if (!n) return -1;
+  if (key === 'ArrowRight') return (i + 1) % n;
+  if (key === 'ArrowLeft') return (i - 1 + n) % n;
+  if (key === 'Home') return 0;
+  if (key === 'End') return n - 1;
+  return i;
+}
+
+// Focus the open-page tab for a path (used after activation re-renders the strip,
+// so keyboard focus follows the newly selected tab instead of falling to <body>).
+function focusTabByPath(path) {
+  const bar = document.getElementById('mainTabs');
+  if (!bar) return;
+  const el = Array.from(bar.querySelectorAll('[role="tab"]')).find(t => t.dataset.path === path);
+  if (el) el.focus();
+}
+
 function renderMainTabs() {
   const bar = document.getElementById('mainTabs');
   bar.innerHTML = '';
   bar.style.display = openPages.length ? 'flex' : 'none';
-  openPages.forEach(tab => {
+  // ARIA tabs pattern: the strip is a tablist; each tab is role="tab" with
+  // aria-selected + a roving tabindex (only the active tab is tabbable). Arrow keys
+  // move between tabs (Home/End to the ends) and open that page; Enter/Space open a
+  // focused tab. Each tab's close ✕ is a real <button> so it's keyboard-reachable
+  // (Tab to it, Enter/Space closes); "Close all" is likewise a real <button>.
+  bar.setAttribute('role', 'tablist');
+  bar.setAttribute('aria-label', 'Open pages');
+  let activeTabId = '';
+  openPages.forEach((tab, i) => {
+    const isActive = tab.path === activePath;
     const el = document.createElement('div');
-    el.className = 'main-tab' + (tab.path === activePath ? ' active' : '');
+    el.className = 'main-tab' + (isActive ? ' active' : '');
+    el.id = 'maintab-' + i;
+    el.setAttribute('role', 'tab');
+    el.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    el.setAttribute('aria-controls', 'page');   // the tabpanel it controls (#page)
+    el.tabIndex = isActive ? 0 : -1;
+    el.dataset.path = tab.path;
+    el.setAttribute('aria-label', tab.title);
+    if (isActive) activeTabId = el.id;
     const name = document.createElement('span');
     name.className = 'main-tab-name';
     name.textContent = tab.title;
     name.title = tab.path;
     el.appendChild(name);
-    const x = document.createElement('span');
+    // The close ✕ is a real focusable <button> (enters the Tab sequence; Enter/Space
+    // fire its click) so a keyboard user can close a tab. On close, focus is moved to
+    // a surviving tab (renderMainTabs rebuilt the strip) so it doesn't fall to <body>.
+    const x = document.createElement('button');
+    x.type = 'button';
     x.className = 'main-tab-close';
     x.textContent = '✕';
-    x.addEventListener('click', (e) => { e.stopPropagation(); closePage(tab.path); });
+    x.setAttribute('aria-label', 'Close ' + tab.title);
+    x.title = 'Close';
+    x.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idx = openPages.indexOf(tab);
+      const survivors = openPages.filter(t => t.path !== tab.path);
+      closePage(tab.path);
+      if (survivors.length) focusTabByPath(survivors[Math.min(idx, survivors.length - 1)].path);
+    });
     el.appendChild(x);
     el.addEventListener('click', () => { if (tab.path !== activePath) activateTab(tab); });
+    el.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        if (tab.path !== activePath) { activateTab(tab); focusTabByPath(tab.path); }
+        return;
+      }
+      if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
+      e.preventDefault();
+      const ni = tabArrowIndex(e.key, openPages.indexOf(tab), openPages.length);
+      const target = openPages[ni];
+      if (!target) return;
+      if (target.path !== activePath) activateTab(target); // re-renders the strip
+      focusTabByPath(target.path);
+    });
     bar.appendChild(el);
   });
+  // Pair the page region as the tabpanel for the active tab (APG tabs pattern).
+  const pageRegion = document.getElementById('page');
+  if (pageRegion) {
+    pageRegion.setAttribute('role', 'tabpanel');
+    pageRegion.setAttribute('tabindex', '0');
+    if (activeTabId) pageRegion.setAttribute('aria-labelledby', activeTabId);
+    else pageRegion.removeAttribute('aria-labelledby');
+  }
   if (openPages.length > 1) {
-    const closeAll = document.createElement('span');
+    const closeAll = document.createElement('button');
+    closeAll.type = 'button';
     closeAll.className = 'main-tab-closeall';
     closeAll.textContent = 'Close all';
     closeAll.title = 'Close all tabs';
+    closeAll.setAttribute('aria-label', 'Close all tabs');
     closeAll.addEventListener('click', closeAllPages);
     bar.appendChild(closeAll);
   }
@@ -1310,9 +1407,18 @@ function renderSection(section, parentArray, idx, isSub, parentBlocks) {
   const headerEl = document.createElement('div');
   headerEl.className = 'section-header';
 
+  // The disclosure triangle IS the accessible collapse control: role=button +
+  // roving-free tabindex + aria-expanded, so a screen reader announces it as a
+  // button and its collapsed/expanded state. (role=button lives on the toggle, not
+  // the whole .section-header, because the header also contains the title <input>
+  // and action buttons — a role=button MUST NOT wrap interactive descendants.)
   const toggle = document.createElement('span');
   toggle.className = 'section-toggle';
   toggle.textContent = '▼';
+  toggle.setAttribute('role', 'button');
+  toggle.tabIndex = 0;
+  toggle.setAttribute('aria-expanded', section.collapsed ? 'false' : 'true');
+  toggle.setAttribute('aria-label', 'Toggle section' + (section.title ? ': ' + section.title : ''));
 
   const titleInput = document.createElement('input');
   titleInput.className = 'section-title';
@@ -1482,12 +1588,19 @@ function renderSection(section, parentArray, idx, isSub, parentBlocks) {
   } else {
     headerEl.append(toggle, titleInput, renderTags(section), sectionActions);
   }
+  const toggleCollapse = () => {
+    section.collapsed = !section.collapsed;
+    el.classList.toggle('collapsed', section.collapsed);
+    toggle.setAttribute('aria-expanded', section.collapsed ? 'false' : 'true');
+    scheduleSave();
+  };
   headerEl.addEventListener('click', (e) => {
-    if (e.target === headerEl || e.target === toggle) {
-      section.collapsed = !section.collapsed;
-      el.classList.toggle('collapsed', section.collapsed);
-      scheduleSave();
-    }
+    if (e.target === headerEl || e.target === toggle) toggleCollapse();
+  });
+  // Keyboard: Enter/Space on the focused toggle collapses/expands (the button's
+  // native activation contract) without hijacking the header's other controls.
+  toggle.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleCollapse(); }
   });
 
   el.append(headerEl, body);
