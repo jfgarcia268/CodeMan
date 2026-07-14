@@ -655,11 +655,14 @@
       // The offline cache is namespaced per server (offline.js): go through the SAME
       // kvGet/kvSet/pageGet/pageSet wrappers the functions use, so we seed/read the
       // active namespace AND snapshot/restore exactly the keys under test (safe to run).
-      for (const k of ['tree', 'queue', 'trash', 'history']) snap[k] = await kvGet(k);
+      for (const k of ['tree', 'queue', 'trash', 'history', '__history_migrated']) snap[k] = await kvGet(k);
       // Dead-letters are per-op namespaced kv entries (dl:<id>) — snapshot every one
       // so a failed run can NEVER corrupt a contributor's real cache. Restored in
-      // `finally` alongside the four keys above.
+      // `finally` alongside the keys above.
       const dlSnap = await kvEnumerate('dl:'); // [{ key:'dl:<id>', value }]
+      // Local history now lives under per-page history:<path> keys (the same seam) —
+      // snapshot every one so a failed run can't corrupt a contributor's real history.
+      const histSnap = await kvEnumerate('history:'); // [{ key:'history:<path>', value }]
 
       // Run-id prefix for every seeded page path: a killed run's leftovers can
       // never collide with (or false-pass) the next run's seeds.
@@ -711,7 +714,7 @@
       ta('mutateTreeCache rename w/o newName keeps node path', guarded[0].path, TF);
 
       // history: record + list + get + restore
-      await kvSet('history', {}); syncQueue.length = 0;
+      await kvDel('history:' + TP); syncQueue.length = 0;
       await pageSet(TP, { title: 'Page', sections: [{ title: 'v1' }] });
       await recordLocalHistory(TP, { title: 'Page', sections: [{ title: 'v0' }] });
       const hist = await offlineListHistory(TP);
@@ -725,6 +728,49 @@
       ta('restore_history queues a save', syncQueue.some(o => o.action === 'save_page' && o.body.path === TP), true);
 
       await pageDel(TP);
+      await kvDel('history:' + TP);
+
+      // ---- history-key boot migration (legacy `history` blob → per-page history:<path>) ----
+      // migrateHistoryKeys is idempotent, all-namespaces, legacy-retained. Seed a legacy
+      // blob in the ACTIVE namespace, clear the per-ns flag, migrate, and assert the
+      // per-path keys, the untouched legacy blob, the flag, and a no-op re-run.
+      {
+        const HA = RUN + 'histmig/A.json', HB = RUN + 'histmig/B.json';
+        const legacyBlob = {
+          [HA]: [{ ts: 111, size: 3, data: { title: 'A0' } }],
+          [HB]: [{ ts: 222, size: 3, data: { title: 'B0' } }],
+        };
+        await kvSet('history', legacyBlob);
+        await kvDel('history:' + HA); await kvDel('history:' + HB);
+        await kvDel('__history_migrated');
+        await migrateHistoryKeys();
+        const mA = await kvGet('history:' + HA), mB = await kvGet('history:' + HB);
+        ta('history migration creates per-path key A', mA && mA.length, 1);
+        ta('history migration copies entry A intact', mA && mA[0].data.title, 'A0');
+        ta('history migration creates per-path key B', mB && mB[0].data.title, 'B0');
+        ta('history migration leaves the legacy blob intact', (await kvGet('history'))[HA][0].ts, 111);
+        ta('history migration sets the per-ns flag', await kvGet('__history_migrated'), true);
+        // second run = cheap no-op (flag short-circuits; nothing double-appended)
+        await migrateHistoryKeys();
+        ta('history migration re-run does not double-append', (await kvGet('history:' + HA)).length, 1);
+        // idempotent WITHOUT the flag: a present target is never clobbered / appended to
+        await kvDel('__history_migrated');
+        await kvSet('history:' + HA, [{ ts: 999, size: 1, data: { title: 'NEW' } }]);
+        await migrateHistoryKeys();
+        const mA3 = await kvGet('history:' + HA);
+        ta('history migration skips a present target (no clobber)', mA3.length, 1);
+        ta('history migration keeps the newer target value', mA3[0].data.title, 'NEW');
+        // mid-transform crash retry: A already written, B missing, flag never set → the
+        // retry completes B and leaves A untouched (no double-append).
+        await kvSet('history', legacyBlob);
+        await kvSet('history:' + HA, [{ ts: 111, size: 3, data: { title: 'A0' } }]);
+        await kvDel('history:' + HB);
+        await kvDel('__history_migrated');
+        await migrateHistoryKeys();
+        ta('mid-transform retry completes the missing path', (await kvGet('history:' + HB))[0].data.title, 'B0');
+        ta('mid-transform retry leaves the done path single', (await kvGet('history:' + HA)).length, 1);
+        await kvDel('history:' + HA); await kvDel('history:' + HB);
+      }
 
       // flushQueue replay: FIFO drain, conflict → forced resend, network failure
       // retains the queue. apiFetch/renderTree/toast/updateOfflineBadge/setOffline
@@ -983,13 +1029,18 @@
       out.appendChild(d);
     } finally {
       // restore the real cache exactly as it was
-      for (const k of ['tree', 'queue', 'trash', 'history']) {
+      for (const k of ['tree', 'queue', 'trash', 'history', '__history_migrated']) {
         if (snap[k] !== undefined) await kvSet(k, snap[k]); else await kvDel(k);
       }
       // remove any dl: entries this run created, then restore the snapshotted originals
       try {
         for (const r of await kvEnumerate('dl:')) await kvDel(r.key);
         for (const r of dlSnap) await kvSet(r.key, r.value);
+      } catch (e) {}
+      // same for per-page history:<path> keys (remove this run's, restore originals)
+      try {
+        for (const r of await kvEnumerate('history:')) await kvDel(r.key);
+        for (const r of histSnap) await kvSet(r.key, r.value);
       } catch (e) {}
       syncQueue.length = 0; syncQueue.push(...savedQueue);
       document.getElementById('summary').innerHTML =

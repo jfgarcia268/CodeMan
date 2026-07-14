@@ -35,6 +35,19 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
   cached folder counts/tags — so the sidebar stays instant even with thousands of pages. Typing in
   search and dragging the sidebar divider are also smoothed (coalesced) so they don't stutter at
   scale. No change to what you see: search, reveal, and keyboard navigation work exactly as before.
+- **Faster warm boot & server responses.** On a hosted (non-localhost) server the app now
+  cache-busts its scripts/styles by *version* instead of a per-load timestamp, so after the first
+  visit the browser reuses the cached files until the next release — a near-instant warm boot with
+  almost nothing re-downloaded. The tag list is now served from the same metadata index the sidebar
+  uses (fast even with thousands of pages), and deep content search takes a quicker path on the
+  common case. An optional gzip of API responses can be enabled server-side (`CODEMAN_GZIP=1`) once
+  you've confirmed your web server isn't already compressing. No change to what you see.
+
+### Fixed
+- **Content search finds pages with a slash in the text again.** A deep (content) search for a term
+  containing a `/` (e.g. `api/v1`, `TCP/IP`) could miss pages — especially ones recently touched by the
+  tag manager or find-&-replace — because of how the slash was stored on disk. Slash searches now return
+  all matching pages, and pages rewritten by those tools are re-saved so they stay findable.
 
 ### Security
 - **Server-side CSRF protection.** The API now requires the `X-CodeMan-Request` header on every

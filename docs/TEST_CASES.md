@@ -465,6 +465,38 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   plain-**http** remote image is blocked (verify in devtools: an https `![](…)` renders, an http one
   is refused).
 
+### TC-transport — WS-6 transport & server efficiency (cache-bust / index / search / history keys)
+- TC-transport-01 (N): **version-keyed cache-bust, 3-way.** Boot `index.html`: `version.js` loads as a
+  STATIC `<script src="version.js">` (no `?v=`) so `self.CODEMAN_VERSION` exists before the modules;
+  `src/*.js` + `style.css` carry a `?v=` from `cacheBustKey()` — on `localhost`/`127.0.0.1` a
+  `Date.now()` value, on a real hostname `?v=<CODEMAN_VERSION>`, and on `file://` **no query** (the
+  desktop wrapper — Chromium won't resolve `foo.js?v=…` off disk). SW registers; footer shows the
+  version; no console errors. *Verified this phase (headless Chrome, localhost):* version.js un-keyed,
+  modules `?v=<Date.now()>`, `swController:true`, 0 console errors, a code + note block render
+  (Prism `.token` present, markdown-it `<h1>` in the note).
+- TC-transport-02 (N): **search_content raw fast path + fallback (unicode AND slash).** A `save_page`-stored
+  page (unescaped UTF-8 + slashes) matches an emoji/`café`/CJK/ASCII query via the raw `stripos` fast
+  path. The decode-and-recheck fallback fires when the raw haystack MISSES **and** the query is
+  non-ASCII **or contains `/`/`\`**: a page stored with `\uXXXX` escapes still matches a literal UTF-8
+  query, and a page stored with an escaped `\/` (an interior-slash query like `api/v1` — the shape the
+  OLD `replace_content`/`rename_tag` `JSON_PRETTY_PRINT` writes and external editors produce) is still
+  found (before the broadening it returned **zero** — a page silently hidden from a slash search).
+  Common ASCII-no-slash queries keep the fast path. **Writer normalization:** `replace_content` and
+  `rename_tag` now write `JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES` (matching `save_page`), so a
+  rewritten page re-stores `/`/UTF-8 literally and matches via the fast path without a decode. **[auto:
+  tests-api]**
+- TC-transport-03 (N): **list_tags is index-backed.** Returns correct `[{tag,count}]` (count = pages
+  using it) via `pageMetaIndexed` + `flushIndex` (mirrors `tree`); a warm call reuses cached tags and
+  populates `.index.json`. **[auto: tests-api]**
+- TC-transport-04 (N): **per-page history-key boot migration** (`migrateHistoryKeys`): idempotent,
+  all-namespaces, legacy-retained. Seeding a legacy `history` blob then migrating creates
+  `history:<path>` keys with the same entries, leaves the legacy blob intact (rollback-safe), sets a
+  per-ns `__history_migrated` flag; a second run is a no-op (no double-append); a present target is
+  never clobbered; a mid-transform crash (flag never set, one path written, one missing) safely
+  completes the missing path on retry without double-appending the done one. The offline history
+  reducers (`recordLocalHistory`/`offlineListHistory`/`offlineGetHistory`/`offlineRestoreHistory`) all
+  read/write the per-page keys. **[auto: tests.html]**
+
 ### TC-colsort — Per-column sort (double layout)
 - TC-colsort-01 (P): Name/Code-type/Kind × asc/desc + Manual order; persists in `.colsort.json`;
   active sort renders a flat intermixed list. **[auto: tests.html sortMillerChildren]**
@@ -535,6 +567,33 @@ say so in the report rather than implying full coverage.**
     children **once** (`selectFolder→renderTree`), not twice — instrument `renderTreeNode` and assert
     each direct child is constructed a single time per click (measured 4 for a 4-child folder;
     the pre-fix double-build produced 8). Guards against reintroducing the redundant inline build.
+- TC-ext-perf-transport (WS-6 server efficiency): measure on a seeded large library (~1200 pages,
+  warm `.index.json`). **Targets:** (a) **`list_tags` ≤5 ms warm** — after one warming call, the
+  index-backed aggregate reuses cached tags (only mtime-moved pages re-parse); measure the warm
+  round-trip server-side. (b) **Warm-boot shell transfer <50 KB on the NAS/hosted path** — with
+  version-keyed `?v=`, a second visit (no release bump) serves `src/*.js` + `style.css` from browser
+  cache (304/`from cache`); only the two un-cached bootstrap files (`index.html`, `version.js`, sent
+  `Cache-Control: no-cache`) travel the wire. Verify in devtools Network (disable "disable cache"):
+  total transferred on a warm reload is a few KB, not the full ~hundreds-of-KB shell. (c) **No
+  `search_content` regression** — the raw fast path should equal or beat the old always-decode path
+  on ASCII/UTF-8 queries; confirm result parity + no slowdown. *Why extended:* needs a seeded dataset
+  + a driven browser/timed server. **Owner for measured before/after: senior-performance-engineer.**
+- TC-ext-gzip (deploy gate — `CODEMAN_GZIP`): API-response gzip is **OFF by default** and shipped
+  behind an env gate. **Pre-flight before enabling `CODEMAN_GZIP=1` on the NAS:** confirm the nginx
+  layer is NOT already gzipping `api.php` output (else double-compression corrupts the body — check
+  `default.conf` `gzip`/`gzip_types` for `application/json`, or `curl -H 'Accept-Encoding: gzip' -I`
+  the API and verify a single `Content-Encoding: gzip`). Desktop path is always safe: the proxy's
+  `fetch()` decompresses transparently and re-serves identity — `CODEMAN_SMOKE=1` asserts the `gzip`
+  probe still parses a well-formed body with no round-trip regression. *Why extended:* needs the real
+  NAS/nginx deployment to validate the pre-flight; can't be checked from the repo.
+- TC-ext-perf-iter (dot-dir skip on content scans): the five content-scanning actions (`list_tags`,
+  `search_content`, `search_blocks`, `replace_content`, `rename_tag`) go through `contentFileIterator`,
+  which never DESCENDS into `.history`/`.trash`. On a mature library (history keeps up to 20 versions
+  per page → ~24k hidden files at 1,200 pages) this keeps **warm `list_tags` ≤5 ms independent of
+  history depth** (before, the iterators stat'd every hidden file — measured ~24 ms, could exceed
+  100 ms). Verify: seed pages with deep history, then confirm warm `list_tags`/`search_content` timing
+  doesn't grow with history depth. The delete path (`rrmdir`) still walks dot-dirs (must). *Why
+  extended:* needs a seeded large/deep-history dataset. **Owner for measured numbers: senior-performance-engineer.**
 - TC-ext-desktop-sync (native data-sync dialogs): all three `dialog.showMessageBox` branches —
   Local→Server ("Push to server / Keep"), Server→Local ("Sync now / Switch anyway"), Server A→B —
   with a queued change. *Why:* needs a running Electron instance + native-dialog interaction.

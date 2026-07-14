@@ -113,6 +113,48 @@ has "search_content matches ASCII 'echo'"    "$(sc 'echo')" "Uni.json"
 sb=$(curl -sG "$BASE" --data-urlencode "action=search_blocks" --data-urlencode "q=café")
 has "search_blocks matches 'café'" "$sb" "Uni.json"
 
+# A page stored with \uXXXX-ESCAPED unicode (an external editor / a create_page-style
+# JSON_PRETTY_PRINT write). The raw stripos fast path MISSES the literal UTF-8 query,
+# so this exercises the decode-and-recheck fallback that keeps unicode search correct.
+printf '%s' '{"title":"UniEsc","sections":[{"title":"S","collapsed":false,"tags":[],"blocks":[{"type":"bash","label":"","code":"marker \u65e5\u672c\u8a9e end"}],"subsections":[]}]}' > "$DATA/UniEsc.json"
+has "search_content decode-fallback matches \uXXXX-escaped CJK" "$(sc '日本語')" "UniEsc.json"
+has "search_content raw fast-path matches ASCII in an escaped file" "$(sc 'marker')" "UniEsc.json"
+
+# --- slash-query search parity (fallback broadening + writer normalization) --
+# A page with an interior slash in content, stored with '\/' ESCAPED on disk — as the
+# OLD replace_content/rename_tag (bare JSON_PRETTY_PRINT) writes did, and external editors
+# do. The raw stripos fast path MISSES "api/v1" (disk holds "api\/v1"); the broadened
+# fallback (query contains '/') decodes-and-rechecks → the page must still be found
+# (before the fix this returned zero — a page silently hidden from a slash search).
+printf '%s' '{"title":"Slash","sections":[{"title":"S","collapsed":false,"tags":["slashtag"],"blocks":[{"type":"bash","label":"","code":"GET api\/v1\/users"}],"subsections":[]}]}' > "$DATA/Slash.json"
+has "search_content slash-query matches an escaped-slash file (fallback)" "$(sc 'api/v1')" "Slash.json"
+# Writer normalization: rewriting the page via rename_tag (routine tag manager) must
+# re-store it with UNESCAPED slashes, so the raw fast path matches WITHOUT a decode.
+post rename_tag '{"from":"slashtag","to":"slashtag2"}' >/dev/null
+has "search_content slash-query matches after rename_tag rewrite" "$(sc 'api/v1')" "Slash.json"
+grep -q 'api/v1' "$DATA/Slash.json" && ok "rename_tag re-stores slashes UNESCAPED on disk" || bad "rename_tag re-stores slashes UNESCAPED on disk" "still escaped"
+# Same via replace_content (find & replace): change unrelated text → forces a rewrite.
+post replace_content '{"find":"users","replace":"accounts"}' >/dev/null
+has "search_content slash-query matches after replace_content rewrite" "$(sc 'api/v1')" "Slash.json"
+grep -q 'api/v1' "$DATA/Slash.json" && ok "replace_content re-stores slashes UNESCAPED on disk" || bad "replace_content re-stores slashes UNESCAPED on disk" "still escaped"
+# Sanity: the non-ASCII fallback + ASCII-no-slash fast path are unaffected by the change.
+has "search_content non-ASCII still matches (fallback intact)" "$(sc '日本語')" "UniEsc.json"
+has "search_content ASCII-no-slash still matches (fast path intact)" "$(sc 'echo')" "Uni.json"
+
+# --- list_tags (index-backed: pageMetaIndexed + flushIndex) ----------------
+post save_page '{"path":"TagA.json","data":{"title":"TagA","sections":[{"title":"S","collapsed":false,"tags":["alpha","shared"],"blocks":[],"subsections":[]}]}}' >/dev/null
+post save_page '{"path":"TagB.json","data":{"title":"TagB","sections":[{"title":"S","collapsed":false,"tags":["shared"],"blocks":[],"subsections":[]}]}}' >/dev/null
+lt=$(curl -sG "$BASE" --data-urlencode "action=list_tags")
+has "list_tags returns tag 'alpha'"             "$lt" '"tag":"alpha"'
+has "list_tags counts 'shared' across 2 pages"  "$lt" '"tag":"shared","count":2'
+# Warm the index, then confirm a warm call is still correct (index-backed, cached
+# tags). The ≤5 ms warm-timing target is validated separately (see docs/TEST_CASES.md
+# Extended perf) — a hard ms assertion here would be flaky across CI/macOS.
+curl -sG "$BASE" --data-urlencode "action=list_tags" >/dev/null   # warm the mtime index
+lt2=$(curl -sG "$BASE" --data-urlencode "action=list_tags")
+has "list_tags warm call still counts 'shared'" "$lt2" '"tag":"shared","count":2'
+test -f "$DATA/.index.json" && ok "list_tags populated the metadata index" || bad "list_tags populated the metadata index" "no .index.json"
+
 # --- same-second history retention (collision bump, no silent drop) --------
 post create_page '{"name":"Hist","parent":""}' >/dev/null
 for i in 1 2 3 4; do post save_page "{\"path\":\"Hist.json\",\"data\":{\"title\":\"v$i\",\"sections\":[]}}" >/dev/null; done

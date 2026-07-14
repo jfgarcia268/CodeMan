@@ -557,9 +557,14 @@ function createWindow() {
         try {
           const out = await mainWin.webContents.executeJavaScript(
             '(async () => {'
-            + ' let api={}, writeGuard={}, dupGuard={};'
+            + ' let api={}, gzip={}, writeGuard={}, dupGuard={};'
             + ' try { const t0=performance.now(); const r = await fetch("api.php?action=tree"); const j = await r.json();'
             + '   api={ok:r.ok, rootNodes:Array.isArray(j)?j.length:"?", ms:Math.round(performance.now()-t0)}; } catch(e){ api={err:String(e)}; }'
+            // gzip identity re-serve: the proxy fetch() decompresses any upstream gzip
+            // (CODEMAN_GZIP=1) transparently and re-serves identity, so the renderer must
+            // still parse a well-formed JSON body — and the round-trip must not regress.
+            + ' try { const t0=performance.now(); const r = await fetch("api.php?action=tree",{headers:{"Accept-Encoding":"gzip"}}); const j = await r.json();'
+            + '   gzip={ok:r.ok, parsed:Array.isArray(j), ms:Math.round(performance.now()-t0)}; } catch(e){ gzip={err:String(e)}; }'
             // write-path through the proxy WITHOUT the CSRF header → the proxy must 403 it
             // (or 503 when offline-only). Proves the mutating-action guard without touching data.
             + ' try { const r = await fetch("api.php?action=save_page", {method:"POST", body:"{}"});'
@@ -569,7 +574,7 @@ function createWindow() {
             + ' try { const r = await fetch("api.php?action=tree&action=save_page");'
             + '   dupGuard={status:r.status, blocked:r.status===403}; } catch(e){ dupGuard={err:String(e)}; }'
             + ' return JSON.stringify({path:location.pathname, title:document.title, scripts:document.scripts.length,'
-            + '   rows:document.querySelectorAll(".tree-row,.miller-row,.subfolder-card").length, api, writeGuard, dupGuard}); })()'
+            + '   rows:document.querySelectorAll(".tree-row,.miller-row,.subfolder-card").length, api, gzip, writeGuard, dupGuard}); })()'
           );
           console.log('SMOKE_RESULT ' + out);
         } catch (e) { console.log('SMOKE_ERROR ' + (e && e.message)); }

@@ -1,6 +1,19 @@
 <?php
 header('Content-Type: application/json');
 
+// Optional gzip of API responses. OFF by default — a NAS deploy might already gzip
+// PHP output at the nginx layer, and double-compressing would corrupt the body. Turn
+// it on with CODEMAN_GZIP=1 (env or fastcgi_param) ONLY after confirming nginx isn't
+// compressing api.php (see the deploy gate in CLAUDE.md / docs/TEST_CASES.md).
+// ob_gzhandler self-skips when the client sends no `Accept-Encoding: gzip`, and the
+// desktop proxy's fetch() decompresses transparently then re-serves identity content,
+// so enabling it never affects the desktop wrapper (CODEMAN_SMOKE asserts that).
+$gzipOn = getenv('CODEMAN_GZIP');
+if (!$gzipOn && isset($_SERVER['CODEMAN_GZIP'])) $gzipOn = $_SERVER['CODEMAN_GZIP'];
+if ($gzipOn === '1' && !ini_get('zlib.output_compression') && function_exists('ob_gzhandler')) {
+    @ob_start('ob_gzhandler');
+}
+
 // Storage location for persisted pages/folders.
 // Set CODEMAN_DATA (e.g. /config/data/codeman on the NAS) to keep data
 // OUTSIDE the cloned repo so git operations never touch it and the files
@@ -29,9 +42,19 @@ $indexFile = $base . '/.index.json';
 $index = [];           // path => ['tags'=>[], 'langs'=>[], 'mtime'=>int]
 $indexDirty = false;   // set when an entry is added/updated/pruned
 $indexSeen = [];       // paths encountered this request (for pruning)
-if (file_exists($indexFile)) {
-    $loaded = json_decode(@file_get_contents($indexFile), true);
-    if (is_array($loaded)) $index = $loaded;
+$indexLoaded = false;  // read from disk lazily — see loadIndex()
+
+// Lazily read .index.json into $index. Only the index-using actions (tree,
+// rebuild_index, list_tags) call this, so EVERY other request skips the
+// (potentially large) index read entirely. Idempotent within a request.
+function loadIndex() {
+    global $index, $indexFile, $indexLoaded;
+    if ($indexLoaded) return;
+    $indexLoaded = true;
+    if (file_exists($indexFile)) {
+        $loaded = json_decode(@file_get_contents($indexFile), true);
+        if (is_array($loaded)) $index = $loaded;
+    }
 }
 
 // Emit an error response and stop. Keeps PHP warnings out of the JSON body.
@@ -373,6 +396,23 @@ function flushIndex() {
     }
 }
 
+// A recursive file iterator over the data root that NEVER descends into hidden
+// dot-directories (.history/.trash/.index.json/…). The content-scanning actions
+// (list_tags, search_content, search_blocks, replace_content, rename_tag) use this so
+// they don't stat tens of thousands of history/trash files on a mature library (history
+// keeps up to 20 versions per page). The delete path (rrmdir) deliberately does NOT use
+// it — it MUST walk dot-dirs. Each caller keeps its in-loop "/."-in-path skip as
+// belt-and-suspenders; buildTree is already immune (scandir + dot-skip).
+function contentFileIterator($base) {
+    $dir = new RecursiveDirectoryIterator($base, RecursiveDirectoryIterator::SKIP_DOTS);
+    // Returning false for a dot-dir prevents descent into it entirely (not just skipping
+    // the entry) — so .history/.trash subtrees are never walked.
+    $filter = new RecursiveCallbackFilterIterator($dir, function ($current) {
+        return substr($current->getFilename(), 0, 1) !== '.';
+    });
+    return new RecursiveIteratorIterator($filter);
+}
+
 // Recursively remove a directory and its contents.
 function rrmdir($path) {
     if (is_dir($path)) {
@@ -463,6 +503,7 @@ if ($csrfOff !== 'off'
 
 switch ($action) {
     case 'tree':
+        loadIndex();
         $tree = buildTree($base, $base);
         flushIndex();
         echo json_encode($tree);
@@ -470,6 +511,7 @@ switch ($action) {
 
     case 'rebuild_index':
         // Force a full re-parse: drop the index, then rebuild from disk.
+        loadIndex();
         $index = [];
         $indexDirty = true;
         $indexSeen = [];
@@ -483,7 +525,7 @@ switch ($action) {
         $q = strtolower(trim($_GET['q'] ?? ''));
         $matches = [];
         if ($q !== '') {
-            $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($base, RecursiveDirectoryIterator::SKIP_DOTS));
+            $it = contentFileIterator($base);
             foreach ($it as $file) {
                 if (substr($file->getFilename(), 0, 1) === '.') continue;
                 // skip anything inside hidden dirs (.trash/.history)
@@ -491,12 +533,24 @@ switch ($action) {
                 if (substr($file->getFilename(), -5) !== '.json') continue;
                 $content = @file_get_contents($file->getPathname());
                 if ($content === false) continue;
-                // Decode then re-encode unescaped so a literal UTF-8 query matches
-                // content stored with \uXXXX JSON escaping (search_blocks decodes
-                // too — keep the two search surfaces consistent on Unicode).
-                $decoded = json_decode($content, true);
-                $hay = $decoded === null ? $content : json_encode($decoded, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-                if (stripos($hay, $q) !== false) {
+                // Fast path: scan the raw JSON directly (save_page stores
+                // JSON_UNESCAPED_UNICODE, so most content — incl. UTF-8 — matches as-is).
+                $matched = stripos($content, $q) !== false;
+                // Only when the raw haystack MISSES and the query could differ from what's on
+                // disk do we pay for a decode + re-encode-unescaped: non-ASCII (a page written
+                // with \uXXXX escapes) OR a query containing '/' or '\' (JSON_PRETTY_PRINT
+                // escapes '/' → '\/', so a page last written by replace_content / rename_tag /
+                // an external editor stores the slash escaped and the raw query would miss).
+                // Keeps the fast path for the common ASCII-no-slash query. Preserves the pinned
+                // Unicode search cases (search_blocks decodes too — consistent on Unicode).
+                if (!$matched && (preg_match('/[^\x00-\x7F]/', $q) || strpbrk($q, '/\\') !== false)) {
+                    $decoded = json_decode($content, true);
+                    if ($decoded !== null) {
+                        $hay = json_encode($decoded, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                        $matched = stripos($hay, $q) !== false;
+                    }
+                }
+                if ($matched) {
                     $rel = ltrim(substr($file->getPathname(), strlen($base)), '/');
                     $matches[] = $rel;
                 }
@@ -511,7 +565,7 @@ switch ($action) {
         $q = strtolower(trim($_GET['q'] ?? ''));
         $out = [];
         if ($q !== '') {
-            $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($base, RecursiveDirectoryIterator::SKIP_DOTS));
+            $it = contentFileIterator($base);
             foreach ($it as $file) {
                 if (count($out) >= 100) break;
                 if (substr($file->getFilename(), -5) !== '.json') continue;
@@ -548,7 +602,7 @@ switch ($action) {
         ini_set('pcre.recursion_limit', '100000');
         $regexError = false;
         $totalMatches = 0; $changedPages = 0; $pageList = [];
-        $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($base, RecursiveDirectoryIterator::SKIP_DOTS));
+        $it = contentFileIterator($base);
         foreach ($it as $file) {
             if (substr($file->getFilename(), -5) !== '.json') continue;
             if (strpos(str_replace('\\', '/', $file->getPathname()), '/.') !== false) continue;
@@ -575,7 +629,10 @@ switch ($action) {
                 $pageList[] = ['path' => $rel, 'matches' => $pageMatches];
                 if (!$preview && $changed) {
                     snapshotHistory($base, $rel, $file->getPathname());
-                    writeJsonAtomic($file->getPathname(), json_encode($data, JSON_PRETTY_PRINT));
+                    // Match save_page's on-disk encoding (unescaped unicode + slashes) so a
+                    // rewritten page stores '/' and UTF-8 literally — keeps the search_content
+                    // raw fast path matching without a decode (see the search_content fallback).
+                    writeJsonAtomic($file->getPathname(), json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
                     clearstatcache(true, $file->getPathname());
                     $changedPages++;
                 }
@@ -587,15 +644,21 @@ switch ($action) {
 
     case 'list_tags':
         // Aggregate every tag across all pages → [{tag, count}] (count = pages
-        // using it), sorted by frequency then name.
+        // using it), sorted by frequency then name. Index-backed (pageMetaIndexed +
+        // flushIndex, mirroring `tree`) so a warm call reuses cached tags and only
+        // re-parses pages whose mtime moved.
+        loadIndex();
         $counts = [];
-        $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($base, RecursiveDirectoryIterator::SKIP_DOTS));
+        $it = contentFileIterator($base);
         foreach ($it as $file) {
+            $full = $file->getPathname();
             if (substr($file->getFilename(), -5) !== '.json') continue;
-            if (strpos(str_replace('\\', '/', $file->getPathname()), '/.') !== false) continue;
-            $meta = pageMeta($file->getPathname());
+            if (strpos(str_replace('\\', '/', $full), '/.') !== false) continue;
+            $rel = ltrim(substr($full, strlen($base)), '/');
+            $meta = pageMetaIndexed($full, $rel);
             foreach ($meta['tags'] as $t) { $counts[$t] = ($counts[$t] ?? 0) + 1; }
         }
+        flushIndex();
         $out = [];
         foreach ($counts as $t => $c) $out[] = ['tag' => $t, 'count' => $c];
         usort($out, function($a, $b) { return $b['count'] <=> $a['count'] ?: strcasecmp($a['tag'], $b['tag']); });
@@ -609,7 +672,7 @@ switch ($action) {
         $from = (string)$input['from'];
         $to = isset($input['to']) ? trim((string)$input['to']) : '';
         $changedPages = 0;
-        $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($base, RecursiveDirectoryIterator::SKIP_DOTS));
+        $it = contentFileIterator($base);
         foreach ($it as $file) {
             $full = $file->getPathname();
             if (substr($file->getFilename(), -5) !== '.json') continue;
@@ -622,7 +685,10 @@ switch ($action) {
             if ($changed) {
                 $rel = ltrim(substr($full, strlen($base)), '/');
                 snapshotHistory($base, $rel, $full);
-                writeJsonAtomic($full, json_encode($data, JSON_PRETTY_PRINT));
+                // Match save_page's on-disk encoding (unescaped unicode + slashes) — see the
+                // matching note in replace_content: keeps '/' and UTF-8 literal on disk so the
+                // search_content raw fast path matches a rewritten page without a decode.
+                writeJsonAtomic($full, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
                 clearstatcache(true, $full);
                 $changedPages++;
             }
