@@ -4,6 +4,23 @@ Context for contributors and AI coding agents. (Claude Code auto-loads `CLAUDE.m
 User-facing install/configuration lives in **[README.md](README.md)**; this file covers
 how the codebase is built and the non-obvious decisions behind it.
 
+### Project commands — toggle the Graphify hooks
+
+Two project slash commands let me force the agent to do a **raw read of the codebase**
+(grep/read/glob) instead of consulting the graphify knowledge graph, and switch back:
+
+| Command | What it does |
+|---------|--------------|
+| **`/graphify-off`** | Runs `python3 .claude/toggle_graphify.py disable` — renames `PreToolUse` → `_PreToolUse_disabled` in [.claude/settings.json](.claude/settings.json), turning the `graphify hook-guard` PreToolUse hooks OFF. The agent then explores with raw reads/greps, not `graphify query`. |
+| **`/graphify-on`** | Runs `python3 .claude/toggle_graphify.py enable` — renames it back, restoring the graph-first workflow. |
+
+The commands live in [.claude/commands/](.claude/commands/) and both wrap the single
+toggle script [.claude/toggle_graphify.py](.claude/toggle_graphify.py) (`enable`/`disable`
+argument; idempotent, JSON-safe write, finds the key whether it's top-level or nested under
+`hooks`, and prints a helpful message when the file or key is missing). You can also run the
+script directly. Use `/graphify-off` when you want me to bypass the graph and read the
+source files myself.
+
 A self-hosted **code-snippet manager**: browse a folder tree of "pages"; each page holds
 collapsible sections/subsections; each section holds code / note / rich-text / checklist
 blocks with syntax highlighting, tags, search, trash & history. Plain static files + a
