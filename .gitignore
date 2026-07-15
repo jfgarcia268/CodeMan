@@ -3,7 +3,11 @@
 
 # Claude Code: track shared agents + skills (project tooling), ignore machine-local config.
 .claude/settings.local.json
+.claude/settings.json
 .claude/launch.json
+
+# graphify knowledge-graph output (generated locally via `graphify update .`)
+graphify-out/
 
 # Local-only private context (deployment specifics, data provenance) — auto-loaded
 # by Claude Code, never committed. Keep private notes here, not in CLAUDE.md.
