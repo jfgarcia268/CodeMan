@@ -245,6 +245,15 @@
   t('rePath updates self', folder.path, 'renamed');
   t('rePath updates descendants', folder.children[0].path, 'renamed/p.json');
 
+  // collectRepathPairs: the {old, neu} key pairs a rePath(node, newPath) will produce,
+  // captured BEFORE rePath mutates node.path so the OTHER caches (cached page content +
+  // per-page local history) can be re-keyed from the old paths. Mirrors rePath's descent.
+  const rpNode = JSON.parse(JSON.stringify(tree))[0]; // fresh { path:'f', children:[ 'f/p.json' ] }
+  const rpPairs = collectRepathPairs(rpNode, 'renamed');
+  t('collectRepathPairs pairs old→new for folder + descendants',
+    rpPairs.map(p => [p.old, p.neu]), [['f', 'renamed'], ['f/p.json', 'renamed/p.json']]);
+  t('collectRepathPairs computed against PRE-mutation paths (node untouched)', rpNode.path, 'f');
+
   // collectMatchingPages
   t('collectMatchingPages finds by name', collectMatchingPages(tree, 'root', []).map(p=>p.path), ['root.json']);
 
@@ -617,6 +626,114 @@
     t('invalidateTreeMemos recomputes folderCounts', folderCounts(node).totalPages, 2);
   })();
 
+  // escapeHtml: entity-escapes &,<,>," (the data-derived-DOM safety helper; ' is left as-is).
+  t('escapeHtml escapes <, >, & and "', escapeHtml('<a>&"'), '&lt;a&gt;&amp;&quot;');
+  t('escapeHtml leaves plain text intact', escapeHtml('hello world'), 'hello world');
+
+  // parseVars / substituteVars: _V_NAME_V_ fill-ins (block/section variables).
+  t('parseVars extracts a marker', parseVars('SELECT _V_ID_V_'), ['ID']);
+  t('parseVars dedups + preserves first-seen order', parseVars('_V_B_V_ _V_A_V_ _V_B_V_'), ['B', 'A']);
+  t('parseVars handles adjacent markers', parseVars('_V_A_V__V_B_V_'), ['A', 'B']);
+  t('parseVars no markers → []', parseVars('plain text'), []);
+  t('parseVars undefined input → []', parseVars(), []);
+  t('substituteVars fills from a values map', substituteVars('id=_V_ID_V_', { ID: '42' }), 'id=42');
+  t('substituteVars missing key → MISSING VALUE', substituteVars('id=_V_ID_V_', {}), 'id=MISSING VALUE');
+  t('substituteVars empty value → MISSING VALUE', substituteVars('id=_V_ID_V_', { ID: '' }), 'id=MISSING VALUE');
+  t('substituteVars leaves non-var text intact', substituteVars('no vars here', { X: '1' }), 'no vars here');
+
+  // pageMatches / filterTree (tree.js): sidebar name/tag/code-type search + folder pruning.
+  (function () {
+    const savedDS = deepSearch; deepSearch = false; // isolate from the content-match branch
+    const pg = { type: 'page', name: 'MyQuery', path: 'F/MyQuery.json', tags: ['cli', 'salesforce'], langs: ['soql', 'cpp'] };
+    t('pageMatches by name substring', pageMatches(pg, 'query'), true);
+    t('pageMatches by tag', pageMatches(pg, 'salesforce'), true);
+    t('pageMatches by lang key (soql)', pageMatches(pg, 'soql'), true);
+    t('pageMatches by lang label (c++ via langLabel of cpp)', pageMatches(pg, 'c++'), true);
+    t('pageMatches non-match → false', pageMatches(pg, 'zzz'), false);
+    const fixture = [
+      { type: 'folder', name: 'Keep', path: 'Keep', children: [
+        { type: 'page', name: 'Hit', path: 'Keep/Hit.json', tags: [], langs: [] },
+        { type: 'page', name: 'Miss', path: 'Keep/Miss.json', tags: [], langs: [] },
+      ] },
+      { type: 'folder', name: 'Drop', path: 'Drop', children: [
+        { type: 'page', name: 'Nope', path: 'Drop/Nope.json', tags: [], langs: [] },
+      ] },
+    ];
+    const filtered = filterTree(fixture, 'hit');
+    t('filterTree prunes folders with no matching descendant', filtered.map(n => n.name), ['Keep']);
+    t('filterTree keeps only the matching page in a kept branch', filtered[0].children.map(n => n.name), ['Hit']);
+    t('filterTree returns a NEW child array (materialized, not the source ref)', filtered[0].children !== fixture[0].children, true);
+    deepSearch = savedDS;
+  })();
+
+  // dead-letter cascade helpers (offline.js): track a failed create_* + its dependents.
+  t('dlCreatedPath create_page with parent', dlCreatedPath({ action: 'create_page', body: { name: 'P', parent: 'F' } }), 'F/P.json');
+  t('dlCreatedPath create_page no parent', dlCreatedPath({ action: 'create_page', body: { name: 'P', parent: '' } }), 'P.json');
+  t('dlCreatedPath create_folder', dlCreatedPath({ action: 'create_folder', body: { name: 'F', parent: '' } }), 'F');
+  t('dlCreatedPath create_project with parent', dlCreatedPath({ action: 'create_project', body: { name: 'Proj', parent: 'Root' } }), 'Root/Proj');
+  t('dlCreatedPath save_page → null', dlCreatedPath({ action: 'save_page', body: { path: 'F/P.json' } }), null);
+  (function () {
+    const failed = new Set(['F']);
+    t('dlCascadeParent save_page under a failed create_folder', dlCascadeParent({ action: 'save_page', body: { path: 'F/P.json' } }, failed), 'F');
+    t('dlCascadeParent nested child under a failed create', dlCascadeParent({ action: 'create_page', body: { name: 'X', parent: 'F/Sub' } }, failed), 'F');
+    t('dlCascadeParent unrelated op → null', dlCascadeParent({ action: 'save_page', body: { path: 'Other/P.json' } }, failed), null);
+    t('dlCascadeParent empty failed-set → null', dlCascadeParent({ action: 'save_page', body: { path: 'F/P.json' } }, new Set()), null);
+  })();
+
+  // offline namespace boundary (offline.js): per-server key prefixes never overlap.
+  (function () {
+    const _url = window.CODEMAN_SERVER_URL;
+    try {
+      t('nsHash distinguishes different server URLs', nsHash('http://a') !== nsHash('http://b'), true);
+      delete window.CODEMAN_SERVER_URL;
+      t('computeNS → ns:local when no server URL is set', computeNS(), 'ns:local');
+      window.CODEMAN_SERVER_URL = 'http://server-x/';
+      t('computeNS → ns:<hash> when a server URL is set', computeNS(), 'ns:' + nsHash('http://server-x/'));
+      // kvKey/pageKey carry the active NS + separator prefix (NS fixed at load = ns:local here)
+      t('kvKey carries the NS + separator prefix', kvKey('dl:x').startsWith(NS + NS_SEP), true);
+      t('kvKey exact shape', kvKey('dl:x'), NS + NS_SEP + 'dl:x');
+      t('pageKey carries the NS + separator prefix', pageKey('P.json'), NS + NS_SEP + 'P.json');
+      // two distinct servers → non-overlapping keys for the SAME logical key
+      const keyA = 'ns:' + nsHash('http://a/') + NS_SEP + 'dl:x';
+      const keyB = 'ns:' + nsHash('http://b/') + NS_SEP + 'dl:x';
+      t('distinct servers → non-overlapping keys for the same logical key', keyA !== keyB, true);
+    } finally {
+      if (_url === undefined) delete window.CODEMAN_SERVER_URL; else window.CODEMAN_SERVER_URL = _url;
+    }
+  })();
+
+  // sanitizeColumnPath (tree.js): early-returns on an empty tree (persisted-nav survival),
+  // else prunes an invalid deepest column.
+  (function () {
+    const _td = treeData, _cp = columnPath.slice(), _lsc = localStorage.getItem('codeman.columnPath');
+    try {
+      setTreeData([]);                 // empty tree → must NOT touch columnPath
+      columnPath = ['Ghost'];
+      sanitizeColumnPath();
+      t('sanitizeColumnPath early-returns on an empty tree (no mutation)', columnPath, ['Ghost']);
+      setTreeData([{ type: 'folder', name: 'A', path: 'A', children: [
+        { type: 'folder', name: 'B', path: 'A/B', children: [
+          { type: 'page', name: 'p', path: 'A/B/p.json' } ] } ] }]);
+      columnPath = ['A', 'A/bogus'];   // deepest column isn't a real child → pruned
+      sanitizeColumnPath();
+      t('sanitizeColumnPath prunes an invalid deepest column', columnPath, ['A']);
+    } finally {
+      setTreeData(_td); columnPath = _cp;
+      if (_lsc === null) localStorage.removeItem('codeman.columnPath'); else localStorage.setItem('codeman.columnPath', _lsc);
+    }
+  })();
+
+  // editorCapPx (editor.js): viewport-capped editor height — 60% desktop / 50% mobile.
+  (function () {
+    const wasMobile = document.body.classList.contains('is-mobile');
+    const vh = (window.visualViewport && window.visualViewport.height) || window.innerHeight;
+    document.body.classList.remove('is-mobile');
+    t('editorCapPx desktop = round(60% of viewport)', editorCapPx(), Math.round(vh * 0.6));
+    document.body.classList.add('is-mobile');
+    t('editorCapPx mobile = round(50% of viewport)', editorCapPx(), Math.round(vh * 0.5));
+    if (!wasMobile) document.body.classList.remove('is-mobile');
+  })();
+
   document.getElementById('summary').innerHTML =
     `<span class="${fail ? 'fail' : 'pass'}">${pass} passed, ${fail} failed</span>`;
   window.__testResult = { pass, fail };
@@ -852,6 +969,23 @@
           ta('dead-letter records the action', dls[0] && dls[0].action, 'create_folder');
           ta('dead-letter records the server reason', dls[0] && dls[0].reason, 'invalid name');
           ta('dead-letter kind is terminal', dls[0] && dls[0].kind, 'terminal');
+          await clearDL();
+
+          // a2) CSRF enforcement returns a clean terminal 4xx {error:'missing request header'}
+          // (no _transient) — a straggler/header-less client's write must PARK (kind 'terminal',
+          // recoverable) rather than be treated as "offline" and retried in a loop forever.
+          window.apiFetch = async (action) => {
+            if (action === 'save_page') return { error: 'missing request header' };
+            return action === 'tree' ? [] : { ok: true };
+          };
+          syncQueue.length = 0;
+          syncQueue.push({ action: 'save_page', body: { path: RUN + 'CSRF.json', data: {} } });
+          await flushQueue();
+          ta('CSRF-403 terminal error drains the op (no offline loop)', syncQueue.length, 0);
+          dls = await dlList();
+          ta('CSRF-403 parks exactly one dead-letter', dls.length, 1);
+          ta('CSRF-403 dead-letter kind is terminal', dls[0] && dls[0].kind, 'terminal');
+          ta('CSRF-403 dead-letter records the server reason', dls[0] && dls[0].reason, 'missing request header');
           await clearDL();
 
           // b) transient error bumps attempts each cycle, parks only at the 3rd

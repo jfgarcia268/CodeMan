@@ -76,3 +76,23 @@ jobs:
             echo 'Direct `treeData =` assignment found — route it through setTreeData() (memo invalidation)'
             exit 1
           fi
+      - name: CSRF read-only allowlist matches between api.php and the desktop proxy
+        run: |
+          # api.php's $csrfReadOnly and codeman-desktop/main.js's READ_ONLY_ACTIONS are
+          # documented to mirror EXACTLY — a divergence lets an action be a "read" (no
+          # CSRF header needed) on one enforcement point and a "write" on the other, a
+          # security bug. Extract both quoted lists and compare them as (sorted) sets.
+          php_tokens=$(sed -n '/\$csrfReadOnly = \[/,/\];/p' codeman/api.php \
+                       | grep -oE "'[a-z_]+'" | tr -d "'" | sort -u)
+          js_tokens=$(sed -n '/READ_ONLY_ACTIONS = new Set(\[/,/\]);/p' codeman-desktop/main.js \
+                      | grep -oE "'[a-z_]+'" | tr -d "'" | sort -u)
+          if [ -z "$php_tokens" ] || [ -z "$js_tokens" ]; then
+            echo 'Could not extract one of the CSRF allowlists — did the array syntax change?'
+            exit 1
+          fi
+          if [ "$php_tokens" != "$js_tokens" ]; then
+            echo 'CSRF read-only allowlists diverge (api.php $csrfReadOnly vs main.js READ_ONLY_ACTIONS):'
+            diff <(echo "$php_tokens") <(echo "$js_tokens") || true
+            exit 1
+          fi
+          echo "CSRF read-only allowlists match ($(echo "$php_tokens" | grep -c .) actions)"
