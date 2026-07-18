@@ -13,6 +13,44 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
 
 ## [Unreleased]
 
+### Added
+- **HTML preview block.** A new block kind that holds a small static web project (an entry HTML file
+  plus its CSS, JS and images) and renders it **live** inside the page. Upload a whole folder with
+  `Upload…` or drag one onto the block; CodeMan works out the entry file, inlines every
+  sub-resource, and shows the running result in a resizable preview. `▶ Run` / `↻ Reload` / `■ Stop`
+  control the preview, the file list shows every stored file (with a `⌁` marker for the entry, a
+  "Make entry" action on other HTML files, and `✕` to remove one), the entry HTML stays editable in
+  the block, and `Copy` copies the single bundled document. Everything lives inside the page, so
+  history, trash, restore, duplicate, offline and export all work exactly as they do for any other
+  block. Projects are capped (1 MB total, 512 KB per file, 50 files) with a warning above 256 KB,
+  because every version is kept in page history.
+- **Honest preview warnings.** When something in a project can't be shown in the preview — a missing
+  or out-of-project file, a reference form that isn't supported (`<object data>`, `<form action>`,
+  inline `style="…url(…)"`), an `@import`, or simply a file that's in the project but never
+  referenced — it is listed in a banner above the preview under **Problems**. Routine notes
+  (responsive-image variants collapsed for the preview, or a reminder that network/storage APIs and
+  remote scripts don't work in the sandbox) are listed separately under **Notes**. A reference to a
+  project file can never disappear from the preview without being reported.
+- **Responsive images.** `srcset`, `<picture><source>`, `sizes` and CSS `image-set()` are understood:
+  the preview keeps one variant (preferring the element's own `src`, then `1x`/the smallest) and says
+  which ones it dropped. **All uploaded variants are still stored and still listed** — the collapse
+  only affects what the preview renders.
+
+### Changed
+- Converting a block **away** from an HTML project now asks first when the project holds other
+  files, naming them, and reminds you the change can be undone from page History.
+
+### Security
+- The HTML preview runs in an iframe with `sandbox="allow-scripts"` and **no** `allow-same-origin` —
+  the previewed project gets an opaque origin, so it cannot read CodeMan's page, cookies or storage,
+  and the app's Content-Security-Policy blocks it from reaching the network. `alert()`/`confirm()`
+  do nothing inside the preview (no `allow-modals`), which is deliberate.
+- **Exported HTML pages now carry the same Content-Security-Policy as the app.** Previously a
+  standalone export was less restrictive than CodeMan itself; an export containing a live HTML
+  preview now enforces the identical policy.
+- Binary project files are stored as base64 and are **excluded from content search**, so a word that
+  happens to occur inside encoded image data no longer produces false search results.
+
 ## [1.13.0] — 2026-07-14
 
 ### Added

@@ -533,6 +533,16 @@ switch ($action) {
                 if (substr($file->getFilename(), -5) !== '.json') continue;
                 $content = @file_get_contents($file->getPathname());
                 if ($content === false) continue;
+                // HTML-project blocks store binary assets as one-line base64 under the
+                // reserved "b64" key. Random base64 runs produce false search hits (and
+                // needless scan cost), so blank those spans out. Guarded by a presence
+                // strpos so the 99.9% of pages with no html block pay one substring check
+                // and nothing else. The base64 alphabet contains no quote or backslash, so
+                // the char class can never run past its string. save_page writes with
+                // JSON_PRETTY_PRINT, hence the \s* around the colon.
+                if (strpos($content, '"b64"') !== false) {
+                    $content = preg_replace('/"b64"\s*:\s*"[A-Za-z0-9+\/=]*"/', '"b64":""', $content);
+                }
                 // Fast path: scan the raw JSON directly (save_page stores
                 // JSON_UNESCAPED_UNICODE, so most content — incl. UTF-8 — matches as-is).
                 $matched = stripos($content, $q) !== false;
@@ -547,6 +557,11 @@ switch ($action) {
                     $decoded = json_decode($content, true);
                     if ($decoded !== null) {
                         $hay = json_encode($decoded, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                        // the same b64 strip, or a non-ASCII / slash-bearing query would
+                        // reintroduce the false positives through this branch
+                        if (strpos($hay, '"b64"') !== false) {
+                            $hay = preg_replace('/"b64"\s*:\s*"[A-Za-z0-9+\/=]*"/', '"b64":""', $hay);
+                        }
                         $matched = stripos($hay, $q) !== false;
                     }
                 }

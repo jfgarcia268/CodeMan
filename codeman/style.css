@@ -2115,6 +2115,54 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   font-size: 12px; padding: 5px 10px; margin: 0 0 8px;
 }
 
+/* ---- HTML project block ---- */
+.block.html .html-edit {
+  display: block; box-sizing: border-box;
+  margin: 8px 14px; width: calc(100% - 28px);
+  background: #303841; color: var(--text);
+  border: 1px solid var(--border-2); border-radius: 6px;
+  padding: 8px 10px; font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 13px; line-height: 1.5; resize: vertical;
+  max-height: 60vh; overflow: auto; tab-size: 2;
+  white-space: pre;          /* no soft-wrap — long markup lines scroll horizontally */
+}
+.block.html.viewing .html-edit { display: none; }
+.block.html .html-view { padding: 6px 14px 12px; }
+.html-warn {
+  color: #e7b35c; background: rgba(231,179,92,.1);
+  border: 1px solid rgba(231,179,92,.35); border-radius: 5px;
+  font-size: 12px; padding: 5px 10px; margin: 0 0 8px;
+}
+.html-warn ul { margin: 4px 0 0 16px; padding: 0; }
+.html-warn li { margin: 2px 0; word-break: break-word; }
+.html-warn-head { margin-top: 6px; font-weight: 600; opacity: .9; }
+/* Notes (routine collapses, CSP heuristics) read as informational, not as a failure */
+.html-warn .html-warn-note, .html-warn .html-warn-note li { color: var(--text-dim); }
+.html-frame-wrap {
+  position: relative; resize: vertical; overflow: hidden;
+  border: 1px solid var(--border-2); border-radius: 6px; background: #fff;
+  min-height: 120px; max-height: 1200px;
+}
+.html-frame { display: block; width: 100%; height: 100%; border: 0; }
+.html-poster {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 8px;
+  background: var(--bg-2, #252526); color: var(--text-dim);
+}
+.html-poster-cap { font-size: 12px; font-family: "SF Mono", Menlo, Consolas, monospace; }
+.html-files { margin-top: 8px; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; }
+.html-file-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 2px 4px; border-radius: 4px; color: var(--text-dim);
+}
+.html-file-row:hover { background: rgba(255,255,255,.04); }
+.html-file-row.is-entry { color: var(--text); }
+.html-file-path { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.html-file-size { flex: 0 0 auto; opacity: .75; }
+.html-file-entry, .html-file-del { flex: 0 0 auto; font-size: 11px; padding: 1px 6px; }
+.html-empty { color: var(--text-dim); font-size: 13px; font-style: italic; padding: 4px 0; }
+.block.html.drop-active .html-view { outline: 2px dashed var(--accent-2); outline-offset: 2px; }
+
 /* the per-block type switch */
 .block-toolbar .type-menu { font-size: 11px; }
 
@@ -2359,7 +2407,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
   /* --- 16px inputs so iOS Safari doesn't zoom on focus --- */
   .sidebar-search input, .page-search input, .modal-input, .cmdk-input,
-  .todo-text, .section-title, .block-label, .pending-input, .csv-edit, .json-edit { font-size: 16px; }
+  .todo-text, .section-title, .block-label, .pending-input, .csv-edit, .json-edit, .html-edit { font-size: 16px; }
 
   /* --- editor max-height: smaller on phones, dynamic-viewport so it tracks the
      browser chrome / on-screen keyboard (dvh); 50vh fallback for old engines --- */
@@ -2367,7 +2415,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   body.is-mobile .block.note .code-edit,
   body.is-mobile .block.csv .csv-edit,
   body.is-mobile .block.json .json-edit,
+  body.is-mobile .block.html .html-edit,
   body.is-mobile .block.rich:not(.viewing) .rich-surface { max-height: 50vh; max-height: 50dvh; }
+
+  /* iOS Safari has no folder picker — drag-drop is the only other route, and there
+     isn't one on a phone either, so hide Upload rather than offer a dead button. */
+  body.is-mobile .html-upload { display: none; }
 
   /* --- header create group + tools: bigger tap targets --- */
   .sidebar-create button { font-size: 13px; padding: 8px 4px; }

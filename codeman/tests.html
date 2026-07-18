@@ -559,6 +559,300 @@
     t('jsonPath empty → root', jsonPath([]), 'root');
   })();
 
+  /* ---------- HTML PROJECT ---------- */
+
+  // Path helpers: normalize / resolve / absolute detection / picker-root stripping.
+  (function () {
+    t('normalizeHtmlPath strips ./', normalizeHtmlPath('./a'), 'a');
+    t('normalizeHtmlPath strips leading /', normalizeHtmlPath('/a'), 'a');
+    t('normalizeHtmlPath collapses //', normalizeHtmlPath('a//b'), 'a/b');
+    t('normalizeHtmlPath drops . segment', normalizeHtmlPath('a/./b'), 'a/b');
+    t('normalizeHtmlPath resolves ..', normalizeHtmlPath('a/b/../c'), 'a/c');
+    t('normalizeHtmlPath escape → empty', normalizeHtmlPath('../x'), '');
+
+    t('resolveHtmlPath same dir', resolveHtmlPath('', 'a.css'), 'a.css');
+    t('resolveHtmlPath subdir', resolveHtmlPath('', 'sub/a.png'), 'sub/a.png');
+    t('resolveHtmlPath parent within root', resolveHtmlPath('css', '../img/x.png'), 'img/x.png');
+    t('resolveHtmlPath escape → null', resolveHtmlPath('', '../x.png'), null);
+    t('resolveHtmlPath strips ?query', resolveHtmlPath('', 'a.png?v=2'), 'a.png');
+    t('resolveHtmlPath strips #hash', resolveHtmlPath('', 'a.svg#icon'), 'a.svg');
+
+    t('isAbsoluteRef http', isAbsoluteRef('http://x/y.js'), true);
+    t('isAbsoluteRef https', isAbsoluteRef('https://x/y.js'), true);
+    t('isAbsoluteRef protocol-relative', isAbsoluteRef('//cdn/x.js'), true);
+    t('isAbsoluteRef data:', isAbsoluteRef('data:image/png;base64,AA'), true);
+    t('isAbsoluteRef fragment', isAbsoluteRef('#x'), true);
+    t('isAbsoluteRef mailto', isAbsoluteRef('mailto:a@b.test'), true);
+    t('isAbsoluteRef plain file', isAbsoluteRef('a.css'), false);
+    t('isAbsoluteRef ./ file', isAbsoluteRef('./a.css'), false);
+    t('isAbsoluteRef subdir file', isAbsoluteRef('sub/a.css'), false);
+
+    t('stripCommonRoot drops the shared root', stripCommonRoot(['d/index.html', 'd/a.css']), ['index.html', 'a.css']);
+    t('stripCommonRoot leaves mixed roots', stripCommonRoot(['d/i.html', 'e/a.css']), ['d/i.html', 'e/a.css']);
+    t('stripCommonRoot single bare file untouched', stripCommonRoot(['index.html']), ['index.html']);
+  })();
+
+  // Extension → text/binary + MIME, and entry auto-resolution.
+  (function () {
+    t('htmlExtInfo .css is text', htmlExtInfo('a/b.css').text, true);
+    t('htmlExtInfo .png is binary image/png', [htmlExtInfo('a.png').text, htmlExtInfo('a.png').mime], [false, 'image/png']);
+    t('htmlExtInfo .svg is text', htmlExtInfo('a.svg').text, true);
+    t('htmlExtInfo unknown → octet-stream', [htmlExtInfo('a.zzz').text, htmlExtInfo('a.zzz').mime], [false, 'application/octet-stream']);
+
+    t('resolveHtmlEntry root index.html wins', resolveHtmlEntry(['sub/index.html', 'index.html']).entry, 'index.html');
+    t('resolveHtmlEntry lone .html chosen', resolveHtmlEntry(['sub/demo.html', 'a.css']).entry, 'sub/demo.html');
+    const amb = resolveHtmlEntry(['a.html', 'b.html']);
+    t('resolveHtmlEntry two .html → ambiguous', [amb.ambiguous, amb.candidates.length], [true, 2]);
+    const none = resolveHtmlEntry(['a.css']);
+    t('resolveHtmlEntry none → ambiguous, no candidates', [none.ambiguous, none.candidates], [true, []]);
+  })();
+
+  // Size accounting: base64 decoding, UTF-8 text length, the file list, the caps.
+  (function () {
+    t('b64DecodedBytes no padding', b64DecodedBytes('AAAA'), 3);
+    t('b64DecodedBytes one pad', b64DecodedBytes('AAA='), 2);
+    t('b64DecodedBytes two pads', b64DecodedBytes('AA=='), 1);
+    t('b64DecodedBytes empty', b64DecodedBytes(''), 0);
+
+    const blk = { entry: 'index.html', code: 'héllo', files: [{ p: 'a.css', t: 'x' }, { p: 'img.png', m: 'image/png', b64: 'AAAA' }] };
+    const sz = htmlProjectSize(blk);
+    t('htmlProjectSize counts UTF-8 multibyte', sz.bytes, 6 + 1 + 3);      // héllo = 6 bytes
+    t('htmlProjectSize counts every file incl. entry', sz.count, 3);
+    t('htmlProjectSize largest is ordered desc', sz.largest[0].p, 'index.html');
+
+    const list = htmlFileList(blk);
+    t('htmlFileList splices the entry in, sorted', list.map(r => r.p), ['a.css', 'img.png', 'index.html']);
+    t('htmlFileList flags the entry', list.filter(r => r.isEntry).map(r => r.p), ['index.html']);
+    const dup = htmlFileList({ entry: 'index.html', code: 'x', files: [{ p: 'index.html', t: 'stale' }] });
+    t('htmlFileList no duplicate when entry also in files', dup.map(r => r.p), ['index.html']);
+
+    t('htmlCapCheck under cap is ok', htmlCapCheck([{ p: 'a', bytes: 10 }]).ok, true);
+    t('htmlCapCheck over total → not ok', htmlCapCheck([{ p: 'a', bytes: 2000000 }], { file: 9e9 }).ok, false);
+    t('htmlCapCheck over single-file → not ok', htmlCapCheck([{ p: 'a', bytes: 600000 }]).ok, false);
+    t('htmlCapCheck over file count → not ok',
+      htmlCapCheck(Array.from({ length: 51 }, (_, i) => ({ p: 'f' + i, bytes: 1 }))).ok, false);
+    const soft = htmlCapCheck([{ p: 'a', bytes: 300000 }]);
+    t('htmlCapCheck soft threshold warns but stays ok', [soft.ok, soft.soft.length > 0], [true, true]);
+    const off = htmlCapCheck([{ p: 'small', bytes: 5 }, { p: 'big', bytes: 900000 }]);
+    t('htmlCapCheck offenders populated + sorted desc', off.offenders.map(o => o.p), ['big', 'small']);
+  })();
+
+  // htmlBundleKey hashes STORED CONTENT: it must move on content edits and stay put
+  // on presentation-only changes (label / preview height).
+  (function () {
+    const b = { entry: 'index.html', code: '<p>a</p>', files: [{ p: 'a.css', t: 'x' }] };
+    const k0 = htmlBundleKey(b);
+    t('htmlBundleKey stable across calls', htmlBundleKey(b), k0);
+    t('htmlBundleKey moves on entry edit', htmlBundleKey(Object.assign({}, b, { code: '<p>b</p>' })) !== k0, true);
+    t('htmlBundleKey moves on file add',
+      htmlBundleKey(Object.assign({}, b, { files: b.files.concat([{ p: 'b.js', t: 'y' }]) })) !== k0, true);
+    t('htmlBundleKey moves on file remove', htmlBundleKey(Object.assign({}, b, { files: [] })) !== k0, true);
+    t('htmlBundleKey unchanged on label/htmlH change',
+      htmlBundleKey(Object.assign({}, b, { label: 'L', htmlH: 900 })), k0);
+  })();
+
+  // parseSrcset / serializeSrcset / pickSrcsetCandidate / parseImageSet (the
+  // responsive-image amendment). A srcset URL may itself contain a comma, which is
+  // exactly why split(',') is wrong — the parser consumes the URL as a
+  // non-whitespace run.
+  (function () {
+    t('parseSrcset single bare URL', parseSrcset('a.jpg'), [{ url: 'a.jpg', descriptor: '' }]);
+    t('parseSrcset density descriptors', parseSrcset('a.jpg 1x, b.jpg 2x'),
+      [{ url: 'a.jpg', descriptor: '1x' }, { url: 'b.jpg', descriptor: '2x' }]);
+    t('parseSrcset width descriptors', parseSrcset('a.jpg 640w, b.jpg 1280w'),
+      [{ url: 'a.jpg', descriptor: '640w' }, { url: 'b.jpg', descriptor: '1280w' }]);
+    t('parseSrcset comma INSIDE the URL stays one entry', parseSrcset('photo,v2.jpg 2x'),
+      [{ url: 'photo,v2.jpg', descriptor: '2x' }]);
+    t('parseSrcset descriptor-less list separated by commas', parseSrcset('a.jpg, b.jpg'),
+      [{ url: 'a.jpg', descriptor: '' }, { url: 'b.jpg', descriptor: '' }]);
+    t('parseSrcset whitespace edges + newlines', parseSrcset('  a.jpg 1x,\n  b.jpg   2x  '),
+      [{ url: 'a.jpg', descriptor: '1x' }, { url: 'b.jpg', descriptor: '2x' }]);
+    t('parseSrcset trailing/doubled comma → no empty entries', parseSrcset('a.jpg 1x,, b.jpg 2x,').length, 2);
+    t('parseSrcset empty string → []', parseSrcset(''), []);
+    t('parseSrcset null → []', parseSrcset(null), []);
+    t('parseSrcset whitespace only → []', parseSrcset('   '), []);
+    t('parseSrcset never throws on garbage', Array.isArray(parseSrcset(',,, 2x 3x ,')), true);
+
+    const rt = 'a.jpg 1x, photo,v2.jpg 2x';
+    t('serializeSrcset round-trips through parseSrcset', parseSrcset(serializeSrcset(parseSrcset(rt))), parseSrcset(rt));
+
+    const cands = parseSrcset('a.jpg 1x, b.jpg 2x');
+    t('pickSrcsetCandidate prefers the src target', pickSrcsetCandidate(cands, 'b.jpg').url, 'b.jpg');
+    t('pickSrcsetCandidate else prefers 1x/bare', pickSrcsetCandidate(cands, '').url, 'a.jpg');
+    t('pickSrcsetCandidate else lowest width', pickSrcsetCandidate(parseSrcset('b.jpg 1280w, a.jpg 640w'), '').url, 'a.jpg');
+    t('pickSrcsetCandidate empty → null', pickSrcsetCandidate([], ''), null);
+
+    t('parseImageSet unwraps url() and quotes', parseImageSet('image-set(url("a.png") 1x, "b.png" 2x)'),
+      [{ url: 'a.png', descriptor: '1x' }, { url: 'b.png', descriptor: '2x' }]);
+    const withType = parseImageSet('image-set(url("a.webp") type("image/webp") 1x)');
+    t('parseImageSet skips type() without producing a candidate', withType.map(e => e.url), ['a.webp']);
+  })();
+
+  // bundleHtmlProject — the bundler. Inlines what it can, and WARNS about everything
+  // it cannot: the invariant is that a reference to a project file can never vanish
+  // from the preview with no entry in the warning banner.
+  (function () {
+    const proj = {
+      entry: 'index.html',
+      code: '<link rel="stylesheet" href="css/site.css">'
+        + '<script src="app.js"><\/script>'
+        + '<img src="img/logo.png">'
+        + '<link rel="stylesheet" href="https://cdn.test/x.css">',
+      files: [
+        { p: 'css/site.css', t: 'body{background:url(../img/logo.png)}' },
+        { p: 'app.js', t: 'var s = "<\/script>";' },
+        { p: 'img/logo.png', m: 'image/png', b64: 'AAAA' },
+      ],
+    };
+    const out = bundleHtmlProject(proj);
+    t('bundle inlines <link> as <style>', out.html.includes('<style>') && !out.html.includes('href="css/site.css"'), true);
+    t('bundle inlines <script src>', out.html.includes('var s ='), true);
+    t('bundle ESCAPES <\/script> in inlined JS', out.html.includes('<\\/script>') && !out.html.includes('"<\/script>"'), true);
+    t('bundle inlines <img src> as a data URI', out.html.includes('data:image/png;base64,AAAA'), true);
+    t('bundle resolves CSS url() relative to the STYLESHEET dir',
+      out.html.includes('background:url("data:image/png;base64,AAAA")'), true);
+    t('bundle leaves absolute refs alone', out.html.includes('https://cdn.test/x.css'), true);
+    t('bundle notes CSP-blocked remote stylesheet',
+      out.warnings.some(w => w.level === 'info' && /Remote scripts/.test(w.text)), true);
+
+    const un = bundleHtmlProject({ entry: 'i.html', code: '<img src="nope.png">', files: [] });
+    t('bundle warns on an unresolved ref', un.warnings.some(w => w.text === 'unresolved: nope.png'), true);
+
+    const esc = bundleHtmlProject({ entry: 'i.html', code: '<img src="../out.png">', files: [] });
+    t('bundle warns on a root escape', esc.warnings.some(w => w.text === 'outside project: ../out.png'), true);
+
+    const imp = bundleHtmlProject({
+      entry: 'i.html', code: '<link rel="stylesheet" href="a.css">',
+      files: [{ p: 'a.css', t: '@import "other.css";' }],
+    });
+    t('bundle warns that @import is not followed', imp.warnings.some(w => /@import/.test(w.text)), true);
+
+    t('bundle NEVER throws on garbage', typeof bundleHtmlProject({ code: '<<<', files: null }).html, 'string');
+    t('bundle on garbage still returns a document', bundleHtmlProject({ code: '<<<', files: null }).html, '<<<');
+    t('bundle never throws on a null block', typeof bundleHtmlProject(null).html, 'string');
+
+    // heuristic note: network/storage APIs don't work in the sandbox
+    const net = bundleHtmlProject({ entry: 'i.html', code: '<script>fetch("/x")<\/script>', files: [] });
+    t('bundle notes network/storage APIs', net.warnings.some(w => w.level === 'info' && /Network and storage/.test(w.text)), true);
+  })();
+
+  // The bundler's warning invariant — the three layers (amendment §5).
+  (function () {
+    // srcset collapse: one INFO warning, src becomes a data URI, srcset+sizes dropped
+    const col = bundleHtmlProject({
+      entry: 'i.html',
+      code: '<img src="p.jpg" srcset="p.jpg 1x, p2.jpg 2x, p3.jpg 3x" sizes="100vw">',
+      files: [
+        { p: 'p.jpg', m: 'image/jpeg', b64: 'AAAA' },
+        { p: 'p2.jpg', m: 'image/jpeg', b64: 'BBBB' },
+        { p: 'p3.jpg', m: 'image/jpeg', b64: 'CCCC' },
+      ],
+    });
+    t('collapse drops srcset', /srcset=/.test(col.html), false);
+    t('collapse drops sizes', /sizes=/.test(col.html), false);
+    t('collapse points src at a data URI', col.html.includes('data:image/jpeg;base64,AAAA'), true);
+    const notes = col.warnings.filter(w => w.level === 'info' && /collapsed for preview/.test(w.text));
+    t('collapse emits exactly ONE info warning', notes.length, 1);
+    t('collapse names the dropped variants', /p2\.jpg/.test(notes[0].text) && /p3\.jpg/.test(notes[0].text), true);
+    t('collapse produces NO unconsumed-file problems',
+      col.warnings.filter(w => w.level !== 'info').length, 0);
+
+    // <picture><source srcset> keeps media, gets a single data-URI srcset
+    const pic = bundleHtmlProject({
+      entry: 'i.html',
+      code: '<picture><source media="(min-width:40em)" srcset="a.png 1x, b.png 2x"><img src="a.png"></picture>',
+      files: [{ p: 'a.png', m: 'image/png', b64: 'AAAA' }, { p: 'b.png', m: 'image/png', b64: 'BBBB' }],
+    });
+    t('<source> keeps its media attribute', pic.html.includes('media="(min-width:40em)"'), true);
+    t('<source> srcset is a single data URI', /srcset="data:image\/png;base64,AAAA"/.test(pic.html), true);
+
+    // an unresolvable candidate warns by name (layer 1, one entry per candidate URL)
+    const badCand = bundleHtmlProject({
+      entry: 'i.html', code: '<img src="a.png" srcset="a.png 1x, missing.png 2x">',
+      files: [{ p: 'a.png', m: 'image/png', b64: 'AAAA' }],
+    });
+    t('unresolvable srcset candidate warns by name',
+      badCand.warnings.some(w => w.level === 'warn' && w.text === 'unresolved: missing.png'), true);
+
+    // image-set() inside an inlined stylesheet collapses to one url("data:…")
+    const iset = bundleHtmlProject({
+      entry: 'i.html', code: '<link rel="stylesheet" href="s.css">',
+      files: [
+        { p: 's.css', t: '.h{background-image:image-set(url("a.png") 1x, url("b.png") 2x)}' },
+        { p: 'a.png', m: 'image/png', b64: 'AAAA' },
+        { p: 'b.png', m: 'image/png', b64: 'BBBB' },
+      ],
+    });
+    t('image-set collapsed to one data url()', iset.html.includes('url("data:image/png;base64,AAAA")'), true);
+    t('image-set collapse is not an image-set anymore', /image-set\(/.test(iset.html), false);
+
+    // LAYER 2 — a ref-bearing form the bundler doesn't rewrite is still detected
+    const l2 = bundleHtmlProject({
+      entry: 'i.html', code: '<object data="viewer.pdf"></object>',
+      files: [{ p: 'viewer.pdf', m: 'application/pdf', b64: 'AAAA' }],
+    });
+    t('layer 2 flags <object data> as an unsupported reference form',
+      l2.warnings.some(w => w.level === 'warn' && /viewer\.pdf/.test(w.text) && /isn’t inlined/.test(w.text)), true);
+
+    // LAYER 3 — a file present but never referenced is reported by construction…
+    const l3 = bundleHtmlProject({
+      entry: 'i.html', code: '<p>no refs</p>',
+      files: [{ p: 'orphan.png', m: 'image/png', b64: 'AAAA' }],
+    });
+    t('layer 3 flags a file that is never referenced',
+      l3.warnings.some(w => w.level === 'warn' && /orphan\.png/.test(w.text) && /never inlined/.test(w.text)), true);
+    // …and stays quiet once that same file IS referenced through a handled form
+    const l3ok = bundleHtmlProject({
+      entry: 'i.html', code: '<img src="orphan.png">',
+      files: [{ p: 'orphan.png', m: 'image/png', b64: 'AAAA' }],
+    });
+    t('layer 3 quiet when the file is referenced via a handled form',
+      l3ok.warnings.filter(w => /never inlined/.test(w.text)).length, 0);
+
+    t('warnings always carry {level,text}',
+      col.warnings.concat(l3.warnings).every(w => (w.level === 'warn' || w.level === 'info') && typeof w.text === 'string'), true);
+  })();
+
+  // THE TRAP: the html kind is discriminated by the block.html BOOLEAN. Existing CODE
+  // blocks whose LANGUAGE is 'html' must stay code — keying off type would silently
+  // reinterpret every one of them as a project block.
+  (function () {
+    t('blockKind {html:true} → html', blockKind({ html: true, type: 'html', code: '' }), 'html');
+    t('blockKind {type:"html"} WITHOUT the flag stays code', blockKind({ type: 'html', code: '<p>x</p>' }), 'code');
+    t('blockKind plain code block unaffected', blockKind({ type: 'javascript', code: 'x' }), 'code');
+
+    const h = newHtmlBlock();
+    t('newHtmlBlock shape', [h.html, h.entry, h.files.length, blockKind(h)], [true, 'index.html', 0, 'html']);
+
+    // convert html → code keeps the entry text and clears every html field
+    const b = { html: true, type: 'html', entry: 'index.html', code: '<p>hi</p>', files: [{ p: 'a.css', t: 'x' }], htmlH: 500 };
+    convertBlock(b, 'code');
+    t('convert html→code keeps the entry text', b.code, '<p>hi</p>');
+    t('convert html→code clears html/files/entry/htmlH',
+      [b.html, b.files, b.entry, b.htmlH].every(v => v === undefined), true);
+    t('convert html→code is now a code block', blockKind(b), 'code');
+
+    // convert code → html: the text becomes the entry file
+    const c = { type: 'javascript', code: '<p>x</p>' };
+    convertBlock(c, 'html');
+    t('convert code→html sets the flag + default entry', [c.html, c.entry, c.files], [true, 'index.html', []]);
+    t('convert code→html carries the text into the entry', c.code, '<p>x</p>');
+  })();
+
+  // setHtmlEntry: block.code is ALWAYS the entry's source, so swapping the entry
+  // pushes the old one back into files[] and pulls the new one out.
+  (function () {
+    const b = { html: true, entry: 'index.html', code: '<p>old</p>', files: [{ p: 'other.html', t: '<p>new</p>' }] };
+    setHtmlEntry(b, 'other.html');
+    t('setHtmlEntry moves the new file into code', [b.entry, b.code], ['other.html', '<p>new</p>']);
+    t('setHtmlEntry pushes the old entry back into files',
+      b.files.filter(f => f.p === 'index.html').map(f => f.t), ['<p>old</p>']);
+    t('setHtmlEntry removes the new entry from files', b.files.some(f => f.p === 'other.html'), false);
+    const same = { html: true, entry: 'a.html', code: 'x', files: [] };
+    setHtmlEntry(same, 'a.html');
+    t('setHtmlEntry no-op when already the entry', [same.entry, same.files.length], ['a.html', 0]);
+  })();
+
   // parseCsv: tolerant RFC-4180-ish parser (quoting, escapes, embedded newlines,
   // delimiter detection, and graceful handling of malformed input).
   (function () {
@@ -1100,6 +1394,16 @@
           await Promise.resolve(); await Promise.resolve();
           ta('flushSave on a dirty page writes', saves, 1);
           ta('flushSave clears dirty after a successful write', pageDirty.has(DGP), false);
+
+          // html-block mutations are on the same contract: every in-block mutation
+          // (upload, file remove, entry change, height drag, entry-text edit) must
+          // route through scheduleSave or the page silently fails to persist on a
+          // tab switch / unload.
+          pageDirty.clear();
+          const hb = { html: true, entry: 'index.html', code: '<p>a</p>', files: [{ p: 'a.css', t: 'x' }] };
+          hb.files.splice(0, 1); scheduleSave();          // stands in for a file remove
+          if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+          ta('an html-block mutation marks the page dirty', pageDirty.has(DGP), true);
         } finally {
           currentPagePath = _cpp; currentPageData = _cpd; window.api = _api;
           pageDirty.clear();

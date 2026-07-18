@@ -141,6 +141,21 @@ grep -q 'api/v1' "$DATA/Slash.json" && ok "replace_content re-stores slashes UNE
 has "search_content non-ASCII still matches (fallback intact)" "$(sc '日本語')" "UniEsc.json"
 has "search_content ASCII-no-slash still matches (fast path intact)" "$(sc 'echo')" "Uni.json"
 
+# --- HTML-project b64 search strip ------------------------------------------
+# An html block stores binary assets as ONE UNBROKEN LINE of standard base64 under the
+# reserved "b64" key. Random base64 runs contain real words by chance, so search_content
+# blanks those spans before scanning — otherwise every page with an image becomes a
+# false positive. The SAME word in a real `code` field must still match on that page.
+post save_page '{"path":"Proj.json","data":{"title":"Proj","sections":[{"title":"S","collapsed":false,"tags":[],"blocks":[{"type":"html","html":true,"label":"","entry":"index.html","code":"<img src=\"logo.png\"> findmeplease","files":[{"p":"logo.png","m":"image/png","b64":"AAAAreportAAAAquarterlyAAAA"}]}],"subsections":[]}]}}' >/dev/null
+hasnt "search_content ignores a word inside a b64 blob"        "$(sc 'report')"       "Proj.json"
+has   "search_content still matches the block's real code"     "$(sc 'findmeplease')" "Proj.json"
+# Same guarantee through the DECODED-FALLBACK branch: a slash-bearing query (base64's
+# alphabet includes '/') and a non-ASCII query both take the decode path, which applies
+# the identical strip — without it the false positives come straight back.
+post save_page '{"path":"Proj2.json","data":{"title":"Proj2","sections":[{"title":"S","collapsed":false,"tags":[],"blocks":[{"type":"html","html":true,"label":"","entry":"index.html","code":"plain ascii entry 日本語marker","files":[{"p":"a.png","m":"image/png","b64":"AAAAap/v1AAAAqqq"}]}],"subsections":[]}]}}' >/dev/null
+hasnt "search_content fallback ignores a slash-query inside b64" "$(sc 'ap/v1')"       "Proj2.json"
+has   "search_content fallback still matches real CJK content"   "$(sc '日本語marker')" "Proj2.json"
+
 # --- list_tags (index-backed: pageMetaIndexed + flushIndex) ----------------
 post save_page '{"path":"TagA.json","data":{"title":"TagA","sections":[{"title":"S","collapsed":false,"tags":["alpha","shared"],"blocks":[],"subsections":[]}]}}' >/dev/null
 post save_page '{"path":"TagB.json","data":{"title":"TagB","sections":[{"title":"S","collapsed":false,"tags":["shared"],"blocks":[],"subsections":[]}]}}' >/dev/null

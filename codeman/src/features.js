@@ -800,6 +800,18 @@ function pageToMarkdown(data) {
           out.push('```json');
           out.push(ok ? formatJson(value) : (b.code || ''));
           out.push('```', '');
+        } else if (b.html) {
+          // HTML-project block: the entry file fenced, then a plain listing of the
+          // project's files (an interactive preview has no Markdown equivalent)
+          out.push('```html');
+          out.push(b.code || '');
+          out.push('```', '');
+          const files = htmlFileList(b);
+          if (files.length) {
+            out.push('_Project files:_');
+            files.forEach(f => out.push('- ' + f.p + (f.isEntry ? ' (entry)' : '') + ' — ' + htmlBytesLabel(f.bytes)));
+            out.push('');
+          }
         } else if (b.rich) {
           // rich-text blocks hold HTML — emit the plain text for Markdown
           const tmp = document.createElement('div'); tmp.innerHTML = b.code || '';
@@ -858,6 +870,15 @@ function pageToHtml(data) {
       parts.push('<pre class="code"><code>' + html + '</code></pre>');
       return;
     }
+    if (b.html) {
+      // the bundled project, live in the export too — same sandbox posture as the app
+      // (allow-scripts WITHOUT allow-same-origin ⇒ opaque origin). esc() escapes
+      // & < > " which is exactly what a double-quoted srcdoc needs.
+      parts.push('<iframe class="htmlproj" sandbox="allow-scripts" loading="lazy" '
+        + 'style="height:' + (b.htmlH || 320) + 'px" title="HTML preview" srcdoc="'
+        + esc(bundleHtmlProject(b).html) + '"></iframe>');
+      return;
+    }
     const lang = langPrism(b.type);
     let html;
     try { const g = Prism.languages[lang]; html = g ? Prism.highlight(code, g, lang) : esc(code); }
@@ -905,6 +926,7 @@ function pageToHtml(data) {
     'table.csv thead th{background:#2d2d30;color:#fff;font-weight:600}',
     'table.csv tbody tr:nth-child(even) td{background:rgba(255,255,255,.02)}',
     '.csv-empty{color:#888;font-style:italic}',
+    'iframe.htmlproj{display:block;width:100%;border:1px solid #333;border-radius:6px;background:#fff;margin:8px 0}',
     '.xlink{color:#8a7bd8}',
     'a{color:#4ea0e0}',
     // prism-tomorrow token colors (compact subset)
@@ -917,7 +939,13 @@ function pageToHtml(data) {
     '.token.function,.token.class-name{color:#f08d49}',
     '.token.regex,.token.important,.token.variable{color:#e90}'
   ].join('');
-  return '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'
+  // The export can embed a live HTML-project iframe, so it must carry the SAME CSP as
+  // the app — without this the standalone file would be strictly LESS restrictive than
+  // CodeMan itself. 'unsafe-inline' is required for the export's own inline <style>.
+  const exportCsp = '<meta http-equiv="Content-Security-Policy" content="default-src \'self\'; '
+    + 'script-src \'self\' \'unsafe-inline\'; style-src \'self\' \'unsafe-inline\'; '
+    + 'img-src \'self\' data: https:; object-src \'none\'; base-uri \'none\'">';
+  return '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">' + exportCsp + '<meta name="viewport" content="width=device-width,initial-scale=1"><title>'
     + esc(data.title || 'CodeMan') + '</title><style>' + css + '</style></head><body><h1>'
     + esc(data.title || 'Untitled') + '</h1>' + parts.join('\n') + '</body></html>';
 }

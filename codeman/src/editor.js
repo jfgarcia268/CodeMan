@@ -1085,6 +1085,523 @@ function jsonPath(keys) {
   return out;
 }
 
+/* ---------- HTML PROJECT (pure) ---------- */
+// A small static web project (entry HTML + its CSS/JS/images) stored INLINE in the
+// page JSON, rendered by inlining every sub-resource into one document fed to a
+// sandboxed <iframe srcdoc>. Keeping it in the page means history, trash, duplicate,
+// conflict-aware save, the offline mirror and self-contained export all work with no
+// new plumbing — paid for with a hard size cap, since every byte is multiplied ×21
+// on disk (current + 20 history versions).
+//
+// EVERY helper below is pure and MUST NEVER THROW — the parseCsv / parseJsonSafe
+// contract. A malformed project shows a warning banner, never a blank block.
+
+const HTML_MAX_TOTAL = 1048576;   // 1 MB decoded, whole block
+const HTML_MAX_FILE  = 524288;    // 512 KB any single file
+const HTML_MAX_FILES = 50;
+const HTML_SOFT_WARN = 262144;    // 256 KB → soft warning (explains the ×21 history growth)
+const HTML_PAGE_WARN = 6291456;   // 6 MB serialized page → post_max_size guard
+const HTML_DEFAULT_H = 320;       // preview height px (clamped 120–1200 on read)
+
+// An HTML-project block. `code` IS the entry file's source (so blockPlainText,
+// convertBlock, search_blocks, replace_content, the block filter and Copy all work
+// unchanged); `files` holds only the NON-entry files.
+function newHtmlBlock() {
+  return { type: 'html', label: '', code: '', html: true, entry: 'index.html', files: [] };
+}
+
+// Normalize a project-relative path: strip leading "./" and "/", collapse empty
+// segments, resolve "." / "..". Returns '' if the path escapes the project root.
+function normalizeHtmlPath(p) {
+  const s = String(p == null ? '' : p).replace(/\\/g, '/');
+  const out = [];
+  for (const seg of s.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') { if (!out.length) return ''; out.pop(); continue; }
+    out.push(seg);
+  }
+  return out.join('/');
+}
+
+// Join a reference to its base directory and normalize it. `?query` / `#hash` are
+// stripped for the file lookup. Returns null when the ref is empty or escapes root.
+function resolveHtmlPath(baseDir, ref) {
+  const raw = String(ref == null ? '' : ref).trim().split('#')[0].split('?')[0];
+  if (!raw) return null;
+  if (raw.charAt(0) === '/') return normalizeHtmlPath(raw) || null;
+  const base = normalizeHtmlPath(baseDir || '');
+  return normalizeHtmlPath(base ? base + '/' + raw : raw) || null;
+}
+
+// Is this reference outside the project (so the bundler must leave it verbatim)?
+// Covers any scheme, protocol-relative "//host", and same-document "#frag".
+function isAbsoluteRef(ref) {
+  const r = String(ref == null ? '' : ref).trim();
+  if (!r) return false;
+  if (r.charAt(0) === '#') return true;
+  if (r.slice(0, 2) === '//') return true;
+  return /^[A-Za-z][A-Za-z0-9+.-]*:/.test(r);
+}
+
+// The folder picker reports paths under the picked folder's own name
+// ("demo/index.html"). Drop that leading segment when EVERY path shares it.
+function stripCommonRoot(paths) {
+  const list = (paths || []).map(p => normalizeHtmlPath(p)).filter(Boolean);
+  if (!list.length) return [];
+  const parts = list.map(p => p.split('/'));
+  if (parts.some(a => a.length < 2)) return list;
+  const root = parts[0][0];
+  if (!parts.every(a => a[0] === root)) return list;
+  return parts.map(a => a.slice(1).join('/'));
+}
+
+// Extensions stored as text (everything else is base64 binary) + a MIME map.
+const HTML_TEXT_EXTS = ['html', 'htm', 'css', 'js', 'mjs', 'json', 'svg', 'txt', 'md', 'csv', 'xml'];
+const HTML_MIME_MAP = {
+  html: 'text/html', htm: 'text/html', css: 'text/css', js: 'text/javascript',
+  mjs: 'text/javascript', json: 'application/json', svg: 'image/svg+xml',
+  txt: 'text/plain', md: 'text/markdown', csv: 'text/csv', xml: 'application/xml',
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+  webp: 'image/webp', avif: 'image/avif', ico: 'image/x-icon', bmp: 'image/bmp',
+  woff: 'font/woff', woff2: 'font/woff2', ttf: 'font/ttf', otf: 'font/otf',
+  mp4: 'video/mp4', webm: 'video/webm', ogg: 'audio/ogg', mp3: 'audio/mpeg',
+  wav: 'audio/wav', pdf: 'application/pdf',
+};
+function htmlExtInfo(path) {
+  const m = String(path == null ? '' : path).toLowerCase().match(/\.([a-z0-9]+)$/);
+  const ext = m ? m[1] : '';
+  return { text: HTML_TEXT_EXTS.indexOf(ext) !== -1, mime: HTML_MIME_MAP[ext] || 'application/octet-stream' };
+}
+
+// Pick the entry file out of an uploaded path list: a root index.html wins, else a
+// lone .html anywhere, else the caller must ask (ambiguous, with the candidates).
+function resolveHtmlEntry(paths) {
+  const list = (paths || []).map(p => normalizeHtmlPath(p)).filter(Boolean);
+  const htmls = list.filter(p => /\.(html|htm)$/i.test(p));
+  if (list.indexOf('index.html') !== -1) return { entry: 'index.html', ambiguous: false, candidates: htmls };
+  if (htmls.length === 1) return { entry: htmls[0], ambiguous: false, candidates: htmls };
+  return { entry: '', ambiguous: true, candidates: htmls };
+}
+
+// Decoded byte length of a standard base64 string (padding-aware).
+function b64DecodedBytes(b64) {
+  const s = String(b64 == null ? '' : b64).replace(/\s+/g, '');
+  if (!s) return 0;
+  let pad = 0;
+  if (s.charAt(s.length - 1) === '=') pad++;
+  if (s.charAt(s.length - 2) === '=') pad++;
+  return Math.max(0, Math.floor(s.length * 3 / 4) - pad);
+}
+
+// UTF-8 byte length of a text file's content.
+function htmlTextBytes(t) {
+  const s = String(t == null ? '' : t);
+  try { return new TextEncoder().encode(s).length; } catch (e) { return s.length; }
+}
+
+// Human byte label for the size column / cap modals.
+function htmlBytesLabel(n) {
+  const b = Math.max(0, Number(n) || 0);
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b / 1024).toFixed(b < 10240 ? 1 : 0) + ' KB';
+  return (b / 1048576).toFixed(1) + ' MB';
+}
+
+// THE single read path for "what files does this block hold": the entry (whose text
+// lives in block.code) is spliced back in at its sorted position, so the file list and
+// all size accounting agree. A path wrongly duplicated in files[] is dropped.
+function htmlFileList(block) {
+  const b = block || {};
+  const entry = normalizeHtmlPath(b.entry || '');
+  const rows = [];
+  const seen = Object.create(null);
+  (Array.isArray(b.files) ? b.files : []).forEach(f => {
+    if (!f) return;
+    const p = normalizeHtmlPath(f.p || '');
+    if (!p || p === entry || seen[p]) return;
+    seen[p] = true;
+    const bin = typeof f.b64 === 'string';
+    rows.push({ p, kind: bin ? 'binary' : 'text', bytes: bin ? b64DecodedBytes(f.b64) : htmlTextBytes(f.t), isEntry: false });
+  });
+  if (entry) rows.push({ p: entry, kind: 'text', bytes: htmlTextBytes(b.code), isEntry: true });
+  rows.sort((a, c) => (a.p < c.p ? -1 : a.p > c.p ? 1 : 0));
+  return rows;
+}
+
+// Decoded size of the whole project, plus the files ordered largest-first.
+function htmlProjectSize(block) {
+  const rows = htmlFileList(block);
+  return {
+    bytes: rows.reduce((n, r) => n + r.bytes, 0),
+    count: rows.length,
+    largest: rows.slice().sort((a, c) => c.bytes - a.bytes).map(r => ({ p: r.p, bytes: r.bytes })),
+  };
+}
+
+// The cap decision, run over a CANDIDATE file list BEFORE anything is committed to
+// the block — a rejected upload must leave the block completely untouched.
+function htmlCapCheck(entries, limits) {
+  const lim = Object.assign(
+    { total: HTML_MAX_TOTAL, file: HTML_MAX_FILE, files: HTML_MAX_FILES, soft: HTML_SOFT_WARN },
+    limits || {});
+  const list = (entries || []).filter(Boolean).map(e => ({ p: String(e.p || ''), bytes: Math.max(0, Number(e.bytes) || 0) }));
+  const total = list.reduce((n, e) => n + e.bytes, 0);
+  const offenders = list.slice().sort((a, b) => b.bytes - a.bytes);
+  const hard = [], soft = [];
+  const tooBig = list.filter(e => e.bytes > lim.file);
+  if (tooBig.length) hard.push(tooBig.length + (tooBig.length > 1 ? ' files are' : ' file is') + ' over the ' + htmlBytesLabel(lim.file) + ' per-file limit');
+  if (total > lim.total) hard.push('The project is ' + htmlBytesLabel(total) + ' — over the ' + htmlBytesLabel(lim.total) + ' limit');
+  if (list.length > lim.files) hard.push(list.length + ' files — over the ' + lim.files + '-file limit');
+  if (!hard.length && total > lim.soft) {
+    soft.push('This project is ' + htmlBytesLabel(total) + '. It is stored inside the page, and every save keeps up to 20 history versions — so it can use around '
+      + htmlBytesLabel(total * 21) + ' on the server.');
+  }
+  return { ok: !hard.length, hard, soft, offenders };
+}
+
+// FNV-1a 32-bit over a canonical descriptor of the STORED content (entry path + entry
+// text + each file's path and body). Label / htmlH deliberately don't move the key.
+// Binaries hash by base64 LENGTH only — cheap, and safe because every explicit
+// mutation calls remountFrame() directly (see the htmlRunState rule).
+function htmlBundleKey(block) {
+  const b = block || {};
+  const parts = [normalizeHtmlPath(b.entry || ''), String(b.code || '')];
+  (Array.isArray(b.files) ? b.files : []).forEach(f => {
+    if (!f) return;
+    parts.push(normalizeHtmlPath(f.p || ''));
+    parts.push(typeof f.b64 === 'string' ? 'b' + f.b64.length : 't' + String(f.t || ''));
+  });
+  const s = parts.join('');
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  return h.toString(16);
+}
+
+// Parse a srcset value into candidates. A srcset is a comma-separated list of
+// "<url> [descriptor]" — and URLs may THEMSELVES contain commas ("photo,v2.jpg 2x"),
+// which is exactly why a naive split(',') is wrong. So: skip separators, consume the
+// URL as a run of NON-WHITESPACE (the comma rides along inside it), then take an
+// optional descriptor up to the next comma. A URL run that ends in a comma has no
+// descriptor ("a.jpg, b.jpg"). Never throws.
+function parseSrcset(value) {
+  const s = String(value == null ? '' : value);
+  const out = [];
+  let i = 0;
+  while (i < s.length) {
+    while (i < s.length && (/\s/.test(s.charAt(i)) || s.charAt(i) === ',')) i++;
+    if (i >= s.length) break;
+    let url = '';
+    while (i < s.length && !/\s/.test(s.charAt(i))) { url += s.charAt(i); i++; }
+    const trimmed = url.replace(/,+$/, '');
+    const endedOnComma = trimmed !== url;
+    url = trimmed;
+    let desc = '';
+    if (!endedOnComma) {
+      while (i < s.length && s.charAt(i) !== ',') { desc += s.charAt(i); i++; }
+      if (i < s.length) i++;                       // consume the separating comma
+    }
+    if (url) out.push({ url, descriptor: desc.trim() });
+  }
+  return out;
+}
+
+// Inverse of parseSrcset (whitespace normalized; order/urls/descriptors preserved).
+function serializeSrcset(entries) {
+  return (entries || [])
+    .filter(e => e && e.url)
+    .map(e => (e.descriptor ? e.url + ' ' + e.descriptor : e.url))
+    .join(', ');
+}
+
+// Which candidate the preview keeps when a srcset is collapsed. Deterministic (so
+// htmlBundleKey stays stable): the element's own src target → a 1x/bare candidate →
+// the lowest density/width → the first.
+function pickSrcsetCandidate(entries, srcTarget) {
+  const list = (entries || []).filter(e => e && e.url);
+  if (!list.length) return null;
+  if (srcTarget) { const hit = list.find(e => e.url === srcTarget); if (hit) return hit; }
+  const bare = list.find(e => !e.descriptor || /^1(\.0+)?x$/i.test(e.descriptor));
+  if (bare) return bare;
+  const scored = list
+    .map(e => {
+      const d = String(e.descriptor || '');
+      const mx = d.match(/^([\d.]+)x$/i), mw = d.match(/^(\d+)w$/i);
+      return { e, n: mx ? parseFloat(mx[1]) : mw ? parseInt(mw[1], 10) : NaN };
+    })
+    .filter(o => isFinite(o.n))
+    .sort((a, b) => a.n - b.n);
+  return scored.length ? scored[0].e : list[0];
+}
+
+// CSS image-set() is the same candidate-list shape as srcset, with optional url()
+// wrappers / quotes and an optional type() the preview ignores. Accepts either the
+// full "image-set(…)" function or just its inner value.
+function parseImageSet(value) {
+  let v = String(value == null ? '' : value).trim();
+  const wrap = v.match(/^-?(?:webkit-)?image-set\(([\s\S]*)\)$/i);
+  if (wrap) v = wrap[1];
+  const unwrap = (u) => {
+    let s = String(u || '').trim();
+    const m = s.match(/^url\(([\s\S]*)\)$/i);
+    if (m) s = m[1].trim();
+    const q = s.charAt(0);
+    if ((q === '"' || q === "'") && s.charAt(s.length - 1) === q) s = s.slice(1, -1);
+    return s.trim();
+  };
+  return parseSrcset(v)
+    .map(e => ({
+      url: unwrap(e.url),
+      descriptor: String(e.descriptor || '').replace(/type\(\s*(?:"[^"]*"|'[^']*'|[^)]*)\)/gi, '').trim(),
+    }))
+    .filter(e => e.url && !/^type\(/i.test(e.url));
+}
+
+// Attributes known to carry a resource reference. Anything here that the bundler does
+// NOT rewrite must still be DETECTED (layer 2 below) so it can never fail silently.
+const HTML_REF_ATTRS = [
+  'src', 'srcset', 'href', 'poster', 'data', 'action', 'formaction',
+  'background', 'cite', 'longdesc', 'usemap', 'profile', 'manifest', 'ping',
+];
+// The (tag, attr) pairs the rewrite table in bundleHtmlProject actually covers.
+// Keep this list next to the rewrites — the two are read together.
+const HTML_HANDLED_REFS = [
+  'img|src', 'img|srcset', 'source|src', 'source|srcset',
+  'script|src', 'link|href', 'video|src', 'video|poster', 'audio|src',
+];
+
+// Inline every sub-resource of the project into one HTML document for the sandboxed
+// preview. Regex over the raw entry string — deliberately NOT DOMParser, so the
+// author's exact document survives and the helper stays DOM-free and pure.
+//
+// THE INVARIANT: every reference the bundler rewrites warns when it can't be resolved,
+// AND every ref-bearing form the bundler does NOT handle is still detected. It must be
+// structurally impossible for a reference to a project file to vanish from the preview
+// with no entry in the warning banner. Three layers enforce it (see the end).
+//
+// Returns { html, warnings: [{level:'warn'|'info', text}] } and NEVER throws.
+function bundleHtmlProject(block) {
+  const warnings = [];
+  const warn = (text, level) => warnings.push({ level: level || 'warn', text: String(text) });
+  try {
+    const b = block || {};
+    const entry = normalizeHtmlPath(b.entry || '');
+    const entryDir = entry.indexOf('/') === -1 ? '' : entry.slice(0, entry.lastIndexOf('/'));
+    const map = Object.create(null);
+    (Array.isArray(b.files) ? b.files : []).forEach(f => {
+      if (!f) return;
+      const p = normalizeHtmlPath(f.p || '');
+      if (p && p !== entry) map[p] = f;
+    });
+    const consumed = Object.create(null);   // layer 3: every project path actually inlined
+    const warnedRef = Object.create(null);  // dedupe layer 1 ↔ layer 2 on the same ref string
+
+    const dataUri = (rec, path) => {
+      if (rec && typeof rec.b64 === 'string') {
+        return 'data:' + (rec.m || htmlExtInfo(path).mime) + ';base64,' + rec.b64;
+      }
+      // text assets (svg, …) go in percent-encoded — pure, and immune to btoa's
+      // "characters outside Latin1" throw on UTF-8 content.
+      return 'data:' + htmlExtInfo(path).mime + ';charset=utf-8,' + encodeURIComponent((rec && rec.t) || '');
+    };
+
+    // Layer 1: resolve one reference, warning on a root escape or a missing file.
+    const lookup = (ref, baseDir) => {
+      if (!ref || isAbsoluteRef(ref) || /^data:/i.test(ref)) return null;
+      const p = resolveHtmlPath(baseDir, ref);
+      if (!p) { warnedRef[ref] = true; warn('outside project: ' + ref); return null; }
+      if (!map[p]) { warnedRef[ref] = true; warn('unresolved: ' + ref); return null; }
+      consumed[p] = true;
+      return { path: p, rec: map[p] };
+    };
+
+    // url() / image-set() inside a stylesheet, resolved relative to THAT stylesheet's
+    // directory (not the entry's).
+    const rewriteCss = (css, baseDir) => {
+      let out = String(css == null ? '' : css);
+      if (/@import/i.test(out)) warn('@import is not followed — imported stylesheets will not load in the preview.');
+      out = out.replace(/(-webkit-)?image-set\(([^;{}]*)\)/gi, (m0, pfx, inner) => {
+        const cands = parseImageSet(inner);
+        if (!cands.length) return m0;
+        const picked = pickSrcsetCandidate(cands, '');
+        const hit = picked ? lookup(picked.url, baseDir) : null;
+        if (!hit) return m0;
+        const dropped = [];
+        cands.forEach(c => {
+          if (c === picked) return;
+          const p = resolveHtmlPath(baseDir, c.url);
+          if (p && map[p]) { consumed[p] = true; dropped.push(p); }
+        });
+        if (cands.length > 1) {
+          warn('Responsive variants collapsed for preview: kept ' + hit.path
+            + (dropped.length ? ', dropped ' + dropped.join(', ') : '')
+            + '. All files are still stored in the project.', 'info');
+        }
+        return 'url("' + dataUri(hit.rec, hit.path) + '")';
+      });
+      out = out.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (m0, q, ref) => {
+        const hit = lookup(String(ref).trim(), baseDir);
+        return hit ? 'url("' + dataUri(hit.rec, hit.path) + '")' : m0;
+      });
+      return out;
+    };
+
+    let html = String(b.code || '');
+
+    // 1. the entry's own inline <style> blocks (before <link>, so the CSS injected by
+    //    the link rewrite — already resolved against ITS dir — isn't processed twice)
+    html = html.replace(/<style\b([^>]*)>([\s\S]*?)<\/style\s*>/gi,
+      (m0, attrs, css) => '<style' + attrs + '>' + rewriteCss(css, entryDir) + '</style>');
+
+    // 2. <link rel="stylesheet" href> → <style> with the stylesheet inlined
+    html = html.replace(/<link\b[^>]*>/gi, (tag) => {
+      if (!/rel\s*=\s*['"]?stylesheet/i.test(tag)) return tag;
+      const m = tag.match(/href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+      const ref = m ? (m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2] : m[3]) : '';
+      if (!ref || isAbsoluteRef(ref)) return tag;
+      const hit = lookup(ref, entryDir);
+      if (!hit) return tag;
+      const dir = hit.path.indexOf('/') === -1 ? '' : hit.path.slice(0, hit.path.lastIndexOf('/'));
+      return '<style>\n' + rewriteCss(hit.rec.t || '', dir) + '\n</style>';
+    });
+
+    // 3. <script src> → inline <script>. </script inside the payload MUST be escaped
+    //    or it terminates the wrapper element early.
+    html = html.replace(/<script\b([^>]*?)\ssrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))([^>]*)>\s*<\/script\s*>/gi,
+      (m0, pre, d, s, u, post) => {
+        const ref = d !== undefined ? d : s !== undefined ? s : u;
+        if (!ref || isAbsoluteRef(ref)) return m0;
+        const hit = lookup(ref, entryDir);
+        if (!hit) return m0;
+        const js = String(hit.rec.t || '').replace(/<\/script/gi, '<\\/script');
+        const attrs = (pre + post).replace(/\s(?:defer|async)\b/gi, '');
+        return '<script' + attrs + '>\n' + js + '\n</script>';
+      });
+
+    // 4. media elements: src / srcset / poster → data URIs (srcset collapsed, see §5)
+    html = html.replace(/<(img|source|video|audio)\b([^>]*)>/gi, (m0, tag, attrs) => {
+      const t = tag.toLowerCase();
+      let out = attrs;
+      const getAttr = (name) => {
+        const m = out.match(new RegExp('\\s' + name + '\\s*=\\s*(?:"([^"]*)"|\'([^\']*)\'|([^\\s>]+))', 'i'));
+        if (!m) return null;
+        return m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2] : m[3];
+      };
+      const setAttr = (name, val) => {
+        const v = String(val).replace(/"/g, '&quot;');
+        const re = new RegExp('(\\s' + name + '\\s*=\\s*)(?:"[^"]*"|\'[^\']*\'|[^\\s>]+)', 'i');
+        if (re.test(out)) out = out.replace(re, (mm, p1) => p1 + '"' + v + '"');
+        else out = out.replace(/\s*\/?\s*$/, '') + ' ' + name + '="' + v + '"';
+      };
+      const delAttr = (name) => {
+        out = out.replace(new RegExp('\\s' + name + '\\s*=\\s*(?:"[^"]*"|\'[^\']*\'|[^\\s>]+)', 'gi'), '');
+      };
+
+      const srcRef = getAttr('src');
+      const srcsetRef = getAttr('srcset');
+      const srcTargetPath = (srcRef && !isAbsoluteRef(srcRef)) ? resolveHtmlPath(entryDir, srcRef) : null;
+
+      if (srcsetRef) {
+        const resolved = parseSrcset(srcsetRef).map(c => ({
+          c, path: isAbsoluteRef(c.url) ? null : resolveHtmlPath(entryDir, c.url),
+        }));
+        // one warning per candidate URL that can't be resolved to a project file
+        resolved.forEach(r => {
+          if (isAbsoluteRef(r.c.url)) return;
+          if (!r.path) { warnedRef[r.c.url] = true; warn('outside project: ' + r.c.url); }
+          else if (!map[r.path]) { warnedRef[r.c.url] = true; warn('unresolved: ' + r.c.url); }
+        });
+        const usable = resolved.filter(r => r.path && map[r.path]);
+        if (usable.length) {
+          const srcCand = srcTargetPath ? usable.find(r => r.path === srcTargetPath) : null;
+          const picked = pickSrcsetCandidate(usable.map(r => r.c), srcCand ? srcCand.c.url : '');
+          const keep = usable.find(r => r.c === picked) || usable[0];
+          consumed[keep.path] = true;
+          const dropped = [];
+          resolved.forEach(r => {
+            if (r === keep || !r.path || !map[r.path]) return;
+            consumed[r.path] = true;          // reported by the collapse note, not layer 3
+            dropped.push(r.path);
+          });
+          const uri = dataUri(map[keep.path], keep.path);
+          if (t === 'img') { setAttr('src', uri); delAttr('srcset'); }
+          else { setAttr('srcset', uri); delAttr('src'); }
+          delAttr('sizes');
+          if (resolved.length > 1) {
+            warn('Responsive variants collapsed for preview: kept ' + keep.path
+              + (dropped.length ? ', dropped ' + dropped.join(', ') : '')
+              + '. All files are still stored in the project.', 'info');
+          }
+          return '<' + tag + out + '>';
+        }
+      }
+
+      if (t === 'video') {
+        const poster = getAttr('poster');
+        const ph = poster ? lookup(poster, entryDir) : null;
+        if (ph) setAttr('poster', dataUri(ph.rec, ph.path));
+      }
+      const sh = srcRef ? lookup(srcRef, entryDir) : null;
+      if (sh) setAttr('src', dataUri(sh.rec, sh.path));
+      return '<' + tag + out + '>';
+    });
+
+    // ---- Layer 2: unhandled ref-attribute census ---------------------------------
+    // Any HTML_REF_ATTRS attribute still holding a RELATIVE value, on a (tag, attr)
+    // pair the rewrite table doesn't cover, is reported — <object data>, <embed src>,
+    // <track src>, <form action>, <a href>, style="…url(…)…" and friends.
+    html.replace(/<([a-zA-Z][a-zA-Z0-9-]*)\b([^>]*)>/g, (m0, tag, attrs) => {
+      const t = tag.toLowerCase();
+      HTML_REF_ATTRS.forEach(name => {
+        if (HTML_HANDLED_REFS.indexOf(t + '|' + name) !== -1) return;
+        const m = attrs.match(new RegExp('\\s' + name + '\\s*=\\s*(?:"([^"]*)"|\'([^\']*)\'|([^\\s>]+))', 'i'));
+        if (!m) return;
+        const val = (m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2] : m[3]) || '';
+        if (!val || isAbsoluteRef(val) || /^data:/i.test(val) || warnedRef[val]) return;
+        warnedRef[val] = true;
+        warn('<' + t + ' ' + name + '="' + val + '"> — this reference form isn’t inlined; it will not load in the preview.');
+      });
+      const sm = attrs.match(/\sstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+      const sv = sm ? (sm[1] !== undefined ? sm[1] : sm[2]) : '';
+      const um = sv ? sv.match(/url\(\s*['"]?([^'")]+)/i) : null;
+      const uref = um ? um[1].trim() : '';
+      if (uref && !isAbsoluteRef(uref) && !/^data:/i.test(uref) && !warnedRef[uref]) {
+        warnedRef[uref] = true;
+        warn('style="…url(' + uref + ')…" — inline style references aren’t inlined; it will not load in the preview.');
+      }
+      return m0;
+    });
+
+    // ---- Layer 3: unconsumed-file audit (the structural guarantee) ----------------
+    // Whitelist-free and forward-proof: a file sitting in the project that the bundler
+    // never inlined is itself the evidence that some reference form went unhandled.
+    Object.keys(map).forEach(p => {
+      if (consumed[p]) return;
+      warn(p + ' is in the project but was never inlined — it may be referenced in a form the preview doesn’t support.');
+    });
+
+    // ---- Heuristics (Notes) ------------------------------------------------------
+    if (/(?:fetch\s*\(|XMLHttpRequest|\bimport\s*\(|localStorage|sessionStorage)/.test(html)) {
+      warn('Network and storage APIs don’t work in the sandboxed preview (opaque origin + CSP).', 'info');
+    }
+    const remoteScript = /<script\b[^>]*\ssrc\s*=\s*["']?https?:/i.test(html);
+    const remoteStyle = (html.match(/<link\b[^>]*>/gi) || [])
+      .some(tg => /rel\s*=\s*["']?stylesheet/i.test(tg) && /href\s*=\s*["']?https?:/i.test(tg));
+    if (remoteScript || remoteStyle) {
+      warn('Remote scripts and stylesheets are blocked by the app’s CSP; remote images do load.', 'info');
+    }
+
+    return { html, warnings };
+  } catch (e) {
+    return {
+      html: (block && block.code) || '',
+      warnings: [{ level: 'warn', text: 'Bundler error — showing the raw entry file.' }],
+    };
+  }
+}
+
 /* ---------- BLOCK KINDS (unified create + convert) ---------- */
 // Every block is exactly one kind. Centralising this keeps the create menu and
 // the per-block "type" switch in sync, and means a new kind is one row here.
@@ -1095,6 +1612,7 @@ const BLOCK_KINDS = [
   { kind: 'checklist', icon: '☑', label: 'Checklist' },
   { kind: 'csv', icon: '▦', label: 'Table (CSV)' },
   { kind: 'json', icon: '{}', label: 'JSON tree' },
+  { kind: 'html', icon: '▶', label: 'HTML preview' },
 ];
 function blockKind(block) {
   if (block.checklist) return 'checklist';
@@ -1102,6 +1620,9 @@ function blockKind(block) {
   if (block.note) return 'note';
   if (block.csv) return 'csv';
   if (block.json) return 'json';
+  // NOTE: the discriminator is the block.html BOOLEAN, never type === 'html' —
+  // plain CODE blocks legitimately use 'html' as their language and must stay code.
+  if (block.html) return 'html';
   return 'code';
 }
 function newBlockOfKind(kind) {
@@ -1110,6 +1631,7 @@ function newBlockOfKind(kind) {
   if (kind === 'checklist') return newChecklistBlock();
   if (kind === 'csv') return newCsvBlock();
   if (kind === 'json') return newJsonBlock();
+  if (kind === 'html') return newHtmlBlock();
   return newBlock();
 }
 // HTML → plain text preserving line breaks. Done by mapping block-close tags and
@@ -1146,12 +1668,32 @@ function convertBlock(block, kind) {
   if (blockKind(block) === kind) return;
   const text = blockPlainText(block);
   delete block.note; delete block.rich; delete block.checklist; delete block.items; delete block.csv; delete block.json;
+  delete block.html; delete block.files; delete block.entry; delete block.htmlH;
   if (kind === 'note') { block.note = true; block.type = 'markdown'; block.code = text; }
   else if (kind === 'rich') { block.rich = true; block.type = 'plaintext'; block.code = textToRichHtml(text); }
   else if (kind === 'checklist') { block.checklist = true; block.type = 'checklist'; block.items = textToChecklistItems(text); block.code = ''; }
   else if (kind === 'csv') { block.csv = true; block.type = 'csv'; block.code = text; }
   else if (kind === 'json') { block.json = true; block.type = 'json'; block.code = text; }
+  // the text becomes the ENTRY file's source; a fresh project has no other files
+  else if (kind === 'html') { block.html = true; block.type = 'html'; block.code = text; block.entry = 'index.html'; block.files = []; }
   else { block.type = 'plaintext'; block.code = text; }   // code
+}
+
+// Converting AWAY from an html block keeps only the entry HTML — the other project
+// files are dropped. Confirm first (naming them) when there are any; every convert
+// call site routes through this so the guard can't be bypassed. History is still the
+// undo path, so a plain confirm is enough.
+function confirmKindChange(block, kind, go) {
+  const extra = (blockKind(block) === 'html' && kind !== 'html' && Array.isArray(block.files)) ? block.files.length : 0;
+  if (!extra) { go(); return; }
+  const names = block.files.slice(0, 3).map(f => (f && f.p) || '').filter(Boolean).join(', ');
+  const target = (BLOCK_KINDS.find(k => k.kind === kind) || { label: kind }).label;
+  showConfirm(
+    'Converting to ' + target + ' discards ' + extra + ' other project file' + (extra > 1 ? 's' : '')
+    + (names ? ' (' + names + (extra > 3 ? ', …' : '') + ')' : '')
+    + '. The entry HTML is kept. This can be undone from page History.',
+    { okLabel: 'Convert', danger: false }
+  ).then(ok => { if (ok) go(); });
 }
 
 // Pure: wrap a menu index into [0,n) so ArrowUp/Down cycle past both ends
@@ -1306,7 +1848,7 @@ function makeTypeMenuButton(block) {
   const btn = menuBtn((cur ? cur.label : 'Type') + ' ▾', () => {
     showMiniMenu(btn, BLOCK_KINDS.map(k => ({
       icon: k.icon, label: k.label, active: blockKind(block) === k.kind,
-      onClick: () => { convertBlock(block, k.kind); renderPage(); scheduleSave(); },
+      onClick: () => confirmKindChange(block, k.kind, () => { convertBlock(block, k.kind); renderPage(); scheduleSave(); }),
     })));
   });
   btn.className = 'secondary type-menu';
@@ -1985,7 +2527,7 @@ function renderChecklistBlock(block, parentArray, idx) {
       { divider: true },
       ...BLOCK_KINDS.map(k => ({
         icon: k.icon, label: k.label, active: blockKind(block) === k.kind,
-        onClick: () => { convertBlock(block, k.kind); renderPage(); scheduleSave(); },
+        onClick: () => confirmKindChange(block, k.kind, () => { convertBlock(block, k.kind); renderPage(); scheduleSave(); }),
       })),
     ]);
   });
@@ -2236,7 +2778,7 @@ function renderRichBlock(block, parentArray, idx) {
       { divider: true },
       ...BLOCK_KINDS.map(k => ({
         icon: k.icon, label: k.label, active: blockKind(block) === k.kind,
-        onClick: () => { block.code = sanitizeRichHtml(surface.innerHTML); convertBlock(block, k.kind); renderPage(); scheduleSave(); },
+        onClick: () => { block.code = sanitizeRichHtml(surface.innerHTML); confirmKindChange(block, k.kind, () => { convertBlock(block, k.kind); renderPage(); scheduleSave(); }); },
       })),
     ]);
   });
@@ -2406,7 +2948,7 @@ function renderCsvBlock(block, parentArray, idx) {
       { divider: true },
       ...BLOCK_KINDS.map(k => ({
         icon: k.icon, label: k.label, active: blockKind(block) === k.kind,
-        onClick: () => { block.code = textarea.value; convertBlock(block, k.kind); renderPage(); scheduleSave(); },
+        onClick: () => { block.code = textarea.value; confirmKindChange(block, k.kind, () => { convertBlock(block, k.kind); renderPage(); scheduleSave(); }); },
       })),
     ]);
   });
@@ -2673,7 +3215,7 @@ function renderJsonBlock(block, parentArray, idx) {
       { divider: true },
       ...BLOCK_KINDS.map(k => ({
         icon: k.icon, label: k.label, active: blockKind(block) === k.kind,
-        onClick: () => { block.code = textarea.value; convertBlock(block, k.kind); renderPage(); scheduleSave(); },
+        onClick: () => { block.code = textarea.value; confirmKindChange(block, k.kind, () => { convertBlock(block, k.kind); renderPage(); scheduleSave(); }); },
       })),
     ]);
   });
@@ -2691,6 +3233,596 @@ function renderJsonBlock(block, parentArray, idx) {
   return el;
 }
 
+/* ---------- HTML PROJECT (block) ---------- */
+
+// htmlBundleKey → 'running' | 'stopped'. Absent = never mounted, so the preview waits
+// for the block to scroll into view. renderPage() rewrites #page wholesale, so a live
+// iframe can't survive it — the guarantee is over RUN STATE, not DOM state.
+// RULE: any files[] mutation must call remountFrame() directly — binaries hash by
+// path + base64 LENGTH only, so a same-length replace won't move the key.
+const htmlRunState = new Map();
+function setHtmlRunState(key, state) {
+  htmlRunState.delete(key);                 // re-insert so the FIFO order is recency
+  htmlRunState.set(key, state);
+  while (htmlRunState.size > 64) htmlRunState.delete(htmlRunState.keys().next().value);
+}
+
+// Preview height, clamped to something sane whatever is stored.
+function htmlHeightPx(block) {
+  const h = Number((block && block.htmlH) || HTML_DEFAULT_H) || HTML_DEFAULT_H;
+  return Math.max(120, Math.min(1200, Math.round(h)));
+}
+
+// Swap which file is the entry: block.code is ALWAYS the entry's source, so the old
+// entry goes back into files[] as text and the new one is pulled out into code.
+function setHtmlEntry(block, path) {
+  const next = normalizeHtmlPath(path || '');
+  if (!next) return;
+  const cur = normalizeHtmlPath(block.entry || '');
+  if (next === cur) return;
+  if (!Array.isArray(block.files)) block.files = [];
+  const i = block.files.findIndex(f => f && normalizeHtmlPath(f.p || '') === next);
+  const rec = i === -1 ? null : block.files.splice(i, 1)[0];
+  if (cur) block.files.push({ p: cur, t: block.code || '' });
+  block.entry = next;
+  block.code = rec ? String(rec.t || '') : '';
+}
+
+// HTML-project block: a small static site stored inline in the page, previewed in a
+// sandboxed iframe. Edit mode is a plain textarea over the ENTRY file only (the CSV /
+// JSON pattern — deliberately NOT the Prism .code-stack overlay, whose ED_* metrics
+// coupling is why per-file editing is a separate phase).
+function renderHtmlBlock(block, parentArray, idx) {
+  const isMobile = document.body.classList.contains('is-mobile');
+  const el = document.createElement('div');
+  el.className = 'block html' + (blockBackups.has(block) ? '' : ' viewing');
+
+  if (!Array.isArray(block.files)) block.files = [];
+
+  const toolbar = document.createElement('div');
+  toolbar.className = 'block-toolbar';
+
+  const labelInput = document.createElement('input');
+  labelInput.className = 'block-label';
+  labelInput.placeholder = 'Label (optional)';
+  labelInput.value = block.label || '';
+  labelInput.addEventListener('input', () => { block.label = labelInput.value; scheduleSave(); });
+
+  const spacer = document.createElement('span');
+  spacer.className = 'spacer';
+
+  // The entry-file source editor (visible only while editing, via CSS).
+  const textarea = document.createElement('textarea');
+  textarea.className = 'html-edit';
+  textarea.value = block.code || '';
+  textarea.spellcheck = false;
+  textarea.setAttribute('autocapitalize', 'off');
+  textarea.setAttribute('autocorrect', 'off');
+  textarea.placeholder = 'Entry HTML — upload a folder, or write it here.\n<!DOCTYPE html>\n<html>…</html>';
+
+  const view = document.createElement('div');
+  view.className = 'html-view';
+
+  function autosize() {
+    textarea.style.height = 'auto';
+    textarea.style.height = Math.min(textarea.scrollHeight + 2, editorCapPx()) + 'px';
+  }
+  textarea._autosize = autosize;
+
+  /* ----- preview mount / unmount (run state, never renderPage) ----- */
+
+  let frameWrap = null, poster = null, frame = null, observer = null;
+
+  function mountFrame() {
+    if (!frameWrap || frame) return;
+    if (poster) poster.style.display = 'none';
+    frame = document.createElement('iframe');
+    frame.className = 'html-frame';
+    // SECURITY INVARIANT: allow-scripts WITHOUT allow-same-origin ⇒ opaque origin ⇒
+    // no parent.document, no cookies, no storage; with the inherited CSP, no egress.
+    // Adding allow-same-origin alongside allow-scripts VOIDS the entire sandbox.
+    // This is permanent, not a tuning knob.
+    frame.setAttribute('sandbox', 'allow-scripts');
+    frame.setAttribute('loading', 'lazy');
+    frame.setAttribute('referrerpolicy', 'no-referrer');
+    frame.setAttribute('title', 'HTML preview' + (block.label ? ': ' + block.label : ''));
+    frame.srcdoc = bundleHtmlProject(block).html;
+    frameWrap.appendChild(frame);
+    setHtmlRunState(htmlBundleKey(block), 'running');
+    syncRunBtn();
+  }
+  function unmountFrame() {
+    if (frame) { frame.remove(); frame = null; }
+    if (poster) poster.style.display = '';
+    setHtmlRunState(htmlBundleKey(block), 'stopped');
+    syncRunBtn();
+  }
+  // Any content mutation must call this directly — htmlBundleKey hashes binaries by
+  // length only, so a same-length replace wouldn't move the key on its own.
+  function remountFrame() {
+    const wasRunning = !!frame;
+    if (frame) { frame.remove(); frame = null; }
+    if (wasRunning) mountFrame(); else { if (poster) poster.style.display = ''; syncRunBtn(); }
+  }
+
+  const runBtn = mkBtn('▶', () => { if (frame) remountFrame(); else mountFrame(); });
+  runBtn.className = 'secondary html-run';
+  function syncRunBtn() {
+    runBtn.textContent = frame ? '↻' : '▶';
+    runBtn.title = frame ? 'Reload preview' : 'Run preview';
+  }
+  const stopBtn = mkBtn('■', () => unmountFrame());
+  stopBtn.className = 'secondary html-stop';
+  stopBtn.title = 'Stop preview';
+
+  /* ----- the view: warnings + frame + file list ----- */
+
+  function renderWarnings(warnings) {
+    if (!warnings.length) return null;
+    const problems = warnings.filter(w => w.level !== 'info');
+    const notes = warnings.filter(w => w.level === 'info');
+    const box = document.createElement('div');
+    box.className = 'html-warn';
+    const head = document.createElement('div');
+    head.textContent = '⚠ ' + warnings.length + ' preview note' + (warnings.length > 1 ? 's' : '');
+    box.appendChild(head);
+    // cap the rendered list so a pathologically broken project can't produce a banner
+    // taller than the preview itself
+    let budget = 12;
+    const addList = (items, cls, title) => {
+      if (!items.length || budget <= 0) return;
+      const h = document.createElement('div');
+      h.className = 'html-warn-head';
+      h.textContent = title;
+      const ul = document.createElement('ul');
+      if (cls) ul.className = cls;
+      items.slice(0, budget).forEach(w => {
+        const li = document.createElement('li');
+        li.textContent = w.text;                 // data-derived → textContent, never innerHTML
+        ul.appendChild(li);
+      });
+      budget -= Math.min(budget, items.length);
+      box.append(h, ul);
+    };
+    addList(problems, '', 'Problems');
+    addList(notes, 'html-warn-note', 'Notes');
+    const shown = Math.min(12, warnings.length);
+    if (warnings.length > shown) {
+      const more = document.createElement('div');
+      more.textContent = '+' + (warnings.length - shown) + ' more';
+      box.appendChild(more);
+    }
+    return box;
+  }
+
+  function renderFiles() {
+    const rows = htmlFileList(block);
+    const wrap = document.createElement('div');
+    wrap.className = 'html-files';
+    rows.forEach(r => {
+      const row = document.createElement('div');
+      row.className = 'html-file-row' + (r.isEntry ? ' is-entry' : '');
+      const name = document.createElement('span');
+      name.className = 'html-file-path';
+      name.textContent = (r.isEntry ? '⌁ ' : '') + r.p;          // all cells via textContent
+      const size = document.createElement('span');
+      size.className = 'html-file-size';
+      size.textContent = htmlBytesLabel(r.bytes);
+      row.append(name, size);
+      if (!r.isEntry && /\.(html|htm)$/i.test(r.p)) {
+        const mk = mkBtn('Make entry', () => {
+          setHtmlEntry(block, r.p);
+          textarea.value = block.code || '';
+          scheduleSave();
+          renderView();
+          remountFrame();
+          toast('Entry set to ' + r.p);
+        });
+        mk.className = 'secondary html-file-entry';
+        row.appendChild(mk);
+      }
+      if (!r.isEntry) {
+        // no modal — page History is the safety net, same as removing any other content
+        const rm = mkBtn('✕', () => {
+          const i = block.files.findIndex(f => f && normalizeHtmlPath(f.p || '') === r.p);
+          if (i !== -1) block.files.splice(i, 1);
+          scheduleSave();
+          renderView();
+          remountFrame();
+          toast('Removed ' + r.p);
+        });
+        rm.className = 'secondary html-file-del';
+        rm.title = 'Remove ' + r.p;
+        row.appendChild(rm);
+      }
+      wrap.appendChild(row);
+    });
+    return wrap;
+  }
+
+  function renderView() {
+    if (observer) { observer.disconnect(); observer = null; }
+    frame = null;
+    view.innerHTML = '';
+    const hasEntry = !!(block.code || '').trim();
+    const files = htmlFileList(block);
+
+    if (!hasEntry && !block.files.length) {
+      const empty = document.createElement('div');
+      empty.className = 'html-empty';
+      empty.textContent = 'Empty — upload a folder or edit the entry HTML.';
+      view.appendChild(empty);
+      syncRunBtn();
+      return;
+    }
+
+    const bundle = bundleHtmlProject(block);
+    const warnings = bundle.warnings.slice();
+    if (!hasEntry) {
+      warnings.unshift({ level: 'warn', text: 'No entry file — pick one with “Make entry”, or edit the entry HTML.' });
+    }
+    const warnBox = renderWarnings(warnings);
+    if (warnBox) view.appendChild(warnBox);
+
+    if (hasEntry) {
+      frameWrap = document.createElement('div');
+      frameWrap.className = 'html-frame-wrap';
+      frameWrap.style.height = htmlHeightPx(block) + 'px';
+
+      poster = document.createElement('div');
+      poster.className = 'html-poster';
+      const play = document.createElement('button');
+      play.className = 'secondary html-poster-run';
+      play.textContent = '▶ Run';
+      play.addEventListener('click', () => mountFrame());
+      const cap = document.createElement('div');
+      cap.className = 'html-poster-cap';
+      cap.textContent = (normalizeHtmlPath(block.entry || '') || 'index.html')
+        + ' · ' + files.length + ' file' + (files.length === 1 ? '' : 's');
+      poster.append(play, cap);
+      frameWrap.appendChild(poster);
+      view.appendChild(frameWrap);
+      wireResize(frameWrap);
+
+      const state = htmlRunState.get(htmlBundleKey(block));
+      if (state === 'running') {
+        mountFrame();                                   // don't make the user click ▶ again
+      } else if (state !== 'stopped') {
+        observer = new IntersectionObserver(entries => {
+          if (!entries.some(e => e.isIntersecting)) return;
+          observer.disconnect(); observer = null;
+          mountFrame();
+        }, { rootMargin: '200px' });
+        observer.observe(frameWrap);
+      }
+    }
+
+    view.appendChild(renderFiles());
+    syncRunBtn();
+  }
+
+  // The wrap is CSS-resizable; the iframe would swallow the drag, so shield it with
+  // pointer-events:none for the duration and persist the height on release.
+  function wireResize(wrap) {
+    wrap.addEventListener('pointerdown', () => {
+      if (frame) frame.style.pointerEvents = 'none';
+      const up = () => {
+        if (frame) frame.style.pointerEvents = '';
+        const h = wrap.clientHeight;
+        if (h && h !== htmlHeightPx(block)) { block.htmlH = h; scheduleSave(); }
+        window.removeEventListener('pointerup', up);
+      };
+      window.addEventListener('pointerup', up);
+    });
+  }
+
+  /* ----- toolbar ----- */
+
+  const typeBtn = makeTypeMenuButton(block);
+  typeBtn.addEventListener('mousedown', () => { block.code = textarea.value; }, true);
+
+  function refreshRevertLabel() {
+    const backup = blockBackups.has(block) ? blockBackups.get(block) : (block.code || '');
+    const dirty = (block.code || '') !== backup;
+    revertBtn.textContent = dirty ? 'Revert' : 'Cancel';
+    revertBtn.title = dirty ? 'Undo changes made since you started editing' : 'Exit edit mode (no changes)';
+  }
+
+  textarea.addEventListener('input', () => {
+    block.code = textarea.value; autosize(); scheduleSave(); refreshRevertLabel();
+  });
+
+  function enterEdit() {
+    blockBackups.set(block, block.code || '');
+    el.classList.remove('viewing');
+    refreshRevertLabel();
+    requestAnimationFrame(() => { autosize(); textarea.focus(); });
+  }
+  const editBtn = mkBtn('Edit', enterEdit);
+  editBtn.className = 'secondary block-edit';
+  editBtn.title = 'Edit the entry HTML';
+  if (isMobile) { editBtn.textContent = '✎'; editBtn.title = 'Edit the entry HTML'; }
+
+  const saveBtn = mkBtn('Save', () => {
+    block.code = textarea.value;
+    blockBackups.delete(block);
+    el.classList.add('viewing');
+    renderView();
+    remountFrame();
+    savePage();
+    toast('Saved');
+  });
+  saveBtn.className = 'block-save';
+  if (isMobile) { saveBtn.textContent = '✓'; saveBtn.title = 'Save'; }
+
+  const revertBtn = mkBtn('Cancel', () => {
+    const backup = blockBackups.has(block) ? blockBackups.get(block) : (block.code || '');
+    if ((block.code || '') !== backup) {
+      block.code = backup; textarea.value = backup;
+      el.classList.remove('viewing');
+      renderView(); remountFrame(); autosize(); savePage(); refreshRevertLabel(); textarea.focus();
+      toast('Reverted');
+    } else {
+      blockBackups.delete(block);
+      el.classList.add('viewing');
+    }
+  });
+  revertBtn.className = 'secondary block-revert';
+
+  // Copy hands over the BUNDLED document (the thing you'd paste into a file and open).
+  // Deliberately NOT recordCopy(block) — recentCopies is a localStorage array and
+  // parking bundled documents there risks the 5 MB quota.
+  const copyBtn = mkBtn('Copy', () => {
+    copyText(bundleHtmlProject(block).html).then(ok =>
+      flashCopied(copyBtn, ok ? 'Copied bundled HTML' : 'Copy failed'));
+  });
+  copyBtn.className = 'secondary block-copy';
+  copyBtn.title = 'Copy the bundled HTML document to clipboard';
+  if (isMobile) copyBtn.textContent = '⧉';
+
+  const uploadBtn = mkBtn('Upload…', () => {
+    uploadHtmlProject(block, { replace: false }, () => { textarea.value = block.code || ''; renderView(); remountFrame(); });
+  });
+  uploadBtn.className = 'secondary html-upload';
+  uploadBtn.title = 'Upload a project folder';
+
+  const dupBtn = mkBtn('Duplicate', () => duplicateBlock(parentArray, idx));
+  dupBtn.className = 'secondary block-dup';
+
+  const overflowBtn = menuBtn('⋯', () => {
+    showMiniMenu(overflowBtn, [
+      { icon: '❐', label: 'Duplicate block', onClick: () => dupBtn.click() },
+      { icon: '↻', label: 'Reload preview', onClick: () => { if (frame) remountFrame(); else mountFrame(); } },
+      { icon: '⇪', label: 'Replace project…', onClick: () => uploadHtmlProject(block, { replace: true }, () => { textarea.value = block.code || ''; renderView(); remountFrame(); }) },
+      { icon: '⌁', label: 'Set entry file…', onClick: () => pickEntry() },
+      { icon: '⧉', label: 'Copy bundled HTML', onClick: () => copyBtn.click() },
+      { divider: true },
+      ...BLOCK_KINDS.map(k => ({
+        icon: k.icon, label: k.label, active: blockKind(block) === k.kind,
+        onClick: () => { block.code = textarea.value; confirmKindChange(block, k.kind, () => { convertBlock(block, k.kind); renderPage(); scheduleSave(); }); },
+      })),
+    ]);
+  });
+  overflowBtn.className = 'secondary block-overflow';
+  overflowBtn.title = 'More actions';
+
+  function pickEntry() {
+    const cands = htmlFileList(block).filter(r => /\.(html|htm)$/i.test(r.p));
+    if (!cands.length) { toast('No HTML files in this project'); return; }
+    showMiniMenu(overflowBtn, cands.map(r => ({
+      icon: r.isEntry ? '⌁' : '', label: r.p, active: r.isEntry,
+      onClick: () => {
+        if (r.isEntry) return;
+        setHtmlEntry(block, r.p);
+        textarea.value = block.code || '';
+        scheduleSave(); renderView(); remountFrame();
+        toast('Entry set to ' + r.p);
+      },
+    })));
+  }
+
+  const delBtn = mkBtn('Delete', () => { parentArray.splice(idx, 1); renderPage(); scheduleSave(); });
+  delBtn.className = 'danger';
+  if (isMobile) { delBtn.textContent = '✕'; delBtn.title = 'Delete'; }
+
+  toolbar.append(labelInput, spacer, typeBtn, editBtn, saveBtn, revertBtn, runBtn, stopBtn, uploadBtn, copyBtn, dupBtn, overflowBtn, delBtn);
+  el.append(toolbar, textarea, view);
+
+  // Drag-and-drop a folder straight onto the block.
+  el.addEventListener('dragover', (e) => { e.preventDefault(); el.classList.add('drop-active'); });
+  el.addEventListener('dragleave', (e) => { if (e.target === el) el.classList.remove('drop-active'); });
+  el.addEventListener('drop', (e) => {
+    e.preventDefault();
+    el.classList.remove('drop-active');
+    const items = e.dataTransfer && e.dataTransfer.items;
+    if (!items || !items.length) return;
+    collectDroppedFiles(items).then(picked => {
+      if (!picked.length) return;
+      commitHtmlUpload(block, picked, { replace: false }, () => { textarea.value = block.code || ''; renderView(); remountFrame(); });
+    });
+  });
+
+  renderView();
+  if (!el.classList.contains('viewing')) requestAnimationFrame(autosize);
+  return el;
+}
+
+// Walk a DataTransferItemList into a flat [{path, file}] list.
+// FileSystemDirectoryReader.readEntries PAGES AT 100 ENTRIES — it must be called
+// repeatedly until it returns an empty array, or a large folder imports partially.
+async function collectDroppedFiles(items) {
+  const roots = [];
+  for (let i = 0; i < items.length; i++) {
+    const entry = items[i].webkitGetAsEntry && items[i].webkitGetAsEntry();
+    if (entry) roots.push(entry);
+  }
+  const out = [];
+  const readAll = (reader) => new Promise(res => {
+    const acc = [];
+    const step = () => reader.readEntries(batch => {
+      if (!batch.length) { res(acc); return; }     // empty batch = truly done
+      acc.push(...batch);
+      step();
+    }, () => res(acc));
+    step();
+  });
+  const walk = async (entry, prefix) => {
+    if (!entry) return;
+    if (entry.name.charAt(0) === '.') return;                     // .DS_Store, .git/…
+    const path = prefix ? prefix + '/' + entry.name : entry.name;
+    if (entry.isFile) {
+      const file = await new Promise(res => entry.file(res, () => res(null)));
+      if (file) out.push({ path, file });
+      return;
+    }
+    if (entry.isDirectory) {
+      const kids = await readAll(entry.createReader());
+      for (const k of kids) await walk(k, path);
+    }
+  };
+  for (const r of roots) await walk(r, '');
+  return out;
+}
+
+// Read a File into the stored shape: text files as `t`, binaries as ONE UNBROKEN LINE
+// of standard base64 under the reserved `b64` key (the shape api.php's search strip
+// depends on). The base64 conversion is 8 KB-chunked — a single .apply() over a
+// 512 KB buffer blows the argument-list limit.
+async function readHtmlFile(path, file) {
+  const info = htmlExtInfo(path);
+  if (info.text) return { p: path, t: await file.text() };
+  const buf = new Uint8Array(await file.arrayBuffer());
+  let bin = '';
+  for (let i = 0; i < buf.length; i += 8192) {
+    bin += String.fromCharCode.apply(null, buf.subarray(i, i + 8192));
+  }
+  return { p: path, m: info.mime, b64: btoa(bin) };
+}
+
+// Open a folder picker and hand the selection to commitHtmlUpload.
+function uploadHtmlProject(block, opts, onDone) {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.multiple = true;
+  input.setAttribute('webkitdirectory', '');
+  input.setAttribute('directory', '');            // Firefox
+  input.style.display = 'none';
+  document.body.appendChild(input);
+  input.addEventListener('change', () => {
+    const picked = Array.from(input.files || []).map(f => ({ path: f.webkitRelativePath || f.name, file: f }));
+    input.remove();
+    if (picked.length) commitHtmlUpload(block, picked, opts || {}, onDone);
+  });
+  input.click();
+}
+
+// Build the WHOLE candidate project in a local, check the caps, and only THEN assign
+// onto the block — a rejected upload must leave the block completely untouched.
+async function commitHtmlUpload(block, picked, opts, onDone) {
+  const replace = !!(opts && opts.replace);
+  try {
+    // skip dot-prefixed segments and empty directory entries; they don't count
+    // against the cap either
+    const usable = picked.filter(p =>
+      p && p.file && !String(p.path).split('/').some(seg => seg.charAt(0) === '.'));
+    if (!usable.length) { toast('Nothing to upload'); return; }
+
+    const paths = stripCommonRoot(usable.map(p => p.path));
+    const withPaths = usable.map((p, i) => ({ path: paths[i], file: p.file })).filter(p => p.path);
+
+    let dupes = 0;
+    const byPath = new Map();
+    for (const p of withPaths) {
+      if (byPath.has(p.path)) dupes++;            // last write wins
+      byPath.set(p.path, p.file);
+    }
+    if (dupes) toast(dupes + ' duplicate path' + (dupes > 1 ? 's' : '') + ' — last one kept');
+
+    const allPaths = Array.from(byPath.keys());
+    const found = resolveHtmlEntry(allPaths);
+    let entry = found.entry;
+    if (found.ambiguous) {
+      if (!found.candidates.length) { toast('No .html file found in that folder'); return; }
+      entry = await pickHtmlEntryModal(found.candidates);
+      if (!entry) return;                          // cancelled — block untouched
+    }
+
+    const records = [];
+    for (const [p, f] of byPath) records.push(await readHtmlFile(p, f));
+
+    // candidate list for the cap decision (entry included — it's stored too)
+    const candidate = { entry, code: '', files: [] };
+    records.forEach(r => {
+      if (r.p === entry) candidate.code = r.t || '';
+      else candidate.files.push(r);
+    });
+    if (!replace && Array.isArray(block.files)) {
+      // merging into an existing project: keep files the upload didn't replace
+      const incoming = new Set(candidate.files.map(f => f.p).concat([entry]));
+      block.files.forEach(f => { if (f && !incoming.has(normalizeHtmlPath(f.p || ''))) candidate.files.push(f); });
+    }
+
+    const sizes = htmlFileList({ entry: candidate.entry, code: candidate.code, files: candidate.files })
+      .map(r => ({ p: r.p, bytes: r.bytes }));
+    const cap = htmlCapCheck(sizes);
+    if (!cap.ok) {
+      const top = cap.offenders.slice(0, 5).map(o => o.p + ' — ' + htmlBytesLabel(o.bytes)).join('\n');
+      await showConfirm('Project not imported.\n\n' + cap.hard.join('\n') + '\n\nLargest files:\n' + top,
+        { okLabel: 'OK', danger: false });
+      return;                                      // NOTHING committed
+    }
+    if (cap.soft.length) {
+      const go = await showConfirm(cap.soft.join('\n') + '\n\nUpload anyway?', { okLabel: 'Upload', danger: false });
+      if (!go) return;
+    }
+
+    block.html = true;
+    block.type = 'html';
+    block.entry = candidate.entry;
+    block.code = candidate.code;
+    block.files = candidate.files;
+    scheduleSave();
+    if (onDone) onDone();
+    toast(sizes.length + ' file' + (sizes.length === 1 ? '' : 's') + ' imported');
+
+    try {
+      if (currentPageData && JSON.stringify(currentPageData).length > HTML_PAGE_WARN) {
+        toast('This page is now very large — the server may reject the save (post_max_size). Consider a smaller project.');
+      }
+    } catch (e) { /* stringify of a huge page can throw — the warning is best-effort */ }
+  } catch (e) {
+    toast('Upload failed — ' + ((e && e.message) || 'unknown error'));
+  }
+}
+
+// Ask which .html file is the entry (uses the shared focus-trapping dialog).
+function pickHtmlEntryModal(candidates) {
+  let chosen = null;                    // submit() takes no args — carry the pick in a closure
+  return showModal((box, submit, cancel) => {
+    const title = document.createElement('div');
+    title.className = 'modal-title';
+    title.textContent = 'Which file is the entry point?';
+    const list = document.createElement('div');
+    list.className = 'modal-list';
+    candidates.forEach(p => {
+      const b = document.createElement('button');
+      b.className = 'secondary';
+      b.textContent = p;
+      b.onclick = () => { chosen = p; submit(); };
+      list.appendChild(b);
+    });
+    const btns = document.createElement('div');
+    btns.className = 'modal-btns';
+    const c = document.createElement('button');
+    c.className = 'secondary';
+    c.textContent = 'Cancel';
+    c.onclick = cancel;
+    btns.appendChild(c);
+    box.append(title, list, btns);
+    setTimeout(() => { const f = list.querySelector('button'); if (f) f.focus(); }, 0);
+  }, () => chosen);
+}
+
 function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh, subsectionsArray) {
   // Rich-text and checklist blocks aren't code/markdown surfaces — render them
   // via their own paths (no gutter, lang picker, variables, etc.).
@@ -2698,6 +3830,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
   if (block.rich) return renderRichBlock(block, parentArray, idx);
   if (block.csv) return renderCsvBlock(block, parentArray, idx);
   if (block.json) return renderJsonBlock(block, parentArray, idx);
+  if (block.html) return renderHtmlBlock(block, parentArray, idx);
 
   const el = document.createElement('div');
   // stay in edit mode if an edit session backup exists for this block
@@ -2960,7 +4093,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     items.push({ divider: true });
     BLOCK_KINDS.forEach(k => items.push({
       icon: k.icon, label: k.label, active: blockKind(block) === k.kind,
-      onClick: () => { convertBlock(block, k.kind); renderPage(); scheduleSave(); },
+      onClick: () => confirmKindChange(block, k.kind, () => { convertBlock(block, k.kind); renderPage(); scheduleSave(); }),
     }));
     // Copy-as formats (replaces the "▾" button, folded into ⋯ on mobile).
     items.push({ divider: true });
@@ -3255,7 +4388,7 @@ function editorCapPx() {
         .forEach(ta => { if (ta._autosize) ta._autosize(); });
       document.querySelectorAll('.block:not(.note):not(.viewing) .code-wrap')
         .forEach(cw => { if (cw._autosize) cw._autosize(); });
-      document.querySelectorAll('.block.csv:not(.viewing) .csv-edit, .block.json:not(.viewing) .json-edit')
+      document.querySelectorAll('.block.csv:not(.viewing) .csv-edit, .block.json:not(.viewing) .json-edit, .block.html:not(.viewing) .html-edit')
         .forEach(ta => { if (ta._autosize) ta._autosize(); });
     }, 120);
   };

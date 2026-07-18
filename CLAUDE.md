@@ -98,7 +98,7 @@ story is squarely "non-trivial."
 | `api.php` | Filesystem API: tree, page CRUD, move, reorder, content/block search, metadata index, projects, trash, history, save-conflict detection, find & replace, tag rename, optional password gate. |
 | `vendor/prism/` | Vendored Prism (core + autoloader + grammars + theme) — **no CDN**, works offline. Grammars autoload on demand; an unviewed language won't highlight offline until first rendered. |
 | `vendor/markdown-it/` | Vendored **markdown-it** (v14, single UMD file) — **no CDN**, offline. Backs `renderMarkdown` for **note blocks** (full CommonMark + GFM). Loaded as a static `<script>` before the `src/*.js` modules so `window.markdownit` exists when `editor.js` builds its instance. See the markdown-it gotcha. |
-| `tests.html` | Standalone **client** browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + `richToPlainText`/`convertBlock`/`parseCsv`/`parseJsonSafe`/`jsonPath`/`assembleRestoredTabs`/`uniqueCopyName` + deep-search cap + offline trash/history reducers (snapshots/restores the real IndexedDB cache — incl. `dl:` dead-letter keys — safe to run) + `sanitizeRichHtml` + `flushQueue` replay (FIFO/conflict-force/failure-retains + **dead-letter parking**: terminal/transient-exhausted/conflict-force-error, retry, `__codemanAdoptInto` merge, against stubbed `apiFetch`) + `importPages` negatives. Open it in a browser; ~224 assertions, expect `0 failed`. `window.__testResult = {pass, fail, done}` — CI runs it headless via `.github/scripts/run-client-tests.mjs` and enforces a pass-count FLOOR (bump it there when adding assertions). |
+| `tests.html` | Standalone **client** browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + `richToPlainText`/`convertBlock`/`parseCsv`/`parseJsonSafe`/`jsonPath`/`assembleRestoredTabs`/`uniqueCopyName` + deep-search cap + offline trash/history reducers (snapshots/restores the real IndexedDB cache — incl. `dl:` dead-letter keys — safe to run) + `sanitizeRichHtml` + `flushQueue` replay (FIFO/conflict-force/failure-retains + **dead-letter parking**: terminal/transient-exhausted/conflict-force-error, retry, `__codemanAdoptInto` merge, against stubbed `apiFetch`) + `importPages` negatives + the **HTML-project** helpers (`normalizeHtmlPath`/`resolveHtmlPath`/`isAbsoluteRef`/`stripCommonRoot`/`htmlExtInfo`/`resolveHtmlEntry`/`htmlFileList`/`htmlProjectSize`/`htmlCapCheck`/`htmlBundleKey`/`parseSrcset`/`serializeSrcset`/`pickSrcsetCandidate`/`parseImageSet`/`setHtmlEntry` + `bundleHtmlProject` incl. its three warning layers + the `blockKind` `block.html`-vs-`type:'html'` trap guard). Open it in a browser; ~457 assertions, expect `0 failed`. `window.__testResult = {pass, fail, done}` — CI runs it headless via `.github/scripts/run-client-tests.mjs` and enforces a pass-count FLOOR (bump it there when adding assertions). |
 | `tests-api.sh` | Standalone **server** API tests (bash + curl, no deps). Spins a throwaway `php -S` against a temp `CODEMAN_DATA` dir and asserts api.php behavior the browser can't reach: path-traversal confinement, parent-dir guards, unicode `search_content`, same-second history retention, `empty_trash` history-prune + its traversal guard, save-conflict detection (stale `baseMtime` → conflict + untouched file; `force` → history snapshot), the project-nesting `move` guard, the `rename` traversal guard, the `restore_trash` round-trip, `replace_content` (preview dry-run / literal / regex), `rename_tag` (rename/merge/delete), and the password gate. `bash codeman/tests-api.sh` (exit 0 = green; hunts upward from its port if taken, so parallel/CI runs don't collide). |
 
 **No build step.** The `src/*.js` files are plain classic scripts sharing one global scope;
@@ -137,7 +137,10 @@ the load order in `index.html` *is* the dependency order. Edit a file, reload th
   `items:[{text,done}]`), **csv** (`csv:true`, raw CSV text in `code` rendered as a table in
   view mode — `parseCsv`/`renderCsvBlock` in `editor.js`), **json** (`json:true`, raw JSON text
   in `code` rendered as a collapsible copy-path tree in view mode — `parseJsonSafe`/
-  `renderJsonBlock` in `editor.js`). `blockKind()` derives the kind;
+  `renderJsonBlock` in `editor.js`), **html** (`html:true`, a small static web project stored
+  INLINE — `entry` + the entry's source in `code` + every other file in `files:[{p,t}|{p,m,b64}]`
+  + `htmlH` preview height — rendered by `bundleHtmlProject`/`renderHtmlBlock` into a sandboxed
+  `<iframe srcdoc>`). `blockKind()` derives the kind;
   `convertBlock()` switches a block to any other kind carrying text across.
 - **Legacy shape:** older sections wrapped content in `tabs:[{name,blocks,subsections}]`.
   The tabs feature was removed, but `sectionContent(section)` transparently reads both
@@ -501,6 +504,47 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   `⊞` expands-all (NOT the per-node ▾/▸ markers). The button **hides** when the view has no container
   nodes (scalar/empty/invalid). A capture-phase `toggle` listener on the view re-syncs the glyph when a
   single node is hand-toggled; `renderTree()` calls `syncTreeToggle` at its end.
+- **HTML-project block = the CSV/JSON pattern + a sandboxed iframe.** The whole project lives inline
+  in the page JSON, so history/trash/duplicate/conflict-save/offline/export need ZERO new plumbing —
+  paid for with a hard cap (`HTML_MAX_TOTAL` 1 MB / `HTML_MAX_FILE` 512 KB / `HTML_MAX_FILES` 50,
+  soft-warn at 256 KB), because every byte is multiplied **×21** on disk (current + 20 history
+  versions). **`block.code` IS the entry file's source** and `files` holds only NON-entry files — so
+  `blockPlainText`, `convertBlock`, `search_blocks`, `replace_content` and the block filter all work
+  unchanged. Five load-bearing rules:
+  **(1) `blockKind()` discriminates on the `block.html` BOOLEAN, never `type === 'html'`** — existing
+  CODE blocks legitimately use `html` as their language and would be silently reinterpreted as
+  projects (pinned by a tests.html regression guard).
+  **(2) The iframe is `sandbox="allow-scripts"` WITHOUT `allow-same-origin`** ⇒ opaque origin ⇒ no
+  `parent.document`, no cookies/storage, and (with the inherited CSP) no egress. Adding
+  `allow-same-origin` alongside `allow-scripts` **voids the entire sandbox — permanent invariant, not
+  a tuning knob.** `allow-modals` is deliberately omitted (`alert()` no-ops); adding it later is safe.
+  **(3) `bundleHtmlProject` MUST NEVER THROW** (the `parseCsv`/`parseJsonSafe` contract) and must
+  never render a blank block — it's try-wrapped and falls back to the raw entry + a warning. It's
+  regex-based, deliberately NOT `DOMParser`, so the author's exact document survives.
+  **(4) The three-layer warning system is the trust guarantee:** layer 1 warns per unresolvable/
+  root-escaping ref; layer 2 is a declared `HTML_REF_ATTRS` × `HTML_HANDLED_REFS` census that catches
+  ref-bearing forms the rewrite table doesn't cover (`<object data>`, `<form action>`, `style=
+  "…url(…)"`); **layer 3 is the unconsumed-file audit** — any file in `files` the bundler never
+  inlined warns, which is whitelist-free and forward-proof (the evidence IS the unused file). Don't
+  weaken layer 3 to a whitelist; it's what makes an unhandled reference form structurally unable to
+  fail silently.
+  **(5) NO html-block mutation may call `renderPage()`** — it rewrites `#page` wholesale and would
+  kill a live iframe. Every in-block mutation (upload, file remove, entry change, height drag, entry
+  edit) updates its own subtree, calls `remountFrame()` **and `scheduleSave()`** (the `pageDirty`
+  contract — a path that forgets it silently fails to persist on tab switch/unload). Only
+  convert/delete/duplicate call `renderPage()`. `htmlRunState` (module-scope Map, FIFO-capped at 64)
+  keys `htmlBundleKey` → `'running'|'stopped'`; **binaries hash by base64 LENGTH only**, which is
+  safe ONLY because every explicit mutation calls `remountFrame()` directly.
+  Other traps that bit during implementation: `readEntries` **pages at 100 entries** — loop until it
+  returns an empty array or a large folder imports partially; base64 conversion is **8 KB-chunked**
+  (one `.apply()` over 512 KB blows the argument-list limit); the cap check is **atomic** (build the
+  whole candidate, check, only then assign — a rejected upload leaves the block untouched);
+  `</script>` inside inlined JS is escaped to `<\/script`; binaries are stored as **one unbroken
+  base64 line** under the reserved key `b64`, which is the shape `api.php`'s `search_content` strip
+  depends on (both the raw fast path AND the decoded fallback blank those spans, or encoded image
+  data produces false search hits). The block uses a **plain `.html-edit` textarea**, never the Prism
+  `.code-stack` overlay — zero contact with `ED_*`/`autosizeCode`/`syncScroll`, which is exactly why
+  editing NON-entry files is deferred to a phase 2 with its own design pass.
 - **Sidebar tree is keyboard-operable + ARIA (a11y pass).** `#tree` is `role="tree"`; rows
   (`.tree-row`) and Miller folder cards (`.subfolder-card`) are `role="treeitem"` with a
   `data-path`, `aria-label`, roving `tabindex` (exactly one row is `tabindex=0` via
@@ -910,7 +954,10 @@ the server URL or `{offlineOnly:true}`.
   step): inline `onclick=` handlers, the inline `<script>` loaders, and the inline `ED_*` element
   styles. All vendored/executable code is same-origin `'self'` (the Prism autoloader injects
   same-origin `<script src>`; `?v=` cache-bust queries don't change the source origin; markdown-it +
-  the SW are same-origin). **`img-src` includes `https:`** so remote https images referenced in note/
+  the SW are same-origin). **`pageToHtml`'s standalone export now emits the SAME CSP `<meta>`** —
+  without it an export carrying a live HTML-project iframe would be strictly LESS restrictive than
+  the app itself; `'unsafe-inline'` there covers the export's own inline `<style>`. **`img-src`
+  includes `https:`** so remote https images referenced in note/
   rich blocks render (a self-hosted snippet manager legitimately references remote images; plain
   `http:`/other schemes stay blocked — no mixed content, marginal exfil risk under the trusted
   single-user model). At the release cut the **NAS nginx** deployment must ALSO send this header +

@@ -320,10 +320,77 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
 - TC-json-07 (A): the toggle is **hidden** (`display:none`) when the view has no container nodes —
   a scalar value, an empty block, or an invalid-parse warning. **[auto: tests.html makeTreeToggleBtn]**
 
+### TC-html — HTML project block (preview)
+- TC-html-01 (P): create an html block from **all three** kind-menu sites (`+ Add ▾`, the block
+  `type-menu ▾`, the block `⋯`); the empty block shows *"Empty — upload a folder or edit the entry
+  HTML."* and no iframe.
+- TC-html-02 (P): **folder upload** (`index.html` + `style.css` + `app.js` + a PNG) renders live in
+  the sandboxed iframe: **CSS applied**, **JS interactive** (a button handler runs), **image
+  visible**; a nested `assets/img/logo.png` resolves; the picker's leading root segment is stripped.
+  **[auto (helpers): tests.html stripCommonRoot/bundleHtmlProject]**
+- TC-html-03 (P): **drag-drop** a folder onto the block imports it identically (`.drop-active`
+  outline while hovering). A folder with **>100 entries imports completely** (`readEntries` is paged
+  — it must be looped until it returns empty).
+- TC-html-04 (P): **entry auto-resolution**, all three branches — root `index.html` wins; a lone
+  `.html` anywhere is chosen; two or more `.html` files prompt a picker (cancel = nothing imported).
+  **[auto: tests.html resolveHtmlEntry]**
+- TC-html-05 (A): **cap rejection is non-destructive** — a >512 KB single file (or >1 MB total, or
+  >50 files) shows a modal naming the offenders + sizes and the block is left **completely
+  untouched** (candidate built and checked BEFORE anything is assigned).
+  **[auto: tests.html htmlCapCheck]**
+- TC-html-06 (P): a >256 KB project shows the **soft-warn** confirm explaining the ×21 history
+  growth; proceeding imports normally, cancelling imports nothing.
+- TC-html-07 (A): **a broken project never renders blank** — a missing entry, an unresolvable
+  `src`, a `../` root escape and malformed HTML each show the `.html-warn` banner plus the file
+  list. `bundleHtmlProject` never throws. **[auto: tests.html bundleHtmlProject]**
+- TC-html-08 (A): **the warning invariant — nothing fails silently.** (a) an unresolved/escaping ref
+  warns by name (layer 1); (b) a ref-bearing form the bundler doesn't rewrite (`<object data>`,
+  `<embed src>`, `<form action>`, `style="…url(…)"`) is still reported (layer 2); (c) a file present
+  in the project but **never referenced** produces an unconsumed-file warning (layer 3), and the
+  same file referenced through a handled `<img src>` produces none.
+  **[auto: tests.html bundleHtmlProject layers]**
+- TC-html-09 (P): **responsive images** — a project with `<img src="photo.jpg" srcset="photo-2x.jpg
+  2x, photo-3x.jpg 3x">` plus a `<picture>` element renders the image (**not blank**) on a retina
+  display; `.html-warn` shows a **Notes** entry naming the collapsed variants; the **file list still
+  lists all three files** (the collapse is render-time only — nothing is dropped from storage).
+  **[auto: tests.html parseSrcset/pickSrcsetCandidate]**
+- TC-html-10 (P): entry-text **Edit → Save → reload persists**; the file list `✕` removes a
+  non-entry file; `⌁`/"Make entry" swaps the entry (old entry pushed back into `files`); the
+  preview height drag persists (`htmlH`). Every one of these marks the page dirty.
+  **[auto: tests.html setHtmlEntry + the scheduleSave dirty-guard]**
+- TC-html-11 (P): `▶ Run` / `↻ Reload` / `■ Stop`; a **running** preview re-mounts immediately after
+  a re-render (no "click ▶ again"); a first-view block mounts on scroll-into-view.
+- TC-html-12 (P): duplicate block / section / page deep-copies the whole project (the copy's
+  `files` is independent); save→reload, history restore, trash restore, two-tab conflict + force,
+  and offline render + queued replay all behave as for any other block.
+- TC-html-13 (E): **export HTML** renders the project interactively in the standalone file, and that
+  file carries the **same CSP** as the app (`object-src 'none'`, `default-src 'self'`) and the same
+  `sandbox="allow-scripts"` **without** `allow-same-origin`; **export Markdown** emits a ```` ```html ````
+  fence of the entry plus a project-file listing; JSON export→import round-trips `files`/`entry`
+  identically.
+- TC-html-14 (E): **search is not polluted by binary assets** — a word that occurs by chance inside a
+  `b64` blob does NOT match `search_content`, while the same word in the entry HTML does.
+  **[auto: tests-api.sh b64 strip, fast path + decoded fallback]**
+- TC-html-15 (P): toolbar/⋯ parity — `type-menu` and Duplicate are reachable **only** through the
+  `⋯` menu at both widths; mobile shows the icon swaps (`✎ ✓ ⧉ ✕`, label on its own row) and
+  **`Upload…` is hidden** (iOS Safari has no folder picker).
+- TC-html-16 (A): converting **away** from an html block that owns other files shows a confirm
+  naming the count + files ("the entry HTML is kept"); with `files.length === 0` it converts with no
+  prompt. **[auto: tests.html convertBlock]**
+- TC-html-17 (E): **the discriminator is `block.html === true`** — an existing **code** block whose
+  language is `html` must still render as a code block, never as a project block.
+  **[auto: tests.html blockKind — regression guard]**
+
+**Known limits (expected behavior, not bugs):**
+- TC-html-L1: **find & replace rewrites only the entry file** (`block.code`); the other project
+  files in `files[]` are untouched.
+- TC-html-L2: **quick-paste / block palette yields a plain code block** of the entry HTML —
+  `search_blocks` doesn't return the `html:true` flag, so the project doesn't come with it.
+
 ### TC-convert — Block-kind conversion
-- TC-convert-01 (P): code→note→rich→checklist→csv→json→code carries text; rich→other **preserves
-  line breaks** (regression: detached-innerText newline loss); entities decode; code↔csv and
-  code↔json round-trip raw text losslessly.
+- TC-convert-01 (P): code→note→rich→checklist→csv→json→html→code carries text; rich→other **preserves
+  line breaks** (regression: detached-innerText newline loss); entities decode; code↔csv, code↔json
+  and code↔html round-trip raw text losslessly (html keeps the text as the entry file).
   **[auto: tests.html richToPlainText/convertBlock/parseCsv/parseJsonSafe]**
 
 ### TC-vars — Variables / copy-as
@@ -554,6 +621,22 @@ say so in the report rather than implying full coverage.**
   *Why:* needs a Windows runner.
 - TC-ext-ci (CI workflow `codeman-desktop.yml`): tag-triggered build matrix + release upload.
   *Why:* fires only on a version tag; can't be exercised locally.
+- TC-ext-html-sandbox (HTML block, sandbox posture): load a project that calls `parent.document`,
+  `fetch()`, `localStorage` and `alert()` — **each fails inside the frame only** (opaque origin: no
+  `allow-same-origin`, no `allow-modals`), the app is unaffected, and the banner shows the
+  network/storage heuristic note. Confirm the iframe carries `sandbox="allow-scripts"` **without**
+  `allow-same-origin` — adding it would void the whole sandbox. *Why extended:* needs a
+  deliberately hostile fixture + DevTools inspection.
+- TC-ext-html-retina (HTML block, responsive images on a 2× device): on a retina/2× display the
+  collapsed preview image is visibly correct (not blank, not a broken icon) and **DevTools shows
+  ZERO network requests from the frame** (everything is a data URI). *Why:* needs real 2× hardware.
+- TC-ext-html-size (HTML block, size limits): the 256 KB soft-warn modal; a page whose serialized
+  JSON exceeds 6 MB toasts the `post_max_size` warning, and a **real** server rejection surfaces as
+  the normal visible save error (not a silent drop). At 1000+ pages, `search_content` shows no
+  b64 false positives and no sidebar/search regression. *Why:* needs large fixtures + server config.
+- TC-ext-html-norestart (HTML block, run state): scroll a long page past a **running** demo and back
+  — the demo is still running (or restarts immediately without a ▶ click), never stuck on the idle
+  poster. *Why:* timing/scroll-dependent, awkward to automate.
 - TC-ext-mobile (real device): iOS/Android touch, drag, pinch/zoom-lock, standalone-PWA top inset,
   `manifest.webmanifest` install. *Why:* emulated viewport ≠ a real device.
 - TC-ext-perf (scale): seed ~1200+ pages; measure tree/search/page-render + the deep-search cap.
