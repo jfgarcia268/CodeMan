@@ -792,7 +792,7 @@
       files: [{ p: 'viewer.pdf', m: 'application/pdf', b64: 'AAAA' }],
     });
     t('layer 2 flags <object data> as an unsupported reference form',
-      l2.warnings.some(w => w.level === 'warn' && /viewer\.pdf/.test(w.text) && /isn’t inlined/.test(w.text)), true);
+      l2.warnings.some(w => w.level === 'warn' && /viewer\.pdf/.test(w.text) && /not inlined/.test(w.text)), true);
 
     // LAYER 3 — a file present but never referenced is reported by construction…
     const l3 = bundleHtmlProject({
@@ -811,6 +811,160 @@
 
     t('warnings always carry {level,text}',
       col.warnings.concat(l3.warnings).every(w => (w.level === 'warn' || w.level === 'info') && typeof w.text === 'string'), true);
+  })();
+
+  // mergeHtmlProject — THE normative merge rule. The pinned case is H-1: a merge upload
+  // bringing a different entry used to DELETE the block's existing entry file, because
+  // the old merge iterated files[] only and the entry lives in code/entry.
+  (function () {
+    const ex = { entry: 'index.html', code: 'OLD-ENTRY', files: [{ p: 'style.css', t: 'A' }, { p: 'old.js', t: 'keep' }] };
+    const inc = { entry: 'home.html', code: 'NEW-ENTRY', files: [{ p: 'style.css', t: 'B' }] };
+    const m = mergeHtmlProject(ex, inc);
+
+    // ---- H-1 REGRESSION GUARD: the old entry SURVIVES, demoted, with its text intact
+    t('merge: new entry is the incoming one', m.entry, 'home.html');
+    t('merge: incoming entry text becomes code', m.code, 'NEW-ENTRY');
+    t('H-1: the old entry survives as a regular file', m.files.some(f => f.p === 'index.html'), true);
+    t('H-1: the old entry keeps its TEXT', (m.files.find(f => f.p === 'index.html') || {}).t, 'OLD-ENTRY');
+    t('H-1: the old entry is reported as displaced', m.displaced, ['index.html']);
+    t('merge: a both-sides path is reported as replaced', m.replaced, ['style.css']);
+    t('merge: incoming wins a collision', (m.files.find(f => f.p === 'style.css') || {}).t, 'B');
+    t('merge: an existing-only file survives untouched', (m.files.find(f => f.p === 'old.js') || {}).t, 'keep');
+
+    // INVARIANT: entry must never ALSO sit in files[] — htmlFileList would drop it from
+    // the list while it persisted in the stored JSON.
+    const notInFiles = (r) => r.files.every(f => f.p !== r.entry);
+    t('merge: entry never appears in files (displaced branch)', notInFiles(m), true);
+
+    // same-path entry ⇒ overwritten, so it's `replaced`, NOT `displaced`, and no dupe
+    const same = mergeHtmlProject(ex, { entry: 'index.html', code: 'FRESH', files: [] });
+    t('merge: same entry path ⇒ replaced not displaced', [same.replaced, same.displaced], [['index.html'], []]);
+    t('merge: same entry path ⇒ code is the incoming text', same.code, 'FRESH');
+    t('merge: same entry path leaves no duplicate record', same.files.filter(f => f.p === 'index.html').length, 0);
+    t('merge: entry never appears in files (replaced branch)', notInFiles(same), true);
+
+    // incoming carries a FILE at the old entry's path AND a different entry: the file
+    // overwrite happens first, so it is `replaced` — deterministic and documented.
+    const both = mergeHtmlProject(ex, { entry: 'home.html', code: 'N', files: [{ p: 'index.html', t: 'FROM-UPLOAD' }] });
+    t('merge: file at the old entry path ⇒ replaced, not displaced', [both.replaced, both.displaced], [['index.html'], []]);
+    t('merge: that file\'s incoming text wins', (both.files.find(f => f.p === 'index.html') || {}).t, 'FROM-UPLOAD');
+
+    // merge into an EMPTY block is byte-identical to replace: no prompts, no lists
+    const intoEmpty = mergeHtmlProject({ entry: '', code: '', files: [] }, inc);
+    t('merge into empty ⇒ equals the incoming project', [intoEmpty.entry, intoEmpty.code], ['home.html', 'NEW-ENTRY']);
+    t('merge into empty ⇒ nothing replaced or displaced', [intoEmpty.replaced, intoEmpty.displaced], [[], []]);
+    // `added` lists every path the project didn't have — the new entry included
+    t('merge into empty ⇒ every incoming path is `added`', intoEmpty.added, ['style.css', 'home.html']);
+
+    // A BRAND-NEW block is {entry:'index.html', code:''} — that placeholder must not
+    // make the FIRST upload look like it overwrites a file (regression: a spurious
+    // "overwrites 1 file: index.html" confirm on every new block's first upload).
+    const fresh = mergeHtmlProject({ entry: 'index.html', code: '', files: [] },
+      { entry: 'index.html', code: 'FIRST', files: [{ p: 'style.css', t: 'x' }] });
+    t('merge into a NEW block reports nothing replaced', fresh.replaced, []);
+    t('merge into a NEW block reports nothing displaced', fresh.displaced, []);
+    t('merge into a NEW block takes the incoming entry text', fresh.code, 'FIRST');
+    // …and an empty placeholder entry is never demoted into files either
+    const freshDiff = mergeHtmlProject({ entry: 'index.html', code: '', files: [] },
+      { entry: 'home.html', code: 'FIRST', files: [] });
+    t('an empty placeholder entry is not demoted into files', freshDiff.files, []);
+    t('an empty placeholder entry is not reported as displaced', freshDiff.displaced, []);
+
+    // ordering is deterministic: incoming upload order first, then existing survivors
+    t('merge: incoming order first, then existing survivors',
+      m.files.map(f => f.p), ['style.css', 'old.js', 'index.html']);
+    t('merge: repeated calls are stable',
+      JSON.stringify(mergeHtmlProject(ex, inc)), JSON.stringify(m));
+
+    // paths normalized ⇒ './a.css' and 'a.css' are ONE record, not two
+    const norm = mergeHtmlProject({ entry: 'i.html', code: 'x', files: [{ p: 'a.css', t: '1' }] },
+      { entry: 'i.html', code: 'y', files: [{ p: './a.css', t: '2' }] });
+    t('merge: ./a.css and a.css collide as one record', norm.files.filter(f => f.p === 'a.css').length, 1);
+    t('merge: normalized collision counts as replaced', norm.replaced.indexOf('a.css') !== -1, true);
+
+    // garbage in ⇒ a well-formed empty project out, NEVER a throw
+    const empty = { entry: '', code: '', files: [], replaced: [], displaced: [], added: [] };
+    t('merge(null, null) is well-formed empty', mergeHtmlProject(null, null), empty);
+    t('merge(x, undefined) keeps the existing project',
+      mergeHtmlProject({ entry: 'i.html', code: 'c', files: [] }, undefined).entry, 'i.html');
+    t('merge tolerates a non-array files',
+      mergeHtmlProject({ entry: 'i.html', code: 'c', files: 'nope' }, { entry: 'j.html', code: 'd', files: null }).files.map(f => f.p), ['i.html']);
+    t('merge never throws on garbage', (() => {
+      try { mergeHtmlProject(7, 'x'); return 'ok'; } catch (e) { return 'threw'; }
+    })(), 'ok');
+  })();
+
+  // groupRefWarnings — one banner entry per (tag, attr) FORM, not per reference. A
+  // 5-page site sharing a nav produced 8 near-identical amber lines before this.
+  (function () {
+    const navHits = ['a.html', 'b.html', 'c.html', 'd.html', 'e.html'].map(ref => ({ tag: 'a', attr: 'href', ref }));
+    const g = groupRefWarnings(navHits);
+    t('groupRefWarnings: 5 <a href> hits collapse to ONE entry', g.length, 1);
+    t('groupRefWarnings: <a href> is info level, not a problem', g[0].level, 'info');
+    t('groupRefWarnings: names the first three', /a\.html, b\.html, c\.html/.test(g[0].text), true);
+    t('groupRefWarnings: tails the rest as +N more', /\+2 more/.test(g[0].text), true);
+
+    const mixed = groupRefWarnings(navHits.concat([{ tag: 'object', attr: 'data', ref: 'v.pdf' }]));
+    t('groupRefWarnings: distinct forms stay separate', mixed.length, 2);
+    t('groupRefWarnings: a non-link form is a warn', mixed[1].level, 'warn');
+
+    t('groupRefWarnings: identical triples de-dupe',
+      groupRefWarnings([{ tag: 'a', attr: 'href', ref: 'x.html' }, { tag: 'a', attr: 'href', ref: 'x.html' }])[0].text.match(/x\.html/g).length, 1);
+    t('groupRefWarnings([]) → []', groupRefWarnings([]), []);
+    t('groupRefWarnings(null) → [], never throws', groupRefWarnings(null), []);
+  })();
+
+  // htmlWarnSummary — the banner headline + whether the whole box stays neutral.
+  (function () {
+    const info = [{ level: 'info', text: 'a' }, { level: 'info', text: 'b' }];
+    t('htmlWarnSummary: info-only is infoOnly', htmlWarnSummary(info).infoOnly, true);
+    t('htmlWarnSummary: info-only uses the ⓘ glyph', htmlWarnSummary(info).glyph, 'ⓘ');
+    t('htmlWarnSummary: info-only text counts notes', htmlWarnSummary(info).text, '2 notes');
+    const mixed = [{ level: 'warn', text: 'a' }, { level: 'info', text: 'b' }, { level: 'info', text: 'c' }];
+    t('htmlWarnSummary: any problem ⇒ ⚠ + both counts',
+      [htmlWarnSummary(mixed).glyph, htmlWarnSummary(mixed).text, htmlWarnSummary(mixed).infoOnly],
+      ['⚠', '1 issue · 2 notes', false]);
+    t('htmlWarnSummary: singular/plural', htmlWarnSummary([{ level: 'warn', text: 'a' }]).text, '1 issue');
+    t('htmlWarnSummary([]) is infoOnly', htmlWarnSummary([]).infoOnly, true);
+  })();
+
+  // Bundler behaviour after the layer-2 grouping: a nav is ONE info note, and a
+  // layer-2 ref that resolves to a real project file is marked consumed so layer 3
+  // doesn't report the same file a second time.
+  (function () {
+    const nav = bundleHtmlProject({
+      entry: 'index.html',
+      code: '<nav><a href="about.html">A</a><a href="contact.html">C</a></nav>',
+      files: [{ p: 'about.html', t: '<p>a</p>' }, { p: 'contact.html', t: '<p>c</p>' }],
+    });
+    t('nav links produce exactly ONE warning entry', nav.warnings.length, 1);
+    t('that entry is info level (a preview simply cannot navigate)', nav.warnings[0].level, 'info');
+    t('no layer-3 duplicate for a file reached via <a href>',
+      nav.warnings.filter(w => /never inlined/.test(w.text)).length, 0);
+    // the structural guarantee is INTACT: a file referenced by nothing is still a Problem
+    const orphan = bundleHtmlProject({
+      entry: 'index.html', code: '<nav><a href="about.html">A</a></nav>',
+      files: [{ p: 'about.html', t: '<p>a</p>' }, { p: 'nobody.css', t: 'x{}' }],
+    });
+    t('an unreferenced file is still a layer-3 Problem',
+      orphan.warnings.some(w => w.level === 'warn' && /nobody\.css/.test(w.text) && /never inlined/.test(w.text)), true);
+  })();
+
+  // htmlBundleKey R3 guard: binaries are fingerprinted (head+tail), not length-only, so
+  // swapping in a DIFFERENT same-length asset moves the key and the preview remounts.
+  (function () {
+    const mk = (b64) => ({ entry: 'i.html', code: '<img src="a.png">', files: [{ p: 'a.png', m: 'image/png', b64 }] });
+    const long = (c) => c.repeat(200);
+    t('htmlBundleKey moves on a same-LENGTH different binary',
+      htmlBundleKey(mk(long('A'))) !== htmlBundleKey(mk(long('B'))), true);
+    t('htmlBundleKey still stable for the identical binary',
+      htmlBundleKey(mk(long('A'))), htmlBundleKey(mk(long('A'))));
+  })();
+
+  // htmlEmptyText — the mobile copy must not promise an upload route the UI hides.
+  (function () {
+    t('htmlEmptyText desktop offers the folder upload', /upload a folder/.test(htmlEmptyText(false)), true);
+    t('htmlEmptyText mobile does NOT offer an upload it hides', /upload a folder/.test(htmlEmptyText(true)), false);
   })();
 
   // THE TRAP: the html kind is discriminated by the block.html BOOLEAN. Existing CODE

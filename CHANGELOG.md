@@ -39,6 +39,33 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
 ### Changed
 - Converting a block **away** from an HTML project now asks first when the project holds other
   files, naming them, and reminds you the change can be undone from page History.
+- **Uploading into an HTML project keeps everything.** A second, non-replacing `Upload…` now merges:
+  files the upload doesn't mention are kept, files it does replace are named in a confirmation
+  first, and the project's previous entry file is kept as a regular file rather than being lost. The
+  toast afterwards says what was replaced and what the entry file is now.
+- `⋯ → Replace project…` now asks for confirmation before discarding an existing project.
+- The preview warning banner is quieter and easier to act on: repeated references of the same kind
+  are grouped into a single line, ordinary page-to-page links are reported as a **note** rather than
+  a problem, a banner with only notes is neutral instead of amber, and `+N more` is now a button
+  that reveals the rest instead of just counting them.
+- The HTML file list gained a header showing how much of the 1 MB budget the project uses, and the
+  preview can be resized from `⋯ → Preview height…` (Small / Medium / Large) as well as by dragging.
+- Long `⋯` menus now scroll inside themselves instead of running off the bottom of the screen.
+
+### Fixed
+- **HTML project: the entry file is no longer lost when merging an upload.** Uploading a second
+  folder without choosing "Replace project" silently deleted the project's existing entry HTML.
+- **HTML preview: the preview no longer shrinks when clicked.** Clicking (rather than dragging) a
+  preview shrank it by 2px each time and marked the page as changed; a click now does nothing.
+- A drag-and-drop import that couldn't fully read a folder now says so and asks before importing,
+  instead of quietly importing a partial project.
+- `■ Stop` is disabled while the preview isn't running, and on phones it moves into the `⋯` menu so
+  the block's button row stays readable; `▶`/`■` are now labelled for screen readers.
+- Removing a file from an HTML project is now an obvious delete button with a proper tap target, and
+  the confirmation message names where to recover it from.
+- Cancelling the folder picker no longer leaves an invisible element behind in the page.
+- On phones, the empty-state and editor placeholder no longer suggest a folder upload, which isn't
+  available there.
 
 ### Security
 - The HTML preview runs in an iframe with `sandbox="allow-scripts"` and **no** `allow-same-origin` —

@@ -1377,7 +1377,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 /* ---------- Thin dark scrollbar for source editors + block views ---------- */
 /* Firefox (no overlay problem): thin themed bars everywhere. */
 .code-edit, .code-view,
-.csv-edit, .json-edit, .csv-table-wrap, .json-tree, .json-raw,
+.csv-edit, .json-edit, .csv-table-wrap, .json-tree, .json-raw, .html-files,
 .block.note .code-edit, .block.note .code-view pre, .block.note .code-view table,
 .block.rich .rich-surface pre, .block.rich .rich-surface table {
   scrollbar-width: thin;
@@ -1392,6 +1392,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
    persistent, space-reserving custom bar (defeats the macOS overlay auto-hide). */
 .code-view::-webkit-scrollbar,
 .csv-table-wrap::-webkit-scrollbar, .json-tree::-webkit-scrollbar, .json-raw::-webkit-scrollbar,
+.html-files::-webkit-scrollbar,
 .block.note .code-view pre::-webkit-scrollbar, .block.note .code-view table::-webkit-scrollbar,
 .block.rich .rich-surface pre::-webkit-scrollbar, .block.rich .rich-surface table::-webkit-scrollbar {
   -webkit-appearance: none; width: 8px; height: 8px;
@@ -1970,6 +1971,13 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
   padding: 4px;
   min-width: 180px;
+  /* a long menu (block kinds + actions) scrolls INSIDE itself rather than running off
+     the viewport. showMiniMenu's capture-phase scroll-to-close handler ignores scroll
+     events originating inside the menu — without that companion guard, arrowing down
+     past the visible rows would scroll here and close the menu mid-navigation. */
+  max-height: min(70vh, 520px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .mini-menu-opt { display: flex; align-items: center; gap: 10px; padding: 8px 12px; font-size: 13px; color: var(--text); border-radius: 4px; cursor: pointer; }
 .mini-menu-opt:hover { background: var(--accent-2); }
@@ -2138,6 +2146,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .html-warn-head { margin-top: 6px; font-weight: 600; opacity: .9; }
 /* Notes (routine collapses, CSP heuristics) read as informational, not as a failure */
 .html-warn .html-warn-note, .html-warn .html-warn-note li { color: var(--text-dim); }
+/* …and when EVERYTHING in the banner is a note, the whole box drops out of amber —
+   a nav that can't navigate in a single-document preview isn't a problem. */
+.html-warn.html-warn-info {
+  color: var(--text-dim); background: rgba(255,255,255,.03); border-color: var(--border-2);
+}
+.html-warn-more { margin-top: 6px; font-size: 11px; padding: 2px 8px; }
 .html-frame-wrap {
   position: relative; resize: vertical; overflow: hidden;
   border: 1px solid var(--border-2); border-radius: 6px; background: #fff;
@@ -2147,10 +2161,22 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .html-poster {
   position: absolute; inset: 0; display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: 8px;
-  background: var(--bg-2, #252526); color: var(--text-dim);
+  background: var(--panel); color: var(--text-dim);
 }
 .html-poster-cap { font-size: 12px; font-family: "SF Mono", Menlo, Consolas, monospace; }
-.html-files { margin-top: 8px; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; }
+/* A long project scrolls its own list instead of pushing the preview off screen.
+   Deliberately NO overscroll-behavior here (unlike the menu) so the page keeps
+   scrolling once the list bottoms out. */
+.html-files {
+  margin-top: 8px; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px;
+  max-height: 320px; overflow-y: auto;
+}
+.html-files-head {
+  position: sticky; top: 0; z-index: 1; background: var(--panel);
+  padding: 3px 4px; font-size: 11.5px; color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+}
+.html-files-head.over-soft { color: var(--warn-text); }
 .html-file-row {
   display: flex; align-items: center; gap: 10px;
   padding: 2px 4px; border-radius: 4px; color: var(--text-dim);
@@ -2159,7 +2185,13 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .html-file-row.is-entry { color: var(--text); }
 .html-file-path { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .html-file-size { flex: 0 0 auto; opacity: .75; }
-.html-file-entry, .html-file-del { flex: 0 0 auto; font-size: 11px; padding: 1px 6px; }
+/* the ⌁ entry marker gets its own fixed cell (empty on other rows) so every path in
+   the list starts at the same left edge */
+.html-file-mark { flex: 0 0 auto; width: 1.1em; text-align: center; }
+/* Remove is a real tap target and reads as destructive (button.danger is neutral at
+   rest, red on hover/focus) — it used to be a 20×14 button styled like "Make entry". */
+.html-file-del { flex: 0 0 auto; min-width: 24px; min-height: 24px; padding: 2px 7px; font-size: 12px; }
+.html-file-entry { flex: 0 0 auto; min-height: 24px; padding: 2px 8px; font-size: 12px; }
 .html-empty { color: var(--text-dim); font-size: 13px; font-style: italic; padding: 4px 0; }
 .block.html.drop-active .html-view { outline: 2px dashed var(--accent-2); outline-offset: 2px; }
 
@@ -2368,9 +2400,17 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   body.is-mobile .block-toolbar .block-copy,
   body.is-mobile .block-toolbar .block-overflow,
   body.is-mobile .block-toolbar .tree-toggle,
+  body.is-mobile .block-toolbar .html-run,
+  body.is-mobile .block-toolbar .html-stop,
   body.is-mobile .block-toolbar .danger {
     min-width: 34px; justify-content: center; padding: 5px 6px;
   }
+  /* ■ Stop folds into the ⋯ menu on mobile so the html row stays five controls
+     (✎ ▶ ⧉ ⋯ ✕) — it is still reachable, never removed. */
+  body.is-mobile .block-toolbar .html-stop { display: none; }
+  /* file-row buttons get the same comfortable tap target as the toolbar icons */
+  body.is-mobile .html-file-del,
+  body.is-mobile .html-file-entry { min-width: 34px; min-height: 32px; }
   /* lang picker: let it shrink so it doesn't hog the row */
   body.is-mobile .block-toolbar .lang-picker-btn { min-width: 0; max-width: 130px; }
 

@@ -15,10 +15,10 @@ and reports against this matrix); UI/usability passes are run by the
 
 1. **Automated suites first** (fast, deterministic):
    - **Client units** — open `codeman/tests.html` in a browser. Expect the summary
-     **"N passed, 0 failed"** (currently 343). `window.__testResult = {pass, fail, done}` for
+     **"N passed, 0 failed"** (currently 506). `window.__testResult = {pass, fail, done}` for
      scripting (`done` flips true after the async offline tests finish).
    - **Server API** — `bash codeman/tests-api.sh` (spins a throwaway `php -S` against a temp data
-     dir; exit 0 = all green; currently 114). Override port: `bash codeman/tests-api.sh 8099` —
+     dir; exit 0 = all green; currently 118). Override port: `bash codeman/tests-api.sh 8099` —
      a taken port is skipped automatically (bounded upward hunt), so parallel runs stay green.
    - **CI enforces both** on every push/PR: `.github/workflows/tests.yml` runs `tests-api.sh`
      (`api-tests` job), tests.html headless via Playwright + `php -S`
@@ -357,7 +357,11 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
 - TC-html-10 (P): entry-text **Edit → Save → reload persists**; the file list `✕` removes a
   non-entry file; `⌁`/"Make entry" swaps the entry (old entry pushed back into `files`); the
   preview height drag persists (`htmlH`). Every one of these marks the page dirty.
-  **[auto: tests.html setHtmlEntry + the scheduleSave dirty-guard]**
+  The **file list** carries a sticky `N files · X of 1 MB` header (amber past 256 KB), the `⌁`
+  entry marker sits in its **own column** so every path shares a left edge, and Remove is a
+  **`danger`** button ≥24×24 (neutral at rest, red on hover/focus) whose toast names the recovery
+  path ("restore from page History"). Removal is deliberately **modal-free**, like every other
+  content delete. **[auto: tests.html setHtmlEntry + the scheduleSave dirty-guard]**
 - TC-html-11 (P): `▶ Run` / `↻ Reload` / `■ Stop`; a **running** preview re-mounts immediately after
   a re-render (no "click ▶ again"); a first-view block mounts on scroll-into-view.
 - TC-html-12 (P): duplicate block / section / page deep-copies the whole project (the copy's
@@ -372,14 +376,38 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   `b64` blob does NOT match `search_content`, while the same word in the entry HTML does.
   **[auto: tests-api.sh b64 strip, fast path + decoded fallback]**
 - TC-html-15 (P): toolbar/⋯ parity — `type-menu` and Duplicate are reachable **only** through the
-  `⋯` menu at both widths; mobile shows the icon swaps (`✎ ✓ ⧉ ✕`, label on its own row) and
-  **`Upload…` is hidden** (iOS Safari has no folder picker).
+  `⋯` menu at both widths; the **mobile row is exactly five controls — `✎ ▶ ⧉ ⋯ ✕`** — each on the
+  34×32 square footprint, label on its own row, with **`■ Stop` folded into `⋯`** (hidden, never
+  removed) and **`Upload…` hidden** (iOS Safari has no folder picker). `■` is `disabled` while the
+  preview is idle; `▶`/`■` carry `aria-label`s. The mobile empty-state copy does **not** offer a
+  folder upload. **[auto: tests.html htmlEmptyText]**
 - TC-html-16 (A): converting **away** from an html block that owns other files shows a confirm
   naming the count + files ("the entry HTML is kept"); with `files.length === 0` it converts with no
   prompt. **[auto: tests.html convertBlock]**
 - TC-html-17 (E): **the discriminator is `block.html === true`** — an existing **code** block whose
   language is `html` must still render as a code block, never as a project block.
   **[auto: tests.html blockKind — regression guard]**
+- TC-html-18 (A): **a merge upload never loses the existing entry.** Upload folder A
+  (`index.html` + `style.css`), then a **non-replace** `Upload…` of folder B (`home.html` +
+  `style.css`). A confirm names `style.css` as overwritten; on OK the file list shows
+  **`index.html` as a regular file with its ORIGINAL content**, `home.html` as the entry, and B's
+  `style.css`; the toast reads `… · 1 replaced · entry is now home.html (index.html kept as a
+  file)`. **Cancelling at the confirm leaves the block byte-identical** (nothing saved). Separately,
+  `⋯ → Replace project…` on a non-empty block asks first and names the file count; cancel ⇒ no
+  picker, no change. **[auto: tests.html mergeHtmlProject — H-1 regression guard]**
+- TC-html-19 (A): **a click is not a drag.** Click (do not drag) a preview 10×, forcing a
+  re-render between each. The stored height stays put — **no drift toward the 120px minimum** — and
+  the clicks do **not** mark the page dirty (no history churn). A real drag still persists `htmlH`.
+- TC-html-20 (P): **the warning banner is proportionate.** A project whose 5 pages share a nav
+  produces **one info-level Notes entry** (not one line per link), the banner renders **neutral
+  `ⓘ`, not amber**, and there are **no layer-3 duplicates** for files reached via `<a href>`. A
+  genuinely orphaned file still appears under **Problems** and turns the banner amber.
+  **[auto: tests.html groupRefWarnings/htmlWarnSummary + bundler behaviour]**
+- TC-html-21 (P): a banner with **>12 entries** shows a `+N more` **focusable button**; activating
+  it reveals the tail in place, and **Problems still precede Notes** after expansion.
+- TC-html-22 (P): `⋯ → Preview height…` offers Small/Medium/Large with the current one **checked**;
+  picking one resizes the box **without restarting a running demo**, persists across reload, and all
+  three are reachable at phone width.
 
 **Known limits (expected behavior, not bugs):**
 - TC-html-L1: **find & replace rewrites only the entry file** (`block.code`); the other project
@@ -637,6 +665,21 @@ say so in the report rather than implying full coverage.**
 - TC-ext-html-norestart (HTML block, run state): scroll a long page past a **running** demo and back
   — the demo is still running (or restarts immediately without a ▶ click), never stuck on the idle
   poster. *Why:* timing/scroll-dependent, awkward to automate.
+- TC-ext-html-partial (HTML block, incomplete drag-drop): drag-drop a folder of >100 entries from a
+  source whose directory reader errors mid-page — the import must stop and ask
+  ("Some folders couldn't be fully read… Import anyway?"), and cancelling imports **nothing**.
+  *Why:* the reader error is hard to force reliably; run as code inspection of
+  `collectDroppedFiles`'s `partial` flag plus an instrumented case that stubs `readEntries`.
+- TC-ext-menu-scroll (`.mini-menu` overflow, GLOBAL blast radius): open a **12+ row** `⋯` menu (the
+  html block's, and the block-kind menu) at **1440×600** and **390×700**. The menu scrolls
+  **internally** (≤70vh) instead of running off the viewport, the upward flip near the bottom edge
+  still lands correctly, and — the companion guard — **ArrowDown to the LAST item does NOT close
+  the menu**. Sweep every menu that shares the component: block-kind ×3, section `⋯`, tags,
+  colsort, page-header `⋯`, sidebar More, Export submenu, Copy-as submenu. *Why:* one shared
+  component, many call sites; a regression here is app-wide.
+- TC-ext-html-desktop (packaged desktop build): the same `.mini-menu` internal scrolling +
+  keyboard nav, and the `⋯ → Preview height…` presets, behave identically in the packaged
+  Electron app. *Why:* needs a packaged build.
 - TC-ext-mobile (real device): iOS/Android touch, drag, pinch/zoom-lock, standalone-PWA top inset,
   `manifest.webmanifest` install. *Why:* emulated viewport ≠ a real device.
 - TC-ext-perf (scale): seed ~1200+ pages; measure tree/search/page-render + the deep-search cap.

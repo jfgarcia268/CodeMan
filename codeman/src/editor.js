@@ -1261,15 +1261,18 @@ function htmlCapCheck(entries, limits) {
 
 // FNV-1a 32-bit over a canonical descriptor of the STORED content (entry path + entry
 // text + each file's path and body). Label / htmlH deliberately don't move the key.
-// Binaries hash by base64 LENGTH only — cheap, and safe because every explicit
-// mutation calls remountFrame() directly (see the htmlRunState rule).
+// Binaries hash by base64 length PLUS a bounded head/tail fingerprint (≤128 chars per
+// file regardless of asset size), so a same-length replacement of a different binary
+// moves the key with overwhelming probability instead of silently reusing run state.
 function htmlBundleKey(block) {
   const b = block || {};
   const parts = [normalizeHtmlPath(b.entry || ''), String(b.code || '')];
   (Array.isArray(b.files) ? b.files : []).forEach(f => {
     if (!f) return;
     parts.push(normalizeHtmlPath(f.p || ''));
-    parts.push(typeof f.b64 === 'string' ? 'b' + f.b64.length : 't' + String(f.t || ''));
+    parts.push(typeof f.b64 === 'string'
+      ? 'b' + f.b64.length + ':' + f.b64.slice(0, 64) + f.b64.slice(-64)
+      : 't' + String(f.t || ''));
   });
   const s = parts.join('');
   let h = 0x811c9dc5;
@@ -1279,6 +1282,154 @@ function htmlBundleKey(block) {
   }
   return h.toString(16);
 }
+
+// Merge an incoming uploaded project over an existing one. THE normative merge rule:
+// nothing the block already held is ever deleted — an old entry the upload doesn't
+// overwrite is DEMOTED to a regular file, not dropped.
+//
+// Returns {entry, code, files, replaced[], displaced[], added[]}:
+//   replaced  — paths present on BOTH sides (incoming won; the old bytes are only
+//               recoverable from page History, so the caller confirms first)
+//   displaced — the old entry, demoted to a plain file because the new entry differs
+//   added     — paths the project didn't have before
+//
+// INVARIANT: the returned `entry` NEVER also appears in `files` — htmlFileList drops a
+// duplicated entry from the list, so it would persist in the JSON while being invisible.
+// Pure, DOM-free, and NEVER throws (the parseCsv / parseJsonSafe contract).
+function mergeHtmlProject(existing, incoming) {
+  try {
+    const norm = (o) => {
+      const b = (o && typeof o === 'object') ? o : {};
+      return {
+        entry: normalizeHtmlPath(b.entry || ''),
+        code: String(b.code == null ? '' : b.code),
+        files: (Array.isArray(b.files) ? b.files : []).filter(f => f && typeof f === 'object'),
+      };
+    };
+    const ex = norm(existing), inc = norm(incoming);
+
+    // 1. Materialize the EXISTING project into one flat path→record map — INCLUDING
+    //    the existing entry as an ordinary record. That inclusion IS the H-1 fix: the
+    //    old merge iterated files[] only, so the entry was never a merge candidate and
+    //    was silently lost.
+    const map = Object.create(null);
+    const exOrder = [];
+    ex.files.forEach(f => {
+      const p = normalizeHtmlPath(f.p || '');
+      if (!p || map[p]) return;
+      map[p] = f; exOrder.push(p);
+    });
+    // …but only when that entry actually HOLDS something. A brand-new block is
+    // {entry:'index.html', code:''}: materializing that placeholder would make the very
+    // first upload look like it overwrites a file, and merge-into-empty must be
+    // byte-identical to replace — no prompt, no displaced entry. An empty entry has
+    // nothing to preserve, so there is nothing to report either way.
+    if (ex.entry && ex.code && !map[ex.entry]) { map[ex.entry] = { p: ex.entry, t: ex.code }; exOrder.push(ex.entry); }
+    const before = Object.create(null);
+    exOrder.forEach(p => { before[p] = true; });
+
+    // 2. Overlay the incoming records by normalized path — incoming wins every collision.
+    const replaced = [], added = [], incOrder = [];
+    const overlay = (p, rec) => {
+      if (!p) return;
+      if (incOrder.indexOf(p) === -1) incOrder.push(p);
+      if (before[p]) { if (replaced.indexOf(p) === -1) replaced.push(p); }
+      else if (added.indexOf(p) === -1) added.push(p);
+      map[p] = rec;
+    };
+    inc.files.forEach(f => overlay(normalizeHtmlPath(f.p || ''), f));
+    if (inc.entry) overlay(inc.entry, { p: inc.entry, t: inc.code });
+
+    // 3. The new entry is the incoming one (falling back to the existing entry when the
+    //    incoming project has none). An old entry that survives untouched is demoted.
+    const entry = inc.entry || ex.entry;
+    const displaced = [];
+    if (ex.entry && entry !== ex.entry && map[ex.entry] && replaced.indexOf(ex.entry) === -1) {
+      displaced.push(ex.entry);
+    }
+
+    // 4/5. Rematerialize. Deterministic order — incoming records in upload order first,
+    //      then existing-only survivors in their original files[] order — so a repeated
+    //      merge produces a stable htmlBundleKey and no spurious remount.
+    const files = [], emitted = Object.create(null);
+    const emit = (p) => {
+      if (!p || p === entry || emitted[p] || !map[p]) return;
+      emitted[p] = true;
+      files.push(Object.assign({}, map[p], { p }));
+    };
+    incOrder.forEach(emit);
+    exOrder.forEach(emit);
+
+    const rec = entry ? map[entry] : null;
+    return { entry, code: rec ? String(rec.t == null ? '' : rec.t) : '', files, replaced, displaced, added };
+  } catch (e) {
+    return { entry: '', code: '', files: [], replaced: [], displaced: [], added: [] };
+  }
+}
+
+// Group the bundler's layer-2 census hits (unhandled ref-bearing attributes) into ONE
+// warning per (tag, attr) form instead of one per reference — a 5-page site sharing a
+// nav emitted 8 near-identical lines. <a href> is INFO: a single-document preview
+// simply can't navigate, which is expected, not broken. Never throws.
+function groupRefWarnings(hits) {
+  try {
+    const groups = [], byKey = Object.create(null), seen = Object.create(null);
+    (Array.isArray(hits) ? hits : []).forEach(h => {
+      if (!h) return;
+      const tag = String(h.tag == null ? '' : h.tag).toLowerCase();
+      const attr = String(h.attr == null ? '' : h.attr).toLowerCase();
+      const ref = String(h.ref == null ? '' : h.ref);
+      if (!tag || !attr || !ref) return;
+      const trip = tag + '|' + attr + '|' + ref;
+      if (seen[trip]) return;                    // de-dupe identical triples
+      seen[trip] = true;
+      const key = tag + '|' + attr;
+      if (!byKey[key]) { byKey[key] = { tag, attr, refs: [] }; groups.push(byKey[key]); }
+      byKey[key].refs.push(ref);
+    });
+    return groups.map(g => {
+      const n = g.refs.length;
+      const shown = g.refs.slice(0, 3).join(', ') + (n > 3 ? ' +' + (n - 3) + ' more' : '');
+      const info = (g.tag === 'a' && g.attr === 'href');
+      return {
+        level: info ? 'info' : 'warn',
+        text: '<' + g.tag + ' ' + g.attr + '> — ' + n + (info ? ' link' : ' reference') + (n === 1 ? '' : 's')
+          + (info ? ' to project files; the single-document preview can’t navigate: '
+                  : ' not inlined; they won’t load in the preview: ')
+          + shown,
+      };
+    });
+  } catch (e) { return []; }
+}
+
+// Headline for the warning banner: what to say and how loudly. infoOnly (nothing above
+// 'info') keeps the banner neutral so a routine collapse doesn't read as a failure.
+function htmlWarnSummary(warnings) {
+  const list = (Array.isArray(warnings) ? warnings : []).filter(Boolean);
+  const notes = list.filter(w => w.level === 'info').length;
+  const issues = list.length - notes;
+  const label = (c, word) => c + ' ' + word + (c === 1 ? '' : 's');
+  const parts = [];
+  if (issues) parts.push(label(issues, 'issue'));
+  if (notes) parts.push(label(notes, 'note'));
+  return { glyph: issues ? '⚠' : 'ⓘ', text: parts.join(' · '), infoOnly: !issues };
+}
+
+// Empty-state copy. Mobile has no folder picker (.html-upload is display:none there),
+// so the mobile wording must not promise a route the UI hides.
+function htmlEmptyText(isMobile) {
+  return isMobile
+    ? 'Empty — edit the entry HTML to get started. Folder upload needs a desktop browser.'
+    : 'Empty — upload a folder or edit the entry HTML.';
+}
+
+// Discrete height presets for the ⋯ → "Preview height…" submenu (design §12.2's
+// fallback, shipped alongside the drag rather than instead of it).
+const HTML_H_PRESETS = [
+  { label: 'Small', px: 240 },
+  { label: 'Medium', px: HTML_DEFAULT_H },
+  { label: 'Large', px: 560 },
+];
 
 // Parse a srcset value into candidates. A srcset is a comma-separated list of
 // "<url> [descriptor]" — and URLs may THEMSELVES contain commas ("photo,v2.jpg 2x"),
@@ -1552,6 +1703,17 @@ function bundleHtmlProject(block) {
     // Any HTML_REF_ATTRS attribute still holding a RELATIVE value, on a (tag, attr)
     // pair the rewrite table doesn't cover, is reported — <object data>, <embed src>,
     // <track src>, <form action>, <a href>, style="…url(…)…" and friends.
+    // Hits are COLLECTED, not warned inline: groupRefWarnings folds them into one entry
+    // per form, so a 5-page site sharing a nav gets one note instead of eight lines.
+    const refHits = [];
+    const noteRef = (tag, attr, ref) => {
+      warnedRef[ref] = true;
+      refHits.push({ tag, attr, ref });
+      // A ref that resolves to a REAL project file is now accounted for here, so
+      // layer 3 must not report the same file a second time as "never inlined".
+      const p = resolveHtmlPath(entryDir, ref);
+      if (p && map[p]) consumed[p] = true;
+    };
     html.replace(/<([a-zA-Z][a-zA-Z0-9-]*)\b([^>]*)>/g, (m0, tag, attrs) => {
       const t = tag.toLowerCase();
       HTML_REF_ATTRS.forEach(name => {
@@ -1560,19 +1722,18 @@ function bundleHtmlProject(block) {
         if (!m) return;
         const val = (m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2] : m[3]) || '';
         if (!val || isAbsoluteRef(val) || /^data:/i.test(val) || warnedRef[val]) return;
-        warnedRef[val] = true;
-        warn('<' + t + ' ' + name + '="' + val + '"> — this reference form isn’t inlined; it will not load in the preview.');
+        noteRef(t, name, val);
       });
       const sm = attrs.match(/\sstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
       const sv = sm ? (sm[1] !== undefined ? sm[1] : sm[2]) : '';
       const um = sv ? sv.match(/url\(\s*['"]?([^'")]+)/i) : null;
       const uref = um ? um[1].trim() : '';
       if (uref && !isAbsoluteRef(uref) && !/^data:/i.test(uref) && !warnedRef[uref]) {
-        warnedRef[uref] = true;
-        warn('style="…url(' + uref + ')…" — inline style references aren’t inlined; it will not load in the preview.');
+        noteRef(t, 'style', uref);
       }
       return m0;
     });
+    groupRefWarnings(refHits).forEach(w => warnings.push(w));
 
     // ---- Layer 3: unconsumed-file audit (the structural guarantee) ----------------
     // Whitelist-free and forward-proof: a file sitting in the project that the bundler
@@ -1806,7 +1967,17 @@ function showMiniMenu(anchorEl, items, opts = {}) {
   if (anchorEl) { if (!anchorEl.hasAttribute('aria-haspopup')) anchorEl.setAttribute('aria-haspopup', 'menu'); anchorEl.setAttribute('aria-expanded', 'true'); }
   let closed = false;
   const off = (e) => { if (!menu.contains(e.target) && e.target !== anchorEl) close(false); };
-  const onScroll = () => close(false);
+  // Scrolling the PAGE dismisses the menu (the anchor moves out from under it) — but the
+  // menu itself is now scrollable (.mini-menu max-height), and arrowing down past the
+  // visible rows scrolls it. That inner scroll is captured here too, so without this
+  // guard keyboard navigation would close the menu on the way to the last item.
+  // (the target is a Node for a real element/document scroll, but `window` for a
+  // synthesized window-dispatched one — Node.contains THROWS on a non-Node)
+  const onScroll = (e) => {
+    const tgt = e && e.target;
+    if (tgt && tgt.nodeType && menu.contains(tgt)) return;
+    close(false);
+  };
   function close(restoreFocus) {
     if (closed) return; closed = true;
     menu.remove();
@@ -3238,8 +3409,10 @@ function renderJsonBlock(block, parentArray, idx) {
 // htmlBundleKey → 'running' | 'stopped'. Absent = never mounted, so the preview waits
 // for the block to scroll into view. renderPage() rewrites #page wholesale, so a live
 // iframe can't survive it — the guarantee is over RUN STATE, not DOM state.
-// RULE: any files[] mutation must call remountFrame() directly — binaries hash by
-// path + base64 LENGTH only, so a same-length replace won't move the key.
+// RULE: any content mutation goes through the block's refreshAfterMutation(), which
+// carries THIS render's run state forward explicitly and rebuilds the view exactly
+// once. htmlBundleKey moving is no longer the enforcement mechanism (it fingerprints
+// binaries now, but the explicit carry is what makes correctness independent of it).
 const htmlRunState = new Map();
 function setHtmlRunState(key, state) {
   htmlRunState.delete(key);                 // re-insert so the FIFO order is recency
@@ -3298,7 +3471,9 @@ function renderHtmlBlock(block, parentArray, idx) {
   textarea.spellcheck = false;
   textarea.setAttribute('autocapitalize', 'off');
   textarea.setAttribute('autocorrect', 'off');
-  textarea.placeholder = 'Entry HTML — upload a folder, or write it here.\n<!DOCTYPE html>\n<html>…</html>';
+  // mobile has no folder picker (.html-upload is hidden there) — don't offer the route
+  textarea.placeholder = (isMobile ? 'Entry HTML — write it here.' : 'Entry HTML — upload a folder, or write it here.')
+    + '\n<!DOCTYPE html>\n<html>…</html>';
 
   const view = document.createElement('div');
   view.className = 'html-view';
@@ -3312,6 +3487,10 @@ function renderHtmlBlock(block, parentArray, idx) {
   /* ----- preview mount / unmount (run state, never renderPage) ----- */
 
   let frameWrap = null, poster = null, frame = null, observer = null;
+  // THIS render's run state — the authority while the block is on screen. htmlRunState
+  // stays the authority only ACROSS renderPage() rebuilds, where the closure is gone.
+  let myState;
+  let lastWarnings = [];        // what renderView last put in the banner
 
   function mountFrame() {
     if (!frameWrap || frame) return;
@@ -3328,47 +3507,72 @@ function renderHtmlBlock(block, parentArray, idx) {
     frame.setAttribute('title', 'HTML preview' + (block.label ? ': ' + block.label : ''));
     frame.srcdoc = bundleHtmlProject(block).html;
     frameWrap.appendChild(frame);
+    myState = 'running';
     setHtmlRunState(htmlBundleKey(block), 'running');
     syncRunBtn();
   }
   function unmountFrame() {
     if (frame) { frame.remove(); frame = null; }
     if (poster) poster.style.display = '';
+    myState = 'stopped';
     setHtmlRunState(htmlBundleKey(block), 'stopped');
     syncRunBtn();
   }
-  // Any content mutation must call this directly — htmlBundleKey hashes binaries by
-  // length only, so a same-length replace wouldn't move the key on its own.
-  function remountFrame() {
-    const wasRunning = !!frame;
+  // THE seam for every content mutation (upload, entry change, file remove, save,
+  // revert). Replaces the old `renderView(); remountFrame();` pairs, which mounted the
+  // iframe twice and made "remember to remount" the only thing keeping run state right.
+  // Deliberately does NOT call scheduleSave() — each caller keeps its own explicit call
+  // so the dirty choke point stays visible at the mutation site.
+  function refreshAfterMutation() {
+    const carry = frame ? 'running' : myState;   // undefined stays undefined → observer re-arms
     if (frame) { frame.remove(); frame = null; }
-    if (wasRunning) mountFrame(); else { if (poster) poster.style.display = ''; syncRunBtn(); }
+    const key = htmlBundleKey(block);
+    if (carry) setHtmlRunState(key, carry); else htmlRunState.delete(key);
+    renderView();                                // consults that state and mounts at most ONCE
+    // Announce the banner's state on ACTION-DRIVEN re-renders only. The banner itself is
+    // a role="region" (silent at rest) precisely so three html blocks don't fire three
+    // live-region announcements every time a page is opened.
+    if (lastWarnings.length) {
+      const s = htmlWarnSummary(lastWarnings);
+      toast(s.glyph + ' ' + s.text);
+    }
   }
 
-  const runBtn = mkBtn('▶', () => { if (frame) remountFrame(); else mountFrame(); });
+  function reloadFrame() { if (frame) { frame.remove(); frame = null; } mountFrame(); }
+  const runBtn = mkBtn('▶', () => { if (frame) reloadFrame(); else mountFrame(); });
   runBtn.className = 'secondary html-run';
   function syncRunBtn() {
     runBtn.textContent = frame ? '↻' : '▶';
     runBtn.title = frame ? 'Reload preview' : 'Run preview';
+    runBtn.setAttribute('aria-label', runBtn.title);
+    stopBtn.disabled = !frame;                   // nothing to stop while idle
   }
   const stopBtn = mkBtn('■', () => unmountFrame());
   stopBtn.className = 'secondary html-stop';
   stopBtn.title = 'Stop preview';
+  stopBtn.setAttribute('aria-label', 'Stop preview');
 
   /* ----- the view: warnings + frame + file list ----- */
 
-  function renderWarnings(warnings) {
+  // The banner. `budget` caps the rendered list so a pathologically broken project can't
+  // produce a banner taller than the preview; the "+N more" button re-renders the same
+  // box with an unlimited budget, so the tail is REACHABLE rather than merely counted.
+  // Truncation priority (Problems before Notes) is preserved exactly.
+  function renderWarnings(warnings, budgetIn) {
     if (!warnings.length) return null;
     const problems = warnings.filter(w => w.level !== 'info');
     const notes = warnings.filter(w => w.level === 'info');
+    const sum = htmlWarnSummary(warnings);
     const box = document.createElement('div');
-    box.className = 'html-warn';
+    box.className = 'html-warn' + (sum.infoOnly ? ' html-warn-info' : '');
+    // role=region (NOT status): a live region present at render would announce on every
+    // page open. Change announcements go through toast() in refreshAfterMutation.
+    box.setAttribute('role', 'region');
+    box.setAttribute('aria-label', 'Preview notes: ' + sum.text);
     const head = document.createElement('div');
-    head.textContent = '⚠ ' + warnings.length + ' preview note' + (warnings.length > 1 ? 's' : '');
+    head.textContent = sum.glyph + ' ' + sum.text;
     box.appendChild(head);
-    // cap the rendered list so a pathologically broken project can't produce a banner
-    // taller than the preview itself
-    let budget = 12;
+    let budget = budgetIn === undefined ? 12 : budgetIn;
     const addList = (items, cls, title) => {
       if (!items.length || budget <= 0) return;
       const h = document.createElement('div');
@@ -3386,10 +3590,13 @@ function renderHtmlBlock(block, parentArray, idx) {
     };
     addList(problems, '', 'Problems');
     addList(notes, 'html-warn-note', 'Notes');
-    const shown = Math.min(12, warnings.length);
+    const shown = Math.min(budgetIn === undefined ? 12 : budgetIn, warnings.length);
     if (warnings.length > shown) {
-      const more = document.createElement('div');
-      more.textContent = '+' + (warnings.length - shown) + ' more';
+      const more = mkBtn('+' + (warnings.length - shown) + ' more', () => {
+        const full = renderWarnings(warnings, Infinity);
+        if (full && box.parentNode) box.parentNode.replaceChild(full, box);
+      });
+      more.className = 'secondary html-warn-more';
       box.appendChild(more);
     }
     return box;
@@ -3399,23 +3606,35 @@ function renderHtmlBlock(block, parentArray, idx) {
     const rows = htmlFileList(block);
     const wrap = document.createElement('div');
     wrap.className = 'html-files';
+    // Size header — what the project costs against the 1 MB cap, before you hit it.
+    const size = htmlProjectSize(block);
+    const head = document.createElement('div');
+    head.className = 'html-files-head' + (size.bytes > HTML_SOFT_WARN ? ' over-soft' : '');
+    head.textContent = rows.length + ' file' + (rows.length === 1 ? '' : 's') + ' · '
+      + htmlBytesLabel(size.bytes) + ' of ' + htmlBytesLabel(HTML_MAX_TOTAL);
+    wrap.appendChild(head);
     rows.forEach(r => {
       const row = document.createElement('div');
       row.className = 'html-file-row' + (r.isEntry ? ' is-entry' : '');
+      // the entry marker is its OWN cell (rendered empty on other rows) so every path
+      // shares one left edge instead of the entry's text being indented by the glyph
+      const mark = document.createElement('span');
+      mark.className = 'html-file-mark';
+      mark.textContent = r.isEntry ? '⌁' : '';
+      if (r.isEntry) mark.title = 'Entry file';
       const name = document.createElement('span');
       name.className = 'html-file-path';
-      name.textContent = (r.isEntry ? '⌁ ' : '') + r.p;          // all cells via textContent
-      const size = document.createElement('span');
-      size.className = 'html-file-size';
-      size.textContent = htmlBytesLabel(r.bytes);
-      row.append(name, size);
+      name.textContent = r.p;                                    // all cells via textContent
+      const sz = document.createElement('span');
+      sz.className = 'html-file-size';
+      sz.textContent = htmlBytesLabel(r.bytes);
+      row.append(mark, name, sz);
       if (!r.isEntry && /\.(html|htm)$/i.test(r.p)) {
         const mk = mkBtn('Make entry', () => {
           setHtmlEntry(block, r.p);
           textarea.value = block.code || '';
           scheduleSave();
-          renderView();
-          remountFrame();
+          refreshAfterMutation();
           toast('Entry set to ' + r.p);
         });
         mk.className = 'secondary html-file-entry';
@@ -3423,16 +3642,18 @@ function renderHtmlBlock(block, parentArray, idx) {
       }
       if (!r.isEntry) {
         // no modal — page History is the safety net, same as removing any other content
+        // (block, section, checklist item). The affordance carries the weight instead:
+        // a `danger` button, a real tap target, and a toast naming the recovery path.
         const rm = mkBtn('✕', () => {
           const i = block.files.findIndex(f => f && normalizeHtmlPath(f.p || '') === r.p);
           if (i !== -1) block.files.splice(i, 1);
           scheduleSave();
-          renderView();
-          remountFrame();
-          toast('Removed ' + r.p);
+          refreshAfterMutation();
+          toast('Removed ' + r.p + ' — restore from page History');
         });
-        rm.className = 'secondary html-file-del';
+        rm.className = 'danger html-file-del';
         rm.title = 'Remove ' + r.p;
+        rm.setAttribute('aria-label', 'Remove ' + r.p);
         row.appendChild(rm);
       }
       wrap.appendChild(row);
@@ -3444,13 +3665,15 @@ function renderHtmlBlock(block, parentArray, idx) {
     if (observer) { observer.disconnect(); observer = null; }
     frame = null;
     view.innerHTML = '';
+    myState = htmlRunState.get(htmlBundleKey(block));
+    lastWarnings = [];
     const hasEntry = !!(block.code || '').trim();
     const files = htmlFileList(block);
 
     if (!hasEntry && !block.files.length) {
       const empty = document.createElement('div');
       empty.className = 'html-empty';
-      empty.textContent = 'Empty — upload a folder or edit the entry HTML.';
+      empty.textContent = htmlEmptyText(isMobile);
       view.appendChild(empty);
       syncRunBtn();
       return;
@@ -3461,6 +3684,7 @@ function renderHtmlBlock(block, parentArray, idx) {
     if (!hasEntry) {
       warnings.unshift({ level: 'warn', text: 'No entry file — pick one with “Make entry”, or edit the entry HTML.' });
     }
+    lastWarnings = warnings;
     const warnBox = renderWarnings(warnings);
     if (warnBox) view.appendChild(warnBox);
 
@@ -3477,17 +3701,19 @@ function renderHtmlBlock(block, parentArray, idx) {
       play.addEventListener('click', () => mountFrame());
       const cap = document.createElement('div');
       cap.className = 'html-poster-cap';
+      // The poster is a STOPPED state — say what pressing ▶ will actually do, and that
+      // it runs sandboxed with no network access, rather than repeating a file stat line.
       cap.textContent = (normalizeHtmlPath(block.entry || '') || 'index.html')
-        + ' · ' + files.length + ' file' + (files.length === 1 ? '' : 's');
+        + ' · ' + files.length + ' file' + (files.length === 1 ? '' : 's')
+        + ' · runs sandboxed, no network access';
       poster.append(play, cap);
       frameWrap.appendChild(poster);
       view.appendChild(frameWrap);
       wireResize(frameWrap);
 
-      const state = htmlRunState.get(htmlBundleKey(block));
-      if (state === 'running') {
+      if (myState === 'running') {
         mountFrame();                                   // don't make the user click ▶ again
-      } else if (state !== 'stopped') {
+      } else if (myState !== 'stopped') {
         observer = new IntersectionObserver(entries => {
           if (!entries.some(e => e.isIntersecting)) return;
           observer.disconnect(); observer = null;
@@ -3503,13 +3729,23 @@ function renderHtmlBlock(block, parentArray, idx) {
 
   // The wrap is CSS-resizable; the iframe would swallow the drag, so shield it with
   // pointer-events:none for the duration and persist the height on release.
+  // COUPLING: offsetHeight (border-box) is read back, not clientHeight, because
+  // style.height was SET as a border-box value — clientHeight excludes the 1px border
+  // on .html-frame-wrap, so every click shrank the stored height by 2px and the preview
+  // crept toward its 120px minimum. If that border ever moves to an inner element, this
+  // reading becomes the wrong one.
   function wireResize(wrap) {
     wrap.addEventListener('pointerdown', () => {
       if (frame) frame.style.pointerEvents = 'none';
+      const startH = wrap.offsetHeight;
       const up = () => {
         if (frame) frame.style.pointerEvents = '';
-        const h = wrap.clientHeight;
-        if (h && h !== htmlHeightPx(block)) { block.htmlH = h; scheduleSave(); }
+        const h = wrap.offsetHeight;
+        // a click that isn't a drag writes nothing — no htmlH, no scheduleSave, no
+        // history churn on a page the user only looked at
+        if (h && Math.abs(h - startH) >= 2 && h !== htmlHeightPx(block)) {
+          block.htmlH = h; scheduleSave();
+        }
         window.removeEventListener('pointerup', up);
       };
       window.addEventListener('pointerup', up);
@@ -3547,8 +3783,7 @@ function renderHtmlBlock(block, parentArray, idx) {
     block.code = textarea.value;
     blockBackups.delete(block);
     el.classList.add('viewing');
-    renderView();
-    remountFrame();
+    refreshAfterMutation();
     savePage();
     toast('Saved');
   });
@@ -3560,7 +3795,7 @@ function renderHtmlBlock(block, parentArray, idx) {
     if ((block.code || '') !== backup) {
       block.code = backup; textarea.value = backup;
       el.classList.remove('viewing');
-      renderView(); remountFrame(); autosize(); savePage(); refreshRevertLabel(); textarea.focus();
+      refreshAfterMutation(); autosize(); savePage(); refreshRevertLabel(); textarea.focus();
       toast('Reverted');
     } else {
       blockBackups.delete(block);
@@ -3580,8 +3815,9 @@ function renderHtmlBlock(block, parentArray, idx) {
   copyBtn.title = 'Copy the bundled HTML document to clipboard';
   if (isMobile) copyBtn.textContent = '⧉';
 
+  const afterUpload = () => { textarea.value = block.code || ''; refreshAfterMutation(); };
   const uploadBtn = mkBtn('Upload…', () => {
-    uploadHtmlProject(block, { replace: false }, () => { textarea.value = block.code || ''; renderView(); remountFrame(); });
+    uploadHtmlProject(block, { replace: false }, afterUpload);
   });
   uploadBtn.className = 'secondary html-upload';
   uploadBtn.title = 'Upload a project folder';
@@ -3592,8 +3828,12 @@ function renderHtmlBlock(block, parentArray, idx) {
   const overflowBtn = menuBtn('⋯', () => {
     showMiniMenu(overflowBtn, [
       { icon: '❐', label: 'Duplicate block', onClick: () => dupBtn.click() },
-      { icon: '↻', label: 'Reload preview', onClick: () => { if (frame) remountFrame(); else mountFrame(); } },
-      { icon: '⇪', label: 'Replace project…', onClick: () => uploadHtmlProject(block, { replace: true }, () => { textarea.value = block.code || ''; renderView(); remountFrame(); }) },
+      { icon: '↻', label: 'Reload preview', onClick: () => { if (frame) reloadFrame(); else mountFrame(); } },
+      // Stop lives here at ALL widths; CSS hides the toolbar's ■ on mobile so the phone
+      // row stays five controls (✎ ▶ ⧉ ⋯ ✕) without making Stop unreachable there.
+      { icon: '■', label: 'Stop preview', onClick: () => unmountFrame() },
+      { icon: '↕', label: 'Preview height…', onClick: () => pickHeight() },
+      { icon: '⇪', label: 'Replace project…', onClick: () => replaceProject() },
       { icon: '⌁', label: 'Set entry file…', onClick: () => pickEntry() },
       { icon: '⧉', label: 'Copy bundled HTML', onClick: () => copyBtn.click() },
       { divider: true },
@@ -3615,10 +3855,41 @@ function renderHtmlBlock(block, parentArray, idx) {
         if (r.isEntry) return;
         setHtmlEntry(block, r.p);
         textarea.value = block.code || '';
-        scheduleSave(); renderView(); remountFrame();
+        scheduleSave(); refreshAfterMutation();
         toast('Entry set to ' + r.p);
       },
     })));
+  }
+
+  // Discrete height presets — the reliable route when dragging the corner over an
+  // iframe is awkward (and the only route at phone widths). A submenu anchored to the
+  // ⋯ button rather than inline items: miniMenuHasCheck reserves the 24px icon column
+  // on EVERY row of a checkable menu, so inlining these would shift every other ⋯ item.
+  function pickHeight() {
+    const cur = htmlHeightPx(block);
+    showMiniMenu(overflowBtn, HTML_H_PRESETS.map(p => ({
+      label: p.label + ' (' + p.px + 'px)',
+      checked: cur === p.px,
+      onClick: () => {
+        block.htmlH = p.px;
+        // no remount — the iframe is height:100%, so a running demo keeps running
+        if (frameWrap) frameWrap.style.height = p.px + 'px';
+        scheduleSave();
+      },
+    })));
+  }
+
+  // Replace DISCARDS the current project, so name what's going before opening a picker
+  // the user might otherwise treat as harmless browsing.
+  async function replaceProject() {
+    if ((block.code || '').trim() || block.files.length) {
+      const n = htmlFileList(block).length;
+      const go = await showConfirm('Replace discards the current project (' + n + ' file'
+        + (n === 1 ? '' : 's') + '). It can be recovered from page History.\n\nReplace?',
+        { okLabel: 'Replace', danger: true });
+      if (!go) return;
+    }
+    uploadHtmlProject(block, { replace: true }, afterUpload);
   }
 
   const delBtn = mkBtn('Delete', () => { parentArray.splice(idx, 1); renderPage(); scheduleSave(); });
@@ -3636,9 +3907,16 @@ function renderHtmlBlock(block, parentArray, idx) {
     el.classList.remove('drop-active');
     const items = e.dataTransfer && e.dataTransfer.items;
     if (!items || !items.length) return;
-    collectDroppedFiles(items).then(picked => {
+    collectDroppedFiles(items).then(async ({ files: picked, partial }) => {
       if (!picked.length) return;
-      commitHtmlUpload(block, picked, { replace: false }, () => { textarea.value = block.code || ''; renderView(); remountFrame(); });
+      // A directory reader that errored mid-walk means we're holding an incomplete
+      // folder — say so BEFORE committing rather than importing a broken project.
+      if (partial) {
+        const go = await showConfirm('Some folders couldn’t be fully read — this import may be incomplete.\n\nImport anyway?',
+          { okLabel: 'Import anyway', danger: false });
+        if (!go) return;
+      }
+      commitHtmlUpload(block, picked, { replace: false }, afterUpload);
     });
   });
 
@@ -3647,9 +3925,11 @@ function renderHtmlBlock(block, parentArray, idx) {
   return el;
 }
 
-// Walk a DataTransferItemList into a flat [{path, file}] list.
+// Walk a DataTransferItemList into { files: [{path, file}], partial }.
 // FileSystemDirectoryReader.readEntries PAGES AT 100 ENTRIES — it must be called
 // repeatedly until it returns an empty array, or a large folder imports partially.
+// `partial` is set when a reader or a file handle errors: the walk still resolves with
+// whatever it got (never rejects), but the caller must not commit it silently.
 async function collectDroppedFiles(items) {
   const roots = [];
   for (let i = 0; i < items.length; i++) {
@@ -3657,13 +3937,14 @@ async function collectDroppedFiles(items) {
     if (entry) roots.push(entry);
   }
   const out = [];
+  let partial = false;
   const readAll = (reader) => new Promise(res => {
     const acc = [];
     const step = () => reader.readEntries(batch => {
       if (!batch.length) { res(acc); return; }     // empty batch = truly done
       acc.push(...batch);
       step();
-    }, () => res(acc));
+    }, () => { partial = true; res(acc); });
     step();
   });
   const walk = async (entry, prefix) => {
@@ -3671,7 +3952,7 @@ async function collectDroppedFiles(items) {
     if (entry.name.charAt(0) === '.') return;                     // .DS_Store, .git/…
     const path = prefix ? prefix + '/' + entry.name : entry.name;
     if (entry.isFile) {
-      const file = await new Promise(res => entry.file(res, () => res(null)));
+      const file = await new Promise(res => entry.file(res, () => { partial = true; res(null); }));
       if (file) out.push({ path, file });
       return;
     }
@@ -3681,7 +3962,7 @@ async function collectDroppedFiles(items) {
     }
   };
   for (const r of roots) await walk(r, '');
-  return out;
+  return { files: out, partial };
 }
 
 // Read a File into the stored shape: text files as `t`, binaries as ONE UNBROKEN LINE
@@ -3708,11 +3989,15 @@ function uploadHtmlProject(block, opts, onDone) {
   input.setAttribute('directory', '');            // Firefox
   input.style.display = 'none';
   document.body.appendChild(input);
+  // `change` never fires when the native dialog is dismissed, so the input has to be
+  // cleaned up from `cancel` too — otherwise every abandoned picker leaks a DOM node.
+  const cleanup = () => { if (input.parentNode) input.remove(); };
   input.addEventListener('change', () => {
     const picked = Array.from(input.files || []).map(f => ({ path: f.webkitRelativePath || f.name, file: f }));
-    input.remove();
+    cleanup();
     if (picked.length) commitHtmlUpload(block, picked, opts || {}, onDone);
   });
+  input.addEventListener('cancel', cleanup);
   input.click();
 }
 
@@ -3751,16 +4036,18 @@ async function commitHtmlUpload(block, picked, opts, onDone) {
     for (const [p, f] of byPath) records.push(await readHtmlFile(p, f));
 
     // candidate list for the cap decision (entry included — it's stored too)
-    const candidate = { entry, code: '', files: [] };
+    const incoming = { entry, code: '', files: [] };
     records.forEach(r => {
-      if (r.p === entry) candidate.code = r.t || '';
-      else candidate.files.push(r);
+      if (r.p === entry) incoming.code = r.t || '';
+      else incoming.files.push(r);
     });
-    if (!replace && Array.isArray(block.files)) {
-      // merging into an existing project: keep files the upload didn't replace
-      const incoming = new Set(candidate.files.map(f => f.p).concat([entry]));
-      block.files.forEach(f => { if (f && !incoming.has(normalizeHtmlPath(f.p || ''))) candidate.files.push(f); });
-    }
+    // Replace takes the upload wholesale; merge goes through the normative rule, which
+    // keeps EVERYTHING the block already had — an old entry the upload doesn't overwrite
+    // is demoted to a regular file rather than silently disappearing.
+    const merged = replace
+      ? { entry: incoming.entry, code: incoming.code, files: incoming.files, replaced: [], displaced: [], added: [] }
+      : mergeHtmlProject({ entry: block.entry, code: block.code, files: block.files }, incoming);
+    const candidate = merged;
 
     const sizes = htmlFileList({ entry: candidate.entry, code: candidate.code, files: candidate.files })
       .map(r => ({ p: r.p, bytes: r.bytes }));
@@ -3775,6 +4062,18 @@ async function commitHtmlUpload(block, picked, opts, onDone) {
       const go = await showConfirm(cap.soft.join('\n') + '\n\nUpload anyway?', { okLabel: 'Upload', danger: false });
       if (!go) return;
     }
+    // The ONE destructive branch: paths present on both sides lose their old content.
+    // A demote (displaced) deletes nothing, so it doesn't ask. Asked AFTER the cap and
+    // soft-warn checks so a rejected upload never poses a question it will then ignore.
+    if (merged.replaced.length) {
+      const named = merged.replaced.slice(0, 5).join(', ')
+        + (merged.replaced.length > 5 ? ' +' + (merged.replaced.length - 5) + ' more' : '');
+      const go = await showConfirm('This upload overwrites ' + merged.replaced.length + ' file'
+        + (merged.replaced.length === 1 ? '' : 's') + ' already in the project: ' + named
+        + '.\n\nThe previous content can be recovered from page History.\n\nMerge?',
+        { okLabel: 'Merge', danger: true });
+      if (!go) return;                             // block byte-identical, nothing saved
+    }
 
     block.html = true;
     block.type = 'html';
@@ -3783,7 +4082,10 @@ async function commitHtmlUpload(block, picked, opts, onDone) {
     block.files = candidate.files;
     scheduleSave();
     if (onDone) onDone();
-    toast(sizes.length + ' file' + (sizes.length === 1 ? '' : 's') + ' imported');
+    toast(sizes.length + ' file' + (sizes.length === 1 ? '' : 's') + ' imported'
+      + (merged.replaced.length ? ' · ' + merged.replaced.length + ' replaced' : '')
+      + ' · entry is now ' + candidate.entry
+      + (merged.displaced.length ? ' (' + merged.displaced.join(', ') + ' kept as a file)' : ''));
 
     try {
       if (currentPageData && JSON.stringify(currentPageData).length > HTML_PAGE_WARN) {
