@@ -66,6 +66,15 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
 - Cancelling the folder picker no longer leaves an invisible element behind in the page.
 - On phones, the empty-state and editor placeholder no longer suggest a folder upload, which isn't
   available there.
+- **Page history no longer stops recording after 20 quick saves.** Once a page had its full 20
+  versions, further saves made within the same second could overwrite the version just written
+  instead of dropping the oldest one — so the newest changes were silently discarded. History now
+  always keeps the **20 most recent** versions.
+- **Restoring a version is now crash-safe.** Restoring from History wrote the old version straight
+  over the live page; an interruption mid-write could leave the page truncated. The restore is now
+  written atomically, and a version that isn't valid JSON is refused instead of replacing a good page.
+- The "Project not imported" message shown when an HTML project exceeds the size cap now has a
+  single **OK** button — it previously offered a "Cancel" that did exactly the same thing.
 
 ### Security
 - The HTML preview runs in an iframe with `sandbox="allow-scripts"` and **no** `allow-same-origin` —

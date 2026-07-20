@@ -439,6 +439,20 @@
     t('pageToHtml renders a section heading', html.includes('<h2>S</h2>'), true);
     t('pageToHtml renders a note block as prose', html.includes('<div class="note">') && html.includes('<strong>b</strong>'), true);
     t('pageToHtml escapes the title', pageToHtml({ title: '<x>', sections: [] }).includes('&lt;x&gt;'), true);
+
+    // The export ships the SAME CSP <meta> as the app — without it an export carrying
+    // a live html-project iframe would be strictly LESS restrictive than CodeMan itself.
+    t('pageToHtml emits a CSP meta', /http-equiv="Content-Security-Policy"/.test(html), true);
+    t('pageToHtml CSP keeps object-src none', html.includes("object-src 'none'"), true);
+    t('pageToHtml CSP keeps base-uri none', html.includes("base-uri 'none'"), true);
+
+    // SECURITY INVARIANT (export path): the html-project iframe is allow-scripts and
+    // NOTHING else. allow-same-origin alongside allow-scripts voids the whole sandbox.
+    const exp = pageToHtml({ title: 'H', sections: [
+      { title: 'S', blocks: [{ type: 'html', html: true, entry: 'index.html', code: '<p>hi</p>', files: [] }], subsections: [] },
+    ] });
+    t('pageToHtml exports the project in a sandboxed iframe', exp.includes('<iframe class="htmlproj" sandbox="allow-scripts"'), true);
+    t('pageToHtml export never grants allow-same-origin', /allow-same-origin/.test(exp), false);
   })();
 
   // richToPlainText (rich HTML → plain text; must PRESERVE line breaks — detached
@@ -1007,6 +1021,27 @@
     t('setHtmlEntry no-op when already the entry', [same.entry, same.files.length], ['a.html', 0]);
   })();
 
+  // THE SANDBOX INVARIANT, asserted on the REAL rendered iframe (not just the source):
+  // allow-scripts WITHOUT allow-same-origin ⇒ opaque origin ⇒ no parent.document, no
+  // cookies/storage, no egress. Adding allow-same-origin voids the entire sandbox and
+  // would otherwise leave every other assertion in this suite green.
+  (function () {
+    const block = { html: true, type: 'html', entry: 'index.html', code: '<p>sandboxed</p>', files: [] };
+    const el = renderHtmlBlock(block, [block], 0);
+    // the block renders STOPPED (a poster with ▶); clicking it mounts the frame
+    const play = el.querySelector('.html-poster-run');
+    t('html block renders a run poster before mounting', !!play, true);
+    play.click();
+    const frame = el.querySelector('iframe.html-frame');
+    t('html block mounts an iframe', !!frame, true);
+    t('iframe sandbox is EXACTLY allow-scripts', frame.getAttribute('sandbox'), 'allow-scripts');
+    t('iframe sandbox never grants allow-same-origin',
+      /allow-same-origin/.test(frame.getAttribute('sandbox') || ''), false);
+    t('iframe is fed by srcdoc (no navigable src)', [frame.hasAttribute('srcdoc'), frame.getAttribute('src')], [true, null]);
+    t('iframe sends no referrer', frame.getAttribute('referrerpolicy'), 'no-referrer');
+    frame.remove();                       // detach before the suite moves on
+  })();
+
   // parseCsv: tolerant RFC-4180-ish parser (quoting, escapes, embedded newlines,
   // delimiter detection, and graceful handling of malformed input).
   (function () {
@@ -1216,6 +1251,84 @@
           setTimeout(() => { ta('debounce cancel drops the pending call', m, 0); resolve(); }, 40);
         }, 40);
       });
+
+      // ---- apiFetch / api(): the network classification contract -----------------
+      // apiFetch is stubbed out everywhere ELSE in this suite, so its two hard
+      // guarantees — "offline never latches" (a 4xx or a malformed body is a SERVER
+      // response, not a connectivity loss) and "a wrong password is never persisted" —
+      // had zero coverage. Drive the real functions against a scripted window.fetch,
+      // with api()'s two side-effecting collaborators neutralised so the classification
+      // is observable without touching the badge, the probe loop or the real cache.
+      {
+        const realFetch = window.fetch, realPrompt = window.promptAuth;
+        const realSetOffline = window.setOffline, realOfflineApi = window.offlineApi;
+        const realCache = window.cacheOnSuccess;
+        let tokenSnap = null;
+        try { tokenSnap = localStorage.getItem('codeman.authToken'); } catch (e) {}
+        let offlineCalls = [];
+        window.setOffline = (on) => { offlineCalls.push(on); };
+        window.offlineApi = async () => ({ _fromOffline: true });
+        window.cacheOnSuccess = async () => {};
+        // a scripted Response: json() throws on a body that isn't JSON, like the real one
+        const res = (status, bodyText) => Promise.resolve({
+          status, ok: status < 400, json: async () => JSON.parse(bodyText),
+        });
+        try {
+          // (a) a reachable server answering 4xx is an APP error, never "offline".
+          window.fetch = () => res(400, '{"error":"nope"}');
+          offlineCalls = [];
+          ta('apiFetch surfaces a 4xx body instead of throwing', await api('list_tags'), { error: 'nope' });
+          ta('a 4xx does NOT trip offline', offlineCalls.includes(true), false);
+
+          // (b) a 200 whose body won't parse (a stray PHP notice) is _transient —
+          // flushQueue retries it a few times rather than parking or latching offline.
+          window.fetch = () => res(200, 'PHP Notice: x\n{"ok":true}');
+          offlineCalls = [];
+          const mal = await apiFetch('tree');
+          ta('a malformed 200 body is tagged _transient', mal._transient, true);
+          ta('a malformed 200 body reports the status', /malformed server response \(200\)/.test(mal.error || ''), true);
+          await api('list_tags');
+          ta('a malformed body does NOT trip offline', offlineCalls.includes(true), false);
+
+          // (c) a 5xx IS a backend failure → throws → api() goes offline.
+          window.fetch = () => res(503, 'gateway');
+          offlineCalls = [];
+          ta('a 5xx falls back to the offline mirror', await api('tree'), { _fromOffline: true });
+          ta('a 5xx trips offline', offlineCalls.includes(true), true);
+
+          // (d) a timed-out/aborted request (the AbortController path) is a real
+          // connectivity loss: apiFetch throws and api() serves the mirror.
+          window.fetch = () => Promise.reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+          offlineCalls = [];
+          let threw = false;
+          try { await apiFetch('tree'); } catch (e) { threw = true; }
+          ta('an aborted (timed-out) request throws from apiFetch', threw, true);
+          ta('a timeout falls back to the offline mirror', await api('tree'), { _fromOffline: true });
+          ta('a timeout trips offline', offlineCalls.includes(true), true);
+
+          // (e) 401 → prompt → still 401 ⇒ the entered secret was WRONG. It must not be
+          // persisted, or every later request replays it and the user can never re-enter.
+          try { localStorage.setItem('codeman.authToken', 'wrongsecret'); } catch (e) {}
+          window.promptAuth = async () => true;      // pretend the user typed a password
+          let calls = 0;
+          window.fetch = () => { calls++; return res(401, '{"error":"auth","auth":true}'); };
+          let authErr = null;
+          try { await apiFetch('tree'); } catch (e) { authErr = e.message; }
+          ta('a persistent 401 throws (never treated as offline)', authErr, 'authentication required');
+          ta('the 401 is retried exactly once after the prompt', calls, 2);
+          let stored = 'unread';
+          try { stored = localStorage.getItem('codeman.authToken'); } catch (e) {}
+          ta('a wrong password is NOT persisted', stored, null);
+        } finally {
+          window.fetch = realFetch; window.promptAuth = realPrompt;
+          window.setOffline = realSetOffline; window.offlineApi = realOfflineApi;
+          window.cacheOnSuccess = realCache;
+          try {
+            if (tokenSnap === null) localStorage.removeItem('codeman.authToken');
+            else localStorage.setItem('codeman.authToken', tokenSnap);
+          } catch (e) {}
+        }
+      }
 
       // The offline cache is namespaced per server (offline.js): go through the SAME
       // kvGet/kvSet/pageGet/pageSet wrappers the functions use, so we seed/read the

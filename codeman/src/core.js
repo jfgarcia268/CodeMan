@@ -399,3 +399,24 @@ function showConfirm(message, { okLabel = 'Delete', danger = true } = {}) {
   }, () => true) // submit resolves true; cancel/esc/backdrop resolve null (falsy)
     .then(v => v === true);
 }
+
+// Themed acknowledgement: ONE button, no choice to make. For informational modals
+// (e.g. "the upload was rejected, here's why") — showConfirm there renders a dead
+// "Cancel" beside "OK" that implies an alternative outcome the caller doesn't have.
+// Resolves when dismissed (button / Enter / Escape / backdrop) — the caller can't
+// branch on it, which is the point.
+function showAlert(message, { okLabel = 'OK' } = {}) {
+  return showModal((box, submit) => {
+    const m = document.createElement('div');
+    m.className = 'modal-title';
+    m.textContent = message;
+    const btns = document.createElement('div');
+    btns.className = 'modal-btns';
+    const ok = document.createElement('button');
+    ok.textContent = okLabel;
+    ok.onclick = submit;
+    btns.append(ok);
+    box.append(m, btns);
+    setTimeout(() => ok.focus(), 0);
+  }, () => true).then(() => undefined);
+}

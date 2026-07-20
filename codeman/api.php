@@ -440,17 +440,32 @@ function snapshotHistory($base, $rel, $path) {
     $hdir = safePath($historyDir, $rel);
     if ($hdir === null) return;
     if (!is_dir($hdir)) mkdir($hdir, 0777, true);
+    $vers = glob($hdir . '/*.json') ?: [];
     $stamp = @filemtime($path) ?: time();
-    $vfile = $hdir . '/' . $stamp . '.json';
     // mtime is second-granularity, so two saves in the same second collide on the
     // version filename. Bump to the next free integer key (filenames must stay
     // pure-integer for restore-by-ts) so a concurrent same-second version is still
     // retained and recoverable instead of being silently dropped.
+    //
+    // The version key must also never go BACKWARDS. Once the folder is at
+    // HISTORY_KEEP, the prune frees the LOW keys again — so a burst of same-second
+    // saves (autosave is per-keystroke) would restart at the page's mtime, land on a
+    // just-freed low key, and the next prune would delete the version we JUST wrote,
+    // silently discarding every save after the cap was reached. Start at one past the
+    // highest key that exists.
+    $maxTs = 0;
+    foreach ($vers as $v) { $n = (int)basename($v, '.json'); if ($n > $maxTs) $maxTs = $n; }
+    if ($stamp <= $maxTs) $stamp = $maxTs + 1;
+    $vfile = $hdir . '/' . $stamp . '.json';
     while (file_exists($vfile)) { $stamp++; $vfile = $hdir . '/' . $stamp . '.json'; }
     writeJsonAtomic($vfile, $old);
     $vers = glob($hdir . '/*.json') ?: [];
     if (count($vers) > HISTORY_KEEP) {
-        sort($vers); // oldest mtimes first (numeric filenames)
+        // Sort by the NUMERIC version key, not the string path: a plain sort() only
+        // happens to work while every key has the same digit count.
+        usort($vers, function($a, $b) {
+            return (int)basename($a, '.json') <=> (int)basename($b, '.json');
+        });
         foreach (array_slice($vers, 0, count($vers) - HISTORY_KEEP) as $v) @unlink($v);
     }
 }
@@ -1006,7 +1021,15 @@ switch ($action) {
         if ($path === null || $hfile === null) jsonError('invalid path');
         if (!file_exists($hfile)) jsonError('version not found', 404);
         snapshotHistory($base, $input['path'], $path);
-        copy($hfile, $path);
+        // writeJsonAtomic is the SINGLE write path for every JSON file: a plain
+        // copy() streams into the LIVE page, so a crash mid-copy truncates it —
+        // exactly what the atomic-write work exists to prevent. Read the version,
+        // validate it still parses (a corrupt snapshot must not replace a good
+        // page), then temp-file + rename it into place.
+        $ver = @file_get_contents($hfile);
+        if ($ver === false) jsonError('version unreadable', 500);
+        if (json_decode($ver, true) === null && trim($ver) !== 'null') jsonError('version is not valid JSON', 500);
+        if (writeJsonAtomic($path, $ver) === false) jsonError('write failed', 500);
         clearstatcache(true, $path);
         echo json_encode(['ok' => true, 'mtime' => @filemtime($path)]);
         break;

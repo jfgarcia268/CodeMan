@@ -98,7 +98,7 @@ story is squarely "non-trivial."
 | `api.php` | Filesystem API: tree, page CRUD, move, reorder, content/block search, metadata index, projects, trash, history, save-conflict detection, find & replace, tag rename, optional password gate. |
 | `vendor/prism/` | Vendored Prism (core + autoloader + grammars + theme) — **no CDN**, works offline. Grammars autoload on demand; an unviewed language won't highlight offline until first rendered. |
 | `vendor/markdown-it/` | Vendored **markdown-it** (v14, single UMD file) — **no CDN**, offline. Backs `renderMarkdown` for **note blocks** (full CommonMark + GFM). Loaded as a static `<script>` before the `src/*.js` modules so `window.markdownit` exists when `editor.js` builds its instance. See the markdown-it gotcha. |
-| `tests.html` | Standalone **client** browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + `richToPlainText`/`convertBlock`/`parseCsv`/`parseJsonSafe`/`jsonPath`/`assembleRestoredTabs`/`uniqueCopyName` + deep-search cap + offline trash/history reducers (snapshots/restores the real IndexedDB cache — incl. `dl:` dead-letter keys — safe to run) + `sanitizeRichHtml` + `flushQueue` replay (FIFO/conflict-force/failure-retains + **dead-letter parking**: terminal/transient-exhausted/conflict-force-error, retry, `__codemanAdoptInto` merge, against stubbed `apiFetch`) + `importPages` negatives + the **HTML-project** helpers (`normalizeHtmlPath`/`resolveHtmlPath`/`isAbsoluteRef`/`stripCommonRoot`/`htmlExtInfo`/`resolveHtmlEntry`/`htmlFileList`/`htmlProjectSize`/`htmlCapCheck`/`htmlBundleKey`/`parseSrcset`/`serializeSrcset`/`pickSrcsetCandidate`/`parseImageSet`/`setHtmlEntry` + `bundleHtmlProject` incl. its three warning layers + the `blockKind` `block.html`-vs-`type:'html'` trap guard). Open it in a browser; ~457 assertions, expect `0 failed`. `window.__testResult = {pass, fail, done}` — CI runs it headless via `.github/scripts/run-client-tests.mjs` and enforces a pass-count FLOOR (bump it there when adding assertions). |
+| `tests.html` | Standalone **client** browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + `richToPlainText`/`convertBlock`/`parseCsv`/`parseJsonSafe`/`jsonPath`/`assembleRestoredTabs`/`uniqueCopyName` + deep-search cap + offline trash/history reducers (snapshots/restores the real IndexedDB cache — incl. `dl:` dead-letter keys — safe to run) + `sanitizeRichHtml` + `flushQueue` replay (FIFO/conflict-force/failure-retains + **dead-letter parking**: terminal/transient-exhausted/conflict-force-error, retry, `__codemanAdoptInto` merge, against stubbed `apiFetch`) + `importPages` negatives + the **HTML-project** helpers (`normalizeHtmlPath`/`resolveHtmlPath`/`isAbsoluteRef`/`stripCommonRoot`/`htmlExtInfo`/`resolveHtmlEntry`/`htmlFileList`/`htmlProjectSize`/`htmlCapCheck`/`htmlBundleKey`/`parseSrcset`/`serializeSrcset`/`pickSrcsetCandidate`/`parseImageSet`/`setHtmlEntry` + `bundleHtmlProject` incl. its three warning layers + the `blockKind` `block.html`-vs-`type:'html'` trap guard) + the **rendered html-block iframe's sandbox attribute** + `apiFetch`'s network classification (4xx / malformed body / 5xx / timeout / wrong-password token clear, against a stubbed `window.fetch`). Open it in a browser; **535 assertions**, expect `0 failed`. `window.__testResult = {pass, fail, done}` — CI runs it headless via `.github/scripts/run-client-tests.mjs`, which asserts `pass === FLOOR` **exactly** (not `>=`: a `>=` floor is silent when a change deletes 5 assertions and adds 6 — so bump FLOOR whenever the total moves, in either direction) and fails on any uncaught page error. |
 | `tests-api.sh` | Standalone **server** API tests (bash + curl, no deps). Spins a throwaway `php -S` against a temp `CODEMAN_DATA` dir and asserts api.php behavior the browser can't reach: path-traversal confinement, parent-dir guards, unicode `search_content`, same-second history retention, `empty_trash` history-prune + its traversal guard, save-conflict detection (stale `baseMtime` → conflict + untouched file; `force` → history snapshot), the project-nesting `move` guard, the `rename` traversal guard, the `restore_trash` round-trip, `replace_content` (preview dry-run / literal / regex), `rename_tag` (rename/merge/delete), and the password gate. `bash codeman/tests-api.sh` (exit 0 = green; hunts upward from its port if taken, so parallel/CI runs don't collide). |
 
 **No build step.** The `src/*.js` files are plain classic scripts sharing one global scope;
@@ -327,8 +327,11 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
 - **Testing.** Two automated suites: open `codeman/tests.html` in a browser (client units, expect
   `0 failed`) and run `bash codeman/tests-api.sh` (server API, exit 0). **Both run in CI on every
   push/PR** (`.github/workflows/tests.yml` — the client suite headless via
-  `.github/scripts/run-client-tests.mjs`, which also enforces a pass-count FLOOR, plus a grep
-  `invariants` job). The **full set of regression
+  `.github/scripts/run-client-tests.mjs`, which enforces an EXACT pass count + zero page errors, plus
+  a grep `invariants` job — 7 invariants: SW version single-sourcing, api.php never precached, atomic
+  JSON writes (no `copy(`/`fwrite(`/bare `file_put_contents(`), **no `allow-same-origin` in
+  `codeman/`**, `index.html` keeps its CSP meta, the single `setTreeData` write point, and CSRF
+  allowlist parity). The **full set of regression
   test cases lives in [docs/TEST_CASES.md](docs/TEST_CASES.md)**, split into a **Core** tier (run every
   regression) and an **Extended/release-gate** tier (cross-browser, packaged/Windows builds, CI,
   real-device, perf-at-scale, desktop native dialogs — run on demand). **Full regression is run by the
@@ -518,6 +521,11 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   `parent.document`, no cookies/storage, and (with the inherited CSP) no egress. Adding
   `allow-same-origin` alongside `allow-scripts` **voids the entire sandbox — permanent invariant, not
   a tuning knob.** `allow-modals` is deliberately omitted (`alert()` no-ops); adding it later is safe.
+  **This is now GUARDED in three places** (it used to be documentation only — widening it left every
+  assertion green): a CI `invariants` grep fails on `allow-same-origin` anywhere in `codeman/` (bare
+  comments excepted — they're what document it), `tests.html` asserts the **rendered** iframe's
+  `sandbox` attribute is exactly `allow-scripts` (plus `srcdoc`-only, `no-referrer`), and a string
+  assertion pins the same posture on `pageToHtml`'s export path.
   **(3) `bundleHtmlProject` MUST NEVER THROW** (the `parseCsv`/`parseJsonSafe` contract) and must
   never render a blank block — it's try-wrapped and falls back to the raw entry + a warning. It's
   regex-based, deliberately NOT `DOMParser`, so the author's exact document survives.
@@ -582,7 +590,11 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   before. On open a `setTimeout(0)` moves focus inside only if `buildBody` didn't already (its own
   `setTimeout(0)` focus registers first, so this is a fallback); a dialog with no focusable control
   focuses the `tabIndex=-1` box itself. Every themed confirm/prompt AND the palette's Move-to picker
-  inherit this. `focusTrapNextIndex` is pure → unit-tested. Toast + the `flashCopied` bubble are
+  inherit this. **`showAlert(message)` is the acknowledgement variant** — one button, resolves
+  `undefined` (the caller can't branch on it, which is the point). Use it for INFORMATIONAL modals;
+  `showConfirm` there renders a dead "Cancel" beside "OK" that implies an outcome the caller doesn't
+  offer (the html-block over-cap rejection was the one such site). Everything else in the codebase
+  using `showConfirm` is a genuine two-outcome decision — checked, don't convert them. `focusTrapNextIndex` is pure → unit-tested. Toast + the `flashCopied` bubble are
   `role="status" aria-live="polite"` (the offline badge's channel) — one announces per action
   (flashCopied shows the bubble OR falls back to toast, never both).
 - **Delete buttons are de-emphasized at rest.** `button.danger` is neutral (`#3a3d41` / dim-red
@@ -777,9 +789,25 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   target (atomic on POSIX → a crash mid-write can never truncate a page). **The temp name MUST be
   unique** — a fixed `<path>.tmp` would let two concurrent `save_page`s clobber each other's temp
   before either renames (defeating the LOCK_EX serialization). The dot prefix keeps an orphaned temp
-  invisible to `buildTree`. A **CI invariant** greps that no bare `file_put_contents(…, json_encode(…))`
-  survives outside the helper — route new JSON writes through it. (Linux/macOS only; Windows can't
-  `rename()` over an existing file, but api.php never runs there.)
+  invisible to `buildTree`. (Linux/macOS only; Windows can't `rename()` over an existing file, but
+  api.php never runs there.) **The CI invariant now bans the write PRIMITIVES, not one shape.** The
+  old grep only matched an inline `file_put_contents(…, json_encode(…))` — which is why
+  `restore_history` slipped through for a whole release writing a live page with a raw **`copy()`**
+  (a crash mid-copy truncates it: precisely the failure the helper exists to prevent), and why the
+  split form (`$j = json_encode(…); file_put_contents($p, $j);`) would too. The `invariants` job now
+  fails on ANY `copy(`/`fwrite(`/`fputs(`/`file_put_contents(` in `api.php` outside two allowlisted
+  lines (the helper's own temp write, and the EMPTY `.project` marker) — every write shape, however
+  many lines it spans, has to end in one of those primitives. Route new writes through the helper;
+  don't extend the allowlist without a very good reason.
+- **`snapshotHistory` version keys must never go BACKWARDS (api.php).** The key is the page's mtime
+  (second-granularity), bumped to the next free integer on collision. Once a page hits `HISTORY_KEEP`
+  (20), the prune frees the LOW keys again — so a burst of same-second saves (autosave is
+  per-keystroke) restarted at the page mtime, landed on a just-freed low key, and the next prune
+  deleted the version *just written*: every save after the cap was silently discarded and history
+  froze at the first 20. Fixed by starting at `max(mtime, highest existing key + 1)`, and by pruning
+  with a **numeric** `usort` on the basename rather than a lexicographic `sort()` of full paths
+  (which only happened to work while every key had the same digit count). Pinned by a tests-api case
+  (25 saves → exactly 20 versions, extremes assert the surviving window is the NEWEST 20).
 - **`.index.json` is read LAZILY via `loadIndex()` (api.php).** Only the three index-using actions
   — `tree`, `rebuild_index`, `list_tags` — call `loadIndex()` (idempotent, guarded by `$indexLoaded`);
   EVERY other request skips the (potentially large) index read entirely. `list_tags` is now

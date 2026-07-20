@@ -15,18 +15,22 @@ and reports against this matrix); UI/usability passes are run by the
 
 1. **Automated suites first** (fast, deterministic):
    - **Client units** — open `codeman/tests.html` in a browser. Expect the summary
-     **"N passed, 0 failed"** (currently 506). `window.__testResult = {pass, fail, done}` for
+     **"N passed, 0 failed"** (currently 535). `window.__testResult = {pass, fail, done}` for
      scripting (`done` flips true after the async offline tests finish).
    - **Server API** — `bash codeman/tests-api.sh` (spins a throwaway `php -S` against a temp data
-     dir; exit 0 = all green; currently 118). Override port: `bash codeman/tests-api.sh 8099` —
+     dir; exit 0 = all green; currently 164). Override port: `bash codeman/tests-api.sh 8099` —
      a taken port is skipped automatically (bounded upward hunt), so parallel runs stay green.
    - **CI enforces both** on every push/PR: `.github/workflows/tests.yml` runs `tests-api.sh`
      (`api-tests` job), tests.html headless via Playwright + `php -S`
-     (`client-tests` job — fails on any assertion failure, a 60s hang, **or a pass count below
-     the FLOOR** in `.github/scripts/run-client-tests.mjs`; bump FLOOR when you add assertions),
-     and a grep-based `invariants` job (sw.js version single-sourcing, api.php never precached,
-     atomic JSON writes, single `setTreeData` write point, and CSRF read-only allowlist parity
-     between `api.php` and the desktop proxy).
+     (`client-tests` job — fails on any assertion failure, a 60s hang, **any uncaught page
+     error**, **or a pass count that isn't EXACTLY the FLOOR** in
+     `.github/scripts/run-client-tests.mjs`; the floor is an equality so deleting assertions is
+     as visible as adding them — bump it whenever the total moves), and a grep-based
+     `invariants` job (sw.js version single-sourcing, api.php never precached, atomic JSON
+     writes — no `copy()`/`fwrite()`/bare `file_put_contents` anywhere in `api.php`, **no
+     `allow-same-origin` anywhere in `codeman/`**, `index.html` still carrying its CSP meta,
+     single `setTreeData` write point, and CSRF read-only allowlist parity between `api.php`
+     and the desktop proxy).
 2. **Then the manual/driven Core suite below**, against a running dev server
    (`cd codeman && php -S localhost:8090`, data falls back to `structures/`). Drive via the
    browser-preview MCP and/or Chrome MCP. Test **both layouts** (single + double/Miller) and
@@ -109,14 +113,23 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
   deleted page) is **not** opened as an empty tab **and is not forgotten** — the surviving-candidate
   set (loaded + transiently-errored, saved order) is re-persisted so it retries on the next boot.
 
-### TC-editor — Editor & blocks (code / note / rich / checklist / csv)
+### TC-editor — Editor & blocks (code / note / rich / checklist / csv / json / html)
 - TC-editor-01 (P): Edit/Save, Cancel→Revert, Copy, Duplicate, Delete per block; section collapse.
   **Duplicate now inserts the copy DIRECTLY BELOW the source** (not appended to the section end),
   scrolls it into view with a transient pulse, and persists on reload.
 - TC-editor-02 (E): **input round-trip** — type, save, reopen → byte-identical (trailing whitespace,
   tabs vs spaces, blank lines, emoji, large paste).
-- TC-editor-03 (A): **cancel/revert** — edit then Cancel/Revert restores original, no autosave of the
-  edit; edit then switch tab/blur → flush-vs-discard per CLAUDE.md.
+- TC-editor-03 (A): **cancel/revert** — edit a code block, then Cancel/Revert: the block **and the
+  persisted page** end up back at the original text (reload to confirm the FINAL state is correct);
+  edit then switch tab/blur → flush-vs-discard per CLAUDE.md.
+  ⚠️ **Real contract (measured, not the old wording):** the code editor calls `scheduleSave()` on
+  every keystroke, so the *intermediate, un-Saved* text **does reach the server** before you press
+  Cancel — and each of those saves snapshots the prior version, so a cancelled edit **consumes
+  History slots** (2 versions for a typical type-then-cancel). Revert then saves the original back,
+  so nothing is lost and the end state is right; only the History depth is spent. This is a **known
+  characteristic pending a product decision** (autosave-on-keystroke vs. save-on-Save), NOT a bug to
+  "fix" while verifying this case. The previous wording ("no autosave of the edit") was factually
+  wrong and would fail a literal reading against correct behavior.
 - TC-editor-04 (E): **code layer alignment** — transparent textarea stays pixel-aligned with the
   Prism overlay + gutter, line numbers ON and OFF, while scrolling, after autosize.
 - TC-editor-05 (Pe/E): autosizing editors cap at 60vh (50dvh mobile), scroll past; resize handle;
@@ -336,7 +349,9 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   **[auto: tests.html resolveHtmlEntry]**
 - TC-html-05 (A): **cap rejection is non-destructive** — a >512 KB single file (or >1 MB total, or
   >50 files) shows a modal naming the offenders + sizes and the block is left **completely
-  untouched** (candidate built and checked BEFORE anything is assigned).
+  untouched** (candidate built and checked BEFORE anything is assigned). The modal is an
+  **acknowledgement** (`showAlert`) with a SINGLE "OK" button — there is no decision to make, so no
+  dead "Cancel" beside it. Enter / Escape / backdrop-click all dismiss it and import nothing.
   **[auto: tests.html htmlCapCheck]**
 - TC-html-06 (P): a >256 KB project shows the **soft-warn** confirm explaining the ×21 history
   growth; proceeding imports normally, cancelling imports nothing.
@@ -469,6 +484,21 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
 - TC-data-06 (A): **dirty-guard choke-point contract (regression).** The mechanism (`scheduleSave`
   marks dirty · `flushSave` writes a dirty page, not a clean one · clears on success) is
   **[auto: tests.html dirty-guard]**; the live check is any block/section mutation → tab-switch persists.
+- TC-data-07 (P/E): **History version read + restore.** `get_history_version` returns the stored
+  version (unknown ts → 404; traversal path → `invalid path`); `restore_history` snapshots the
+  current content FIRST, then writes the chosen version **atomically** (temp + rename — never a raw
+  `copy()` over the live page), returns `{ok, mtime}`, leaves the page valid JSON and no `.tmp-*`
+  residue, and a 404 restore changes nothing. **[auto: tests-api restore_history]**
+- TC-data-08 (E/A): **HISTORY_KEEP pruning keeps the 20 NEWEST.** 25 consecutive saves → exactly 20
+  versions remain, and they are the most recent 20 (the oldest are the ones dropped). Covers the
+  same-second burst case: version keys never go backwards into slots the prune just freed, which
+  used to make every save after the cap delete the version it had just written.
+  **[auto: tests-api HISTORY_KEEP]**
+- TC-data-09 (A): **content scans never descend into dot-dirs.** A token that exists ONLY in a
+  `.history` snapshot (or only in `.trash`) is invisible to `search_content`/`search_blocks`, a tag
+  that exists only in history never reaches `list_tags` (even after `rebuild_index`), and
+  `replace_content` leaves history snapshots byte-identical — the recovery net is never rewritten.
+  **[auto: tests-api contentFileIterator]**
 
 ### TC-prod — Productivity
 - TC-prod-01 (P): Command palette ⌘K — jump to page (substring match), path-subtitle disambiguation;
@@ -568,6 +598,22 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   plain-**http** remote image is blocked (verify in devtools: an https `![](…)` renders, an http one
   is refused).
 
+- TC-sec-08 (A): **the html-block iframe sandbox is `allow-scripts` and nothing else.** The rendered
+  preview iframe's `sandbox` attribute is EXACTLY `allow-scripts` (opaque origin: no
+  `parent.document`, no cookies/storage, no egress), it's fed by `srcdoc` with no navigable `src`,
+  and it sends `referrerpolicy="no-referrer"`. The standalone `pageToHtml` export emits the same
+  attribute **and** the same CSP `<meta>` (`object-src 'none'`, `base-uri 'none'`) — an export must
+  never be less restrictive than the app. Adding `allow-same-origin` VOIDS the whole sandbox and is
+  a permanent invariant, not a tuning knob. **[auto: tests.html rendered-iframe + export assertions;
+  CI `invariants` job greps `codeman/` for `allow-same-origin` and re-checks `index.html`'s CSP meta]**
+- TC-sec-09 (N/A): **`apiFetch` network classification** — the "offline never latches" and "a wrong
+  password is never persisted" guarantees. A reachable server returning **4xx** surfaces the body as
+  an app error and does **not** trip offline; a **200 with a malformed body** returns
+  `{error, _transient:true}` and does **not** trip offline (flushQueue retries, then parks); a **5xx**
+  or an **aborted/timed-out** request throws and `api()` falls back to the offline mirror; a **401 →
+  prompt → still 401** throws `authentication required` (retried exactly once) and **clears the stored
+  `authToken`** so the next request cleanly re-prompts. **[auto: tests.html stubbed-fetch apiFetch]**
+
 ### TC-transport — WS-6 transport & server efficiency (cache-bust / index / search / history keys)
 - TC-transport-01 (N): **version-keyed cache-bust, 3-way.** Boot `index.html`: `version.js` loads as a
   STATIC `<script src="version.js">` (no `?v=`) so `self.CODEMAN_VERSION` exists before the modules;
@@ -609,6 +655,19 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
 ### TC-colsort — Per-column sort (double layout)
 - TC-colsort-01 (P): Name/Code-type/Kind × asc/desc + Manual order; persists in `.colsort.json`;
   active sort renders a flat intermixed list. **[auto: tests.html sortMillerChildren]**
+- TC-colsort-02 (P/E): **server side.** `set_col_sort` keys the ROOT column off the **empty string**
+  (`{"":{"field","dir"}}`) and a nested column off its folder rel path; all prefs live in ONE
+  root-level `.colsort.json` (never a per-folder file); `field:"manual"` (or an unknown field) clears
+  just that entry and leaves the others; `col_sorts` returns the map; a traversal `parent` →
+  `invalid path`. **[auto: tests-api set_col_sort/col_sorts]**
+
+### TC-order — Manual child order & metadata index (server)
+- TC-order-01 (P/N): `reorder` persists `{parent, order:[names]}` into the folder's `.order.json`
+  and `tree` returns that folder's children in exactly that order; a traversal `parent` →
+  `invalid path`. **[auto: tests-api reorder]**
+- TC-order-02 (P): `rebuild_index` drops and re-parses the index — regenerates `.index.json`,
+  reports a non-zero `pages` count, and indexes **no** `.history`/`.trash` entries.
+  **[auto: tests-api rebuild_index]**
 
 ### TC-pw — Password gate (optional, `CODEMAN_PASSWORD`)
 - TC-pw-01 (N): gate on, no/blank token → `401 {"error":"authentication required","auth":true}`. **[auto: tests-api]**

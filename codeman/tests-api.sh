@@ -13,8 +13,11 @@
 # (preview dry-run / literal / regex / regex-too-complex bound), rename_tag
 # (rename/merge/delete), the safePath reject contract (dotfile reads + traversal
 # rejected at get_page/delete/list_history/restore_trash), the offline-replay
-# reconstruction shapes round-tripping post-safePath, and the optional password
-# gate (header-only; ?token= no longer accepted).
+# reconstruction shapes round-tripping post-safePath, get_history_version +
+# restore_history (atomic write, never a raw copy over the live page), HISTORY_KEEP
+# pruning keeping the 20 NEWEST versions, contentFileIterator never descending into
+# .history/.trash, rebuild_index, reorder, col_sorts/set_col_sort (incl. the ""
+# root key), and the optional password gate (header-only; ?token= no longer accepted).
 #
 #   Run:  bash codeman/tests-api.sh           (exit 0 = all green)
 #         bash codeman/tests-api.sh 8099       (override the starting port;
@@ -378,6 +381,136 @@ has "replay round-trips the nested page" "$(body "$r")" '"title":"OPage"'
 # must still snapshot the prior version (best-effort guard doesn't break valid paths).
 post save_page '{"path":"OProj/OFold/OPage.json","data":{"title":"OPage2","sections":[]},"force":true}' >/dev/null
 test -d "$DATA/.history/OProj/OFold/OPage.json" && ok "snapshotHistory still snapshots a legit nested save" || bad "snapshotHistory still snapshots a legit nested save" "no history dir"
+
+# --- get_history_version + restore_history (atomic, never a raw copy) -------------
+# restore_history used to `copy()` a history version straight over the LIVE page: a
+# crash mid-copy truncates it, which is exactly what writeJsonAtomic exists to prevent.
+# It must snapshot first, then temp-file + rename, and leave the page parseable.
+post create_page '{"name":"Rh","parent":""}' >/dev/null
+post save_page '{"path":"Rh.json","data":{"title":"one","sections":[]}}' >/dev/null
+sleep 1
+post save_page '{"path":"Rh.json","data":{"title":"two","sections":[]}}' >/dev/null
+rh_hist=$(curl -sG "$BASE" --data-urlencode "action=list_history" --data-urlencode "path=Rh.json")
+rh_ts=$(printf '%s' "$rh_hist" | grep -o '"ts":[0-9]*' | head -1 | grep -o '[0-9]*')   # newest first
+[ -n "$rh_ts" ] && ok "list_history returned a version ts for Rh.json" || bad "list_history returned a version ts" "none in [$rh_hist]"
+r=$(post get_history_version "{\"path\":\"Rh.json\",\"ts\":$rh_ts}")
+eqs "get_history_version → 200" "$(code "$r")" "200"
+has "get_history_version returns the stored version body" "$(body "$r")" '"title": "one"'
+r=$(post get_history_version '{"path":"Rh.json","ts":1}')
+eqs "get_history_version unknown ts → 404" "$(code "$r")" "404"
+r=$(post get_history_version '{"path":"../../etc/passwd","ts":1}')
+has "get_history_version traversal path → invalid path" "$(body "$r")" '"error":"invalid path"'
+rh_before=$(ls "$DATA/.history/Rh.json" 2>/dev/null | wc -l | tr -d ' ')
+r=$(post restore_history "{\"path\":\"Rh.json\",\"ts\":$rh_ts}")
+eqs "restore_history → 200" "$(code "$r")" "200"
+has "restore_history → ok" "$(body "$r")" '"ok":true'
+has "restore_history returns the new mtime" "$(body "$r")" '"mtime":'
+has "restore_history put the old content back" "$(cat "$DATA/Rh.json")" '"title": "one"'
+php -r '$c=@file_get_contents($argv[1]); exit(json_decode($c,true)===null?1:0);' "$DATA/Rh.json" \
+  && ok "restored page is valid JSON (atomic write, not a truncated copy)" \
+  || bad "restored page is valid JSON" "does not parse"
+rh_after=$(ls "$DATA/.history/Rh.json" 2>/dev/null | wc -l | tr -d ' ')
+[ "$rh_after" -gt "$rh_before" ] && ok "restore_history snapshotted the replaced version first ($rh_before → $rh_after)" || bad "restore_history snapshotted first" "history count $rh_before → $rh_after"
+eqs "restore_history left no .tmp-* residue" "$(find "$DATA" -name '.tmp-*' 2>/dev/null | wc -l | tr -d ' ')" "0"
+r=$(post restore_history '{"path":"Rh.json","ts":1}')
+eqs "restore_history unknown ts → 404 (page untouched)" "$(code "$r")" "404"
+has "restore_history 404 left the page as restored" "$(cat "$DATA/Rh.json")" '"title": "one"'
+# a CORRUPT version must be refused, not written over a perfectly good page
+printf '%s' '{"title": "trunc' > "$DATA/.history/Rh.json/$rh_ts.json"
+r=$(post restore_history "{\"path\":\"Rh.json\",\"ts\":$rh_ts}")
+has "restore_history refuses a version that is not valid JSON" "$(body "$r")" '"error"'
+has "refused restore left the live page intact" "$(cat "$DATA/Rh.json")" '"title": "one"'
+
+# --- HISTORY_KEEP: pruning keeps exactly 20, and keeps the NEWEST ------------------
+# The prune sorts version filenames and drops the head. With 25 saves the surviving
+# window must be the LAST 20 — a reversed/lexicographic mistake would silently keep
+# the OLDEST 20 and quietly discard everything you'd actually want to recover.
+post create_page '{"name":"Keep","parent":""}' >/dev/null
+i=1; while [ "$i" -le 25 ]; do
+  post save_page "{\"path\":\"Keep.json\",\"data\":{\"title\":\"v$i\",\"sections\":[]}}" >/dev/null
+  i=$((i+1))
+done
+kn=$(ls "$DATA/.history/Keep.json" 2>/dev/null | wc -l | tr -d ' ')
+eqs "25 saves prune to exactly HISTORY_KEEP (20) versions" "$kn" "20"
+knew="$DATA/.history/Keep.json/$(ls "$DATA/.history/Keep.json" | sort -n | tail -1)"
+kold="$DATA/.history/Keep.json/$(ls "$DATA/.history/Keep.json" | sort -n | head -1)"
+# snapshots hold the content BEFORE each save: v1…v24 plus the create → surviving
+# window is v5…v24 (the 20 newest), so the extremes pin the direction of the prune.
+has "the NEWEST surviving version is the most recent one (v24)" "$(cat "$knew")" '"title": "v24"'
+has "the OLDEST surviving version is v5 (older ones were pruned)" "$(cat "$kold")" '"title": "v5"'
+kl=$(curl -sG "$BASE" --data-urlencode "action=list_history" --data-urlencode "path=Keep.json")
+eqs "list_history reports the same 20 versions" "$(printf '%s' "$kl" | grep -o '"ts":' | wc -l | tr -d ' ')" "20"
+
+# --- contentFileIterator: content scans NEVER descend into dot-dirs ----------------
+# .history/.trash hold ~20 versions per page. A bare RecursiveDirectoryIterator would
+# still pass every other assertion here while making search hit stale snapshots — and
+# replace_content would REWRITE history, destroying the recovery net.
+post create_page '{"name":"DotScan","parent":""}' >/dev/null
+post save_page '{"path":"DotScan.json","data":{"title":"DotScan","sections":[{"title":"S","collapsed":false,"tags":["livetag"],"blocks":[{"type":"bash","label":"","code":"livemarker"}],"subsections":[]}]}}' >/dev/null
+mkdir -p "$DATA/.history/DotScan.json"
+printf '%s' '{"title":"old","sections":[{"title":"S","collapsed":false,"tags":["historyonlytag"],"blocks":[{"type":"bash","label":"","code":"historyonlymarker"}],"subsections":[]}]}' > "$DATA/.history/DotScan.json/1.json"
+eqs "search_content finds nothing for a .history-only token" "$(sc 'historyonlymarker')" "[]"
+has "search_content still matches the LIVE page content"     "$(sc 'livemarker')" "DotScan.json"
+sbd=$(curl -sG "$BASE" --data-urlencode "action=search_blocks" --data-urlencode "q=historyonlymarker")
+hasnt "search_blocks does not scan .history" "$sbd" "historyonlymarker"
+# a trashed page's content is likewise out of scope for search
+post create_page '{"name":"TrashScan","parent":""}' >/dev/null
+post save_page '{"path":"TrashScan.json","data":{"title":"TrashScan","sections":[{"title":"S","collapsed":false,"tags":[],"blocks":[{"type":"bash","label":"","code":"trashonlymarker"}],"subsections":[]}]}}' >/dev/null
+post delete '{"path":"TrashScan.json"}' >/dev/null
+eqs "search_content finds nothing for a .trash-only token" "$(sc 'trashonlymarker')" "[]"
+post rebuild_index '{}' >/dev/null   # force a full re-parse so list_tags can't hide behind a warm index
+ltd=$(curl -sG "$BASE" --data-urlencode "action=list_tags")
+hasnt "list_tags does not surface a .history-only tag" "$ltd" '"tag":"historyonlytag"'
+has   "list_tags still surfaces the live tag"          "$ltd" '"tag":"livetag"'
+# replace_content must leave the history snapshot byte-identical (it never walked in)
+post replace_content '{"find":"historyonlymarker","replace":"CLOBBERED"}' >/dev/null
+has "replace_content left the .history snapshot untouched" "$(cat "$DATA/.history/DotScan.json/1.json")" "historyonlymarker"
+
+# --- rebuild_index ----------------------------------------------------------------
+rm -f "$DATA/.index.json"
+r=$(post rebuild_index '{}')
+eqs "rebuild_index → 200" "$(code "$r")" "200"
+has "rebuild_index → ok" "$(body "$r")" '"ok":true'
+has "rebuild_index reports a page count" "$(body "$r")" '"pages":'
+test -f "$DATA/.index.json" && ok "rebuild_index regenerated .index.json" || bad "rebuild_index regenerated .index.json" "missing"
+ipages=$(body "$r" | grep -o '"pages":[0-9]*' | grep -o '[0-9]*')
+[ "${ipages:-0}" -gt 0 ] && ok "rebuild_index indexed the library ($ipages pages)" || bad "rebuild_index indexed the library" "pages=$ipages"
+hasnt "the index holds no .history entries" "$(cat "$DATA/.index.json")" ".history"
+hasnt "the index holds no .trash entries"   "$(cat "$DATA/.index.json")" ".trash"
+
+# --- reorder (manual child order in .order.json) ----------------------------------
+post create_folder '{"name":"Ord","parent":""}' >/dev/null
+for n in A B C; do post create_page "{\"name\":\"$n\",\"parent\":\"Ord\"}" >/dev/null; done
+r=$(post reorder '{"parent":"Ord","order":["C.json","A.json","B.json"]}')
+eqs "reorder → 200" "$(code "$r")" "200"
+has "reorder → ok" "$(body "$r")" '"ok":true'
+has "reorder persisted .order.json" "$(cat "$DATA/Ord/.order.json" 2>/dev/null)" '["C.json","A.json","B.json"]'
+# and the tree actually comes back in that order
+otree=$(curl -sG "$BASE" --data-urlencode "action=tree")
+ordnames=$(printf '%s' "$otree" | tr '{' '\n' | grep -o '"name":"[ABC]"' | sed 's/.*:"//; s/"//' | tr -d '\n')
+eqs "tree returns the folder's children in the stored order" "$ordnames" "CAB"
+r=$(post reorder '{"parent":"../escape","order":["x"]}')
+has "reorder traversal parent → invalid path" "$(body "$r")" '"error":"invalid path"'
+
+# --- col_sorts / set_col_sort (per-column sort prefs, one root-level .colsort.json) --
+r=$(post set_col_sort '{"parent":"","field":"name","dir":"desc"}')
+eqs "set_col_sort root → 200" "$(code "$r")" "200"
+cs=$(curl -sG "$BASE" --data-urlencode "action=col_sorts")
+has "the ROOT column key is the empty string" "$cs" '"":{"field":"name","dir":"desc"}'
+post set_col_sort '{"parent":"Ord","field":"kind","dir":"asc"}' >/dev/null
+cs=$(curl -sG "$BASE" --data-urlencode "action=col_sorts")
+has "a nested column keys off its folder rel path" "$cs" '"Ord":{"field":"kind","dir":"asc"}'
+test -f "$DATA/.colsort.json" && ok "col sorts live in ONE root-level .colsort.json" || bad "col sorts live in one root-level .colsort.json" "missing"
+test ! -e "$DATA/Ord/.colsort.json" && ok "no per-folder .colsort.json is written" || bad "no per-folder .colsort.json" "Ord/.colsort.json exists"
+post set_col_sort '{"parent":"","field":"manual"}' >/dev/null
+cs=$(curl -sG "$BASE" --data-urlencode "action=col_sorts")
+hasnt "field=manual clears the root entry" "$cs" '"":{'
+has   "clearing one column leaves the others" "$cs" '"Ord":{"field":"kind","dir":"asc"}'
+post set_col_sort '{"parent":"Ord","field":"bogus","dir":"asc"}' >/dev/null
+cs=$(curl -sG "$BASE" --data-urlencode "action=col_sorts")
+eqs "an unknown sort field clears the entry (back to manual)" "$cs" "{}"
+r=$(post set_col_sort '{"parent":"../escape","field":"name"}')
+has "set_col_sort traversal parent → invalid path" "$(body "$r")" '"error":"invalid path"'
 
 # --- CSRF enforcement: deny-by-default, header-less writes 403, reads 200 ----
 # The post() helper always sends X-CodeMan-Request, so every write test above

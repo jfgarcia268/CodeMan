@@ -64,6 +64,51 @@ jobs:
             echo 'Bare file_put_contents(..., json_encode(...)) found — route it through writeJsonAtomic'
             exit 1
           fi
+          # The single-line grep above only catches the INLINE json_encode shape. It
+          # missed restore_history, which `copy()`d a history version straight over the
+          # LIVE page, and would equally miss the split form
+          # (`$j = json_encode(...); file_put_contents($p, $j);`). So ban the write
+          # PRIMITIVES themselves: writeJsonAtomic's own file_put_contents is the only
+          # permitted one, and copy()/fwrite()/fputs() have no legitimate caller here.
+          # Any write shape, split across however many lines, must end in one of these.
+          # Two allowlisted writes: writeJsonAtomic's own temp write, and the EMPTY
+          # `.project` marker (no content to truncate). Comment lines are skipped so a
+          # code comment can name the banned primitives.
+          if grep -nE '(^|[^_[:alnum:]])(copy|fwrite|fputs|file_put_contents)[[:space:]]*\(' codeman/api.php \
+             | grep -vE '^[0-9]+:[[:space:]]*(//|\*|#)' \
+             | grep -vF 'file_put_contents($tmp, $json, LOCK_EX)' \
+             | grep -vF "file_put_contents(\$path . '/.project', '')"; then
+            echo 'Non-atomic file write found in api.php — route it through writeJsonAtomic'
+            echo '(writeJsonAtomic holds the ONLY permitted file_put_contents; copy()/fwrite()/fputs() are banned)'
+            exit 1
+          fi
+      - name: the HTML-project iframe sandbox is never widened (allow-same-origin)
+        run: |
+          # PERMANENT INVARIANT (CLAUDE.md): the html-block preview is
+          # sandbox="allow-scripts" WITHOUT allow-same-origin — that pairing is what
+          # gives the untrusted project an opaque origin (no parent.document, no
+          # cookies/storage, no egress). Adding allow-same-origin alongside
+          # allow-scripts VOIDS the entire sandbox and every assertion stays green.
+          # Comment lines may NAME the token (they're what documents the invariant), and
+          # tests.html carries it inside the assertion that PINS the attribute — every
+          # other occurrence in codeman/ is a violation.
+          if grep -rn 'allow-same-origin' codeman/ \
+             | grep -v '^codeman/tests.html:' \
+             | grep -vE ':[[:space:]]*(//|\*|#)'; then
+            echo 'allow-same-origin found in codeman/ — this VOIDS the html-block sandbox. Not a tuning knob.'
+            exit 1
+          fi
+          # …and the two places that build the iframe must still declare the sandbox.
+          grep -q "setAttribute('sandbox', 'allow-scripts')" codeman/src/editor.js
+          grep -q 'sandbox="allow-scripts"' codeman/src/features.js
+      - name: index.html still ships its CSP meta
+        run: |
+          # The app's only CSP is a <meta> (no build step, no server config in-repo);
+          # dropping it silently removes object-src 'none' / base-uri 'none' and the
+          # same-origin script confinement the html-block sandbox leans on.
+          grep -q "http-equiv=\"Content-Security-Policy\"" codeman/index.html
+          grep -q "object-src 'none'" codeman/index.html
+          grep -q "base-uri 'none'" codeman/index.html
       - name: treeData is only written through setTreeData (memo invalidation)
         run: |
           # setTreeData() is the SINGLE write point for the sidebar treeData global: it sets

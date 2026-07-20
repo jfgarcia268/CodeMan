@@ -4054,8 +4054,9 @@ async function commitHtmlUpload(block, picked, opts, onDone) {
     const cap = htmlCapCheck(sizes);
     if (!cap.ok) {
       const top = cap.offenders.slice(0, 5).map(o => o.p + ' — ' + htmlBytesLabel(o.bytes)).join('\n');
-      await showConfirm('Project not imported.\n\n' + cap.hard.join('\n') + '\n\nLargest files:\n' + top,
-        { okLabel: 'OK', danger: false });
+      // Informational, not a decision: nothing is committed either way, so this is an
+      // acknowledgement (one button) — a Cancel here would imply an alternative outcome.
+      await showAlert('Project not imported.\n\n' + cap.hard.join('\n') + '\n\nLargest files:\n' + top);
       return;                                      // NOTHING committed
     }
     if (cap.soft.length) {
