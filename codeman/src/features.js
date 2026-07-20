@@ -768,6 +768,39 @@ function download(filename, text, mime) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+// One rich-block <table> → a GFM table. Row 0 is the header (GFM requires one, and a
+// pasted table often has no <thead>); ragged rows are padded to the widest row. Cells
+// are read with textContent — NEVER innerHTML — so nothing from the block can execute
+// or leak markup into the export. MERGED CELLS DEGRADE TO ONE COLUMN: GFM has no
+// colspan, so that loss is correct rather than a bug.
+function richTableToGfm(tableEl) {
+  const cell = (v) => String(v == null ? '' : v).replace(/\|/g, '\\|').replace(/\s*\n\s*/g, ' ').trim();
+  const rows = [...tableEl.querySelectorAll('tr')].map(tr => [...tr.children].map(td => cell(td.textContent)));
+  const cols = rows.reduce((m, r) => Math.max(m, r.length), 0);
+  if (!cols) return '';
+  const fmt = (r) => '| ' + Array.from({ length: cols }, (_, c) => (r || [])[c] || '').join(' | ') + ' |';
+  const out = [fmt(rows[0]), '| ' + Array.from({ length: cols }, () => '---').join(' | ') + ' |'];
+  for (let r = 1; r < rows.length; r++) out.push(fmt(rows[r]));
+  return out.join('\n');
+}
+
+// Rich HTML → Markdown: top-level <table> children become GFM tables, everything else
+// falls through to richToPlainText. NEVER THROWS — any failure degrades to
+// richToPlainText of the whole input.
+function richToMarkdown(html) {
+  try {
+    const tpl = document.createElement('template');
+    tpl.innerHTML = sanitizeRichHtml(html || '');
+    const out = [];
+    [...tpl.content.childNodes].forEach(n => {
+      if (n.nodeType === 1 && n.tagName === 'TABLE') { const g = richTableToGfm(n); if (g) out.push(g); return; }
+      const s = richToPlainText(n.nodeType === 1 ? n.outerHTML : (n.textContent || ''));
+      if (s.trim()) out.push(s);
+    });
+    return out.join('\n\n').trim();
+  } catch (e) { return richToPlainText(html); }
+}
+
 // Render a page's sections/blocks to Markdown (headings + fenced code).
 function pageToMarkdown(data) {
   const out = ['# ' + (data.title || 'Untitled'), ''];
@@ -813,9 +846,11 @@ function pageToMarkdown(data) {
             out.push('');
           }
         } else if (b.rich) {
-          // rich-text blocks hold HTML — emit the plain text for Markdown
-          const tmp = document.createElement('div'); tmp.innerHTML = b.code || '';
-          out.push((tmp.innerText || '').trim(), '');
+          // Rich blocks hold HTML: tables become GFM, everything else plain text.
+          // (This used to read innerText off a DETACHED div — which has no layout, so
+          // every block boundary collapsed and the whole block exported as one run-on
+          // line. richToMarkdown/richToPlainText work on the markup, not on layout.)
+          out.push(richToMarkdown(b.code || ''), '');
         } else if (b.note) {
           // note blocks are already Markdown — emit verbatim, not fenced
           out.push(b.code || '', '');
@@ -919,6 +954,12 @@ function pageToHtml(data) {
     '.rich ul ul{list-style:circle}.rich ul ul ul{list-style:square}.rich ol ol{list-style:lower-alpha}.rich ol ol ol{list-style:lower-roman}',
     '.rich blockquote{border-left:3px solid #0e639c;margin:8px 0;padding:4px 12px;color:#aaa}',
     '.rich a{color:#4ea0e0}',
+    '.rich table{border-collapse:collapse;margin:10px 0;display:block;overflow-x:auto;font-size:13px}',
+    '.rich th,.rich td{border:1px solid #3a3d41;padding:5px 10px;text-align:left;vertical-align:top}',
+    '.rich thead th{background:#2d2d30;color:#fff;font-weight:600}',
+    '.rich caption{color:#888;font-size:12px;padding:4px}',
+    '.rich img{max-width:100%;height:auto;border-radius:4px;margin:4px 0}',
+    '.rich :is(h5,h6){font-size:13px;margin:10px 0 5px;color:#fff}',
     'ul.todo{list-style:none;padding-left:4px;margin:8px 0}ul.todo li{margin:4px 0}ul.todo li.done{color:#777;text-decoration:line-through}ul.todo input{margin-right:8px}',
     '.csv-wrap{overflow-x:auto;border:1px solid #333;border-radius:6px;margin:8px 0}',
     'table.csv{border-collapse:collapse;width:100%;font-size:13px}',

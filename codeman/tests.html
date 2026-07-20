@@ -515,8 +515,84 @@
     const okHref = sanitizeRichHtml('<a href="https://x.test/">x</a>');
     t('sanitize https href kept + hardened', [okHref.includes('href="https://x.test/"'), okHref.includes('rel="noopener noreferrer"')], [true, true]);
     t('sanitize unknown tag unwrapped, text kept', sanitizeRichHtml('<article>keep</article>'), 'keep');
-    t('sanitize nested payload inside unknown tag', sanitizeRichHtml('<article><script>x<\/script>keep<img src=x onerror=alert(1)></article>'), 'keep');
+    // <img> is now an ALLOWED tag, so the element survives — but stripped bare: the
+    // relative src fails richImgSrc and onerror never survives deny-by-default.
+    t('sanitize nested payload inside unknown tag (img kept, attrs gone)', sanitizeRichHtml('<article><script>x<\/script>keep<img src=x onerror=alert(1)></article>'), 'keep<img>');
     t('sanitize style url() stripped, benign style kept', [sanitizeRichHtml('<span style="background:url(x)">t</span>').includes('style'), sanitizeRichHtml('<span style="color:red">t</span>').includes('color:red')], [false, true]);
+
+    // --- D-1: the expanded allowlist (tables + images + h5/h6) --------------
+    // The reported bug: pasted tables were "unknown" tags, so every cell was unwrapped
+    // and the text concatenated into one run. The whole table set is allowlisted.
+    const tbl = sanitizeRichHtml('<table><thead><tr><th>A</th><th>B</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table>');
+    t('sanitize keeps table structure', [tbl.includes('<table>'), tbl.includes('<th>A</th>'), tbl.includes('<td>2</td>')], [true, true, true]);
+    t('sanitize no longer concatenates cell text', tbl.includes('AB'), false);
+    // caption/colgroup/col MUST survive: unwrapping them leaves bare text as a direct
+    // child of <table>, which the re-parse (surface.innerHTML) FOSTER-PARENTS out of it.
+    const cap = sanitizeRichHtml('<table><caption>Cap</caption><colgroup><col span="2"></colgroup><tr><td>x</td></tr></table>');
+    t('sanitize keeps caption/colgroup/col (no foster-parenting)', [cap.includes('<caption>Cap</caption>'), cap.includes('<colgroup>'), cap.includes('<col ')], [true, true, true]);
+    t('sanitize keeps col span attr', cap.includes('span="2"'), true);
+    t('sanitize colspan valid kept / non-numeric dropped / zero dropped', [
+      sanitizeRichHtml('<table><tr><td colspan="2">x</td></tr></table>').includes('colspan="2"'),
+      sanitizeRichHtml('<table><tr><td colspan="abc">x</td></tr></table>').includes('colspan'),
+      sanitizeRichHtml('<table><tr><td colspan="0">x</td></tr></table>').includes('colspan'),
+    ], [true, false, false]);
+    t('sanitize th scope kept from the fixed set, junk dropped', [
+      sanitizeRichHtml('<table><tr><th scope="col">x</th></tr></table>').includes('scope="col"'),
+      sanitizeRichHtml('<table><tr><th scope="evil">x</th></tr></table>').includes('scope'),
+    ], [true, false]);
+    t('sanitize h5/h6 survive as elements (were unwrapped to bare text)',
+      [sanitizeRichHtml('<h5>a</h5>').includes('<h5>a</h5>'), sanitizeRichHtml('<h6>b</h6>').includes('<h6>b</h6>')], [true, true]);
+    const imgOk = sanitizeRichHtml('<img src="https://x.test/a.png" alt="pic">');
+    t('sanitize https img keeps src + alt', [imgOk.includes('src="https://x.test/a.png"'), imgOk.includes('alt="pic"')], [true, true]);
+    t('sanitize data:image/png kept', sanitizeRichHtml('<img src="data:image/png;base64,AAAA">').includes('data:image/png;base64,AAAA'), true);
+    // LOAD-BEARING: the vector image format is script-bearing; a permitted data: source
+    // for it is an XSS primitive. src dropped, the element itself is kept.
+    const svgImg = sanitizeRichHtml('<img src="data:image/svg+xml;base64,AAAA" alt="v">');
+    t('sanitize rejects a scriptable vector data: src (element kept, src gone)', [svgImg.includes('src'), svgImg.includes('alt="v"')], [false, true]);
+    t('sanitize rejects http: img src (mixed content / CSP)', sanitizeRichHtml('<img src="http://x.test/a.png" alt="a">').includes('src'), false);
+    t('sanitize rejects a relative img src', sanitizeRichHtml('<img src="a.png">').includes('src'), false);
+    t('sanitize strips on* handlers from an ALLOWED img', sanitizeRichHtml('<img src="https://x.test/a.png" onerror="alert(1)" onload="x()">').match(/on(error|load)/), null);
+    t('sanitize img width valid kept / malformed dropped', [
+      sanitizeRichHtml('<img src="https://x.test/a.png" width="10">').includes('width="10"'),
+      sanitizeRichHtml('<img src="https://x.test/a.png" width="10;x">').includes('width'),
+    ], [true, false]);
+    t('sanitize drops base/template/noscript/math WITH their subtree', [
+      sanitizeRichHtml('<base href="//evil"><p>k</p>'),
+      sanitizeRichHtml('<template>hidden</template><p>k</p>'),
+      sanitizeRichHtml('<noscript>hidden</noscript><p>k</p>'),
+      sanitizeRichHtml('<math><mi>hidden</mi></math><p>k</p>'),
+      // FOREIGN CONTENT: an SVG/MathML element reports a LOWERCASE tagName, so the
+      // dangerous-tag lookup must normalize case — without that these were merely
+      // unwrapped, and an <svg><script> payload's text leaked through as visible text.
+      sanitizeRichHtml('<svg><script>hidden<\/script></svg><p>k</p>'),
+    ], ['<p>k</p>', '<p>k</p>', '<p>k</p>', '<p>k</p>', '<p>k</p>']);
+    // Table invariants: the two sets can never overlap, and every attribute-table key
+    // must be an allowed tag (else the entry is dead code hiding a mis-classification).
+    t('RICH_ALLOWED and RICH_DANGEROUS never overlap', [...RICH_ALLOWED].filter(x => RICH_DANGEROUS.has(x)), []);
+    t('every RICH_ATTRS key is an allowed tag', Object.keys(RICH_ATTRS).filter(k => !RICH_ALLOWED.has(k)), []);
+    t('richImgSrc matrix (https / data-png / vector-data / javascript / split-scheme / empty)', [
+      richImgSrc('https://x.test/a.png'), richImgSrc('data:image/png;base64,AA'),
+      richImgSrc('data:image/svg+xml;base64,AA'), richImgSrc('javascript:alert(1)'),
+      richImgSrc('java\tscript:alert(1)'), richImgSrc(''),
+    ], ['https://x.test/a.png', 'data:image/png;base64,AA', '', '', '', '']);
+    t('richIntAttr matrix (ok / clamp / zero / junk / float / null)',
+      [richIntAttr('7', 1000), richIntAttr('99999', 1000), richIntAttr('0', 1000), richIntAttr('abc', 1000), richIntAttr('1.5', 1000), richIntAttr(null, 1000)],
+      ['7', '1000', '', '', '', '']);
+    // Never throws — the parseCsv/parseJsonSafe contract. Degrades to inert escaped text.
+    t('sanitizeRichHtml never throws on hostile/garbage input', [
+      typeof sanitizeRichHtml('<table><tr><td>'), typeof sanitizeRichHtml('<'),
+      typeof sanitizeRichHtml(null), typeof sanitizeRichHtml('x<'.repeat(50000)),
+    ], ['string', 'string', 'string', 'string']);
+    t('sanitize bare <tr><td> without a table keeps the text', sanitizeRichHtml('<tr><td>x').includes('x'), true);
+    // richToPlainText: cells become TAB-separated so a table survives as a grid.
+    t('richToPlainText table → tab-separated rows',
+      richToPlainText('<table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>'), 'A\tB\n1\t2');
+    t('richToPlainText maps an <img> to its alt text', richToPlainText('<p><img alt="pic"></p>'), 'pic');
+    // richToMarkdown: GFM tables for the Markdown export.
+    const md = richToMarkdown('<table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>');
+    t('richToMarkdown emits a GFM table with a separator row', md, '| A | B |\n| --- | --- |\n| 1 | 2 |');
+    const mdMix = richToMarkdown('<p>intro</p><table><tr><td>a</td></tr></table>');
+    t('richToMarkdown keeps prose + table, blank-line separated', mdMix, 'intro\n\n| a |\n| --- |');
   })();
 
   // parseJsonSafe: tolerant JSON parse — never throws; { ok, value, error }.
@@ -1674,6 +1750,118 @@
         } finally {
           currentPagePath = _cpp; currentPageData = _cpd; window.api = _api;
           pageDirty.clear();
+          if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+        }
+      }
+
+      // D-2 autosave deferral: while a block edit session is open, scheduleSave still
+      // marks the page dirty (the choke-point contract above is untouched) but does NOT
+      // arm the debounced network write — so a cancelled edit never reaches the server
+      // and never burns a History slot. flushSave (tab switch / unload) is deliberately
+      // NOT gated: gating it would turn a retention win into DATA LOSS.
+      {
+        const _cpp = currentPagePath, _cpd = currentPageData, _api = window.api;
+        const pageEl = document.getElementById('page');
+        const scratch = [];
+        const mk = (cls) => { const d = document.createElement('div'); d.className = cls; pageEl.appendChild(d); scratch.push(d); return d; };
+        try {
+          const EP = RUN + 'defer/Edit.json';
+          currentPagePath = EP; currentPageData = { title: 'e', sections: [] };
+          pageDirty.clear();
+          if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+
+          ta('anyBlockEditing false with an empty #page', anyBlockEditing(), false);
+          const viewing = mk('block viewing');
+          ta('anyBlockEditing false when every block is .viewing', anyBlockEditing(), false);
+          viewing.remove();
+          const chk = mk('block checklist');
+          // The ONE session-less kind: a checklist is always live-editable, never carries
+          // .viewing, and must NOT be read as an open editor (that would kill autosave for
+          // every page holding one).
+          ta('anyBlockEditing false with only a .block.checklist', anyBlockEditing(), false);
+          chk.remove();
+          const editing = mk('block');
+          ta('anyBlockEditing true with a .block lacking .viewing', anyBlockEditing(), true);
+
+          // …with the editor open: dirty YES, timer NO.
+          scheduleSave();
+          ta('scheduleSave still marks dirty while an editor is open', pageDirty.has(EP), true);
+          ta('scheduleSave does NOT arm the save timer while an editor is open', saveTimer, null);
+
+          // flushSave is the crash/tab-switch bound and still writes through the deferral.
+          let saves = 0;
+          window.api = async (a) => { if (a === 'save_page') saves++; return { ok: true, mtime: 1 }; };
+          flushSave();
+          await Promise.resolve(); await Promise.resolve();
+          ta('flushSave still writes a dirty page while an editor is open', saves, 1);
+
+          // …with no editor open: the timer arms normally (unchanged behavior).
+          editing.remove();
+          pageDirty.clear();
+          scheduleSave();
+          ta('scheduleSave arms the save timer with no editor open', saveTimer !== null, true);
+          clearTimeout(saveTimer); saveTimer = null;
+
+          // wireFocusFlush: a focus DEPARTURE from an open editor flushes once; the SESSION
+          // ENDING is not a departure. Save/Cancel add `.viewing`, which CSS-hides the focused
+          // textarea → the browser fires focusout with a null relatedTarget, and without the
+          // guard an explicit Save cost TWO writes (its own + this flush landing mid-flight).
+          saves = 0;
+          const fb = mk('block');
+          wireFocusFlush(fb);
+          pageDirty.clear(); pageDirty.add(EP);
+          fb.classList.add('viewing');
+          fb.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
+          await Promise.resolve(); await Promise.resolve();
+          ta('focus flush writes NOTHING when the session just ended (.viewing)', saves, 0);
+          fb.classList.remove('viewing');
+          fb.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
+          await Promise.resolve(); await Promise.resolve();
+          ta('focus flush writes once on a real departure from an open editor', saves, 1);
+          fb.remove();
+          if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+
+          // Pin the predicate against a FUTURE block kind: every kind must render either
+          // .viewing (has an edit session) or .checklist (has none). A new kind that does
+          // neither would silently suppress autosave forever.
+          const kinds = BLOCK_KINDS.map(k => {
+            const b = newBlockOfKind(k.kind);
+            const arr = [b];
+            const el = renderBlock(b, arr, 0);
+            return el.classList.contains('viewing') || el.classList.contains('checklist');
+          });
+          ta('every BLOCK_KINDS kind renders as .viewing or .checklist', kinds, BLOCK_KINDS.map(() => true));
+
+          // safeStringify: the "can I prove the page is unchanged?" primitive.
+          const cyc = { a: 1 }; cyc.self = cyc;
+          ta('safeStringify serializes under the limit', safeStringify({ a: 1 }, 1000), '{"a":1}');
+          ta('safeStringify returns null over the limit', safeStringify({ a: 'x'.repeat(50) }, 10), null);
+          ta('safeStringify returns null on a cycle (never throws)', safeStringify(cyc, 1000), null);
+
+          // afterEditSession: page provably back to the persisted state → drop the dirty
+          // flag and write NOTHING (this is what makes Cancel cost zero History versions).
+          saves = 0;
+          pageDirty.clear(); pageDirty.add(EP);
+          cleanPageSnapshot = safeStringify(currentPageData);
+          afterEditSession();
+          await Promise.resolve(); await Promise.resolve();
+          ta('afterEditSession clears dirty when the page matches the snapshot', pageDirty.has(EP), false);
+          ta('afterEditSession writes nothing when the page is provably clean', [saves, saveTimer], [0, null]);
+
+          // …and when something else changed during the session (a section rename, another
+          // block), the snapshot differs, so the deferred write DOES happen.
+          pageDirty.add(EP);
+          cleanPageSnapshot = safeStringify({ title: 'e', sections: [{ title: 'added' }] });
+          afterEditSession();
+          ta('afterEditSession keeps dirty + arms the write when the page differs', [pageDirty.has(EP), saveTimer !== null], [true, true]);
+          await new Promise(r => setTimeout(r, 700));
+          ta('afterEditSession writes exactly once when the page differs', saves, 1);
+        } finally {
+          scratch.forEach(d => d.remove());
+          pageEl.innerHTML = '';
+          currentPagePath = _cpp; currentPageData = _cpd; window.api = _api;
+          pageDirty.clear();
+          cleanPageSnapshot = null;
           if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
         }
       }

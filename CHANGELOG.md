@@ -51,8 +51,29 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
 - The HTML file list gained a header showing how much of the 1 MB budget the project uses, and the
   preview can be resized from `⋯ → Preview height…` (Small / Medium / Large) as well as by dragging.
 - Long `⋯` menus now scroll inside themselves instead of running off the bottom of the screen.
+- **Editing a block no longer saves on every keystroke.** While a block editor is open, CodeMan holds
+  the changes locally and saves when you press **Save**, when you click away from the block, or when
+  you leave/close the tab. So **Cancel now really is a cancel**: a typed-then-cancelled edit writes
+  nothing and no longer spends page-History versions (it used to burn about two per cancelled edit).
+  **The trade-off, plainly:** between those moments your un-saved text lives only in the browser tab,
+  so a crash, force-quit or power loss *while the editor is still open and focused* now loses what
+  you typed since you last clicked out of the block — where before it was on the server within half a
+  second. Switching browser tabs, closing the tab, and clicking out of the block all still save, so
+  nothing is lost by simply walking away. One consequence: an edit you background mid-session **is**
+  saved, so cancelling after that does cost one History version.
+  Checklist blocks are unaffected — they have no Edit/Cancel and still save immediately.
 
 ### Fixed
+- **Rich Text blocks no longer silently destroy pasted content.** Pasting a **table** dropped all its
+  markup and ran every cell's text together into one line; **images** were deleted outright; and
+  **Heading 5 / Heading 6** were flattened to plain text. Tables (including captions, column groups
+  and merged cells), images and all six heading levels now survive a paste, a save and a reload, and
+  render properly in both the app and an exported HTML page.
+- **Rich Text blocks export to Markdown correctly.** They previously collapsed into a single run-on
+  line with every paragraph, list item and line break lost. Paragraphs and lists now keep their
+  structure, tables export as real Markdown tables, and images export as their alt text.
+- Converting a Rich Text block containing a table into a Table (CSV) or Code block now produces a
+  real table instead of one run-on line.
 - **HTML project: the entry file is no longer lost when merging an upload.** Uploading a second
   folder without choosing "Replace project" silently deleted the project's existing entry HTML.
 - **HTML preview: the preview no longer shrinks when clicked.** Clicking (rather than dragging) a
@@ -85,7 +106,18 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
   standalone export was less restrictive than CodeMan itself; an export containing a live HTML
   preview now enforces the identical policy.
 - Binary project files are stored as base64 and are **excluded from content search**, so a word that
-  happens to occur inside encoded image data no longer produces false search results.
+  happens to occur inside encoded image data no longer produces false search results. Images pasted
+  **inline** into a Rich Text block are excluded the same way.
+- **The Rich Text sanitizer now works from a declared per-tag attribute allowlist.** An attribute is
+  kept only if it is explicitly named for that tag, so no event handler — including any added to
+  browsers in future — can survive a paste without someone deliberately listing it.
+- **Pasted image sources are restricted to `https:` and non-vector `data:image` URLs**, matching the
+  app's own Content-Security-Policy. Scalable-vector images are refused because that format can carry
+  scripts; plain-`http:` and relative sources are refused too. The image itself is kept, just without
+  the rejected source.
+- **A pasted `<svg>` or `<math>` block is now removed together with its contents.** Because those
+  elements report their name differently from ordinary HTML, they were previously only unwrapped —
+  which let the text of an embedded script show up in the block.
 
 ## [1.13.0] — 2026-07-14
 

@@ -1583,6 +1583,17 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
    Mirrors the note-view <pre>/<table> pattern. */
 .block.rich .rich-surface pre { max-width: 100%; overflow-x: auto; white-space: pre; }
 .block.rich .rich-surface table { display: block; max-width: 100%; overflow-x: auto; }
+/* Pasted tables/images/h5-h6 are allowlisted by the rich sanitizer, so they need real
+   styling here (and the same rules are mirrored into pageToHtml's export CSS). */
+.block.rich .rich-surface table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+.block.rich .rich-surface th, .block.rich .rich-surface td {
+  border: 1px solid var(--border-2); padding: 4px 9px; text-align: left; vertical-align: top;
+}
+.block.rich .rich-surface thead th { background: var(--panel-2); color: #fff; font-weight: 600; }
+.block.rich .rich-surface caption { color: var(--text-dim); font-size: 12px; padding: 3px; }
+.block.rich .rich-surface img { max-width: 100%; height: auto; border-radius: 4px; margin: 4px 0; }
+.block.rich .rich-surface h4 { font-size: 1.05em; margin: 8px 0 4px; }
+.block.rich .rich-surface h5, .block.rich .rich-surface h6 { font-size: 1em; margin: 8px 0 4px; color: #fff; }
 
 /* tiny "Copied to clipboard" bubble that pops next to the Copy button */
 .copy-pop {

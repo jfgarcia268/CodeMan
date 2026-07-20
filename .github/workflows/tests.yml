@@ -121,6 +121,27 @@ jobs:
             echo 'Direct `treeData =` assignment found — route it through setTreeData() (memo invalidation)'
             exit 1
           fi
+      - name: rich-sanitizer keeps its declared tables (no script-bearing tag, no scriptable vector src)
+        run: |
+          # The rich-block sanitizer is deny-by-default across THREE declared tables.
+          # Both Sets are single-line literals on purpose — these greps are line-scoped.
+          grep -q 'const RICH_ALLOWED' codeman/src/editor.js
+          grep -q 'const RICH_DANGEROUS' codeman/src/editor.js
+          grep -q 'function richImgSrc' codeman/src/editor.js
+          # The allowlist literal must never NAME a script-bearing tag: one added token
+          # turns a paste into an execution path and every assertion stays green.
+          if grep -n 'const RICH_ALLOWED' codeman/src/editor.js \
+             | grep -owE "'(SCRIPT|STYLE|IFRAME|OBJECT|EMBED|LINK|META|FORM|INPUT|BUTTON|SVG|MATH|TEXTAREA|BASE|TEMPLATE|NOSCRIPT)'"; then
+            echo 'RICH_ALLOWED names a dangerous tag'
+            exit 1
+          fi
+          # The scriptable vector image format must never be accepted by the <img src>
+          # filter — it is a script-bearing document format, so a permitted data: source
+          # for it is an XSS primitive. Load-bearing, not an incomplete MIME list.
+          if grep -n 'svg' codeman/src/editor.js | grep -q 'richImgSrc'; then
+            echo 'svg reachable from richImgSrc'
+            exit 1
+          fi
       - name: CSRF read-only allowlist matches between api.php and the desktop proxy
         run: |
           # api.php's $csrfReadOnly and codeman-desktop/main.js's READ_ONLY_ACTIONS are

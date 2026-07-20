@@ -98,7 +98,7 @@ story is squarely "non-trivial."
 | `api.php` | Filesystem API: tree, page CRUD, move, reorder, content/block search, metadata index, projects, trash, history, save-conflict detection, find & replace, tag rename, optional password gate. |
 | `vendor/prism/` | Vendored Prism (core + autoloader + grammars + theme) — **no CDN**, works offline. Grammars autoload on demand; an unviewed language won't highlight offline until first rendered. |
 | `vendor/markdown-it/` | Vendored **markdown-it** (v14, single UMD file) — **no CDN**, offline. Backs `renderMarkdown` for **note blocks** (full CommonMark + GFM). Loaded as a static `<script>` before the `src/*.js` modules so `window.markdownit` exists when `editor.js` builds its instance. See the markdown-it gotcha. |
-| `tests.html` | Standalone **client** browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + `richToPlainText`/`convertBlock`/`parseCsv`/`parseJsonSafe`/`jsonPath`/`assembleRestoredTabs`/`uniqueCopyName` + deep-search cap + offline trash/history reducers (snapshots/restores the real IndexedDB cache — incl. `dl:` dead-letter keys — safe to run) + `sanitizeRichHtml` + `flushQueue` replay (FIFO/conflict-force/failure-retains + **dead-letter parking**: terminal/transient-exhausted/conflict-force-error, retry, `__codemanAdoptInto` merge, against stubbed `apiFetch`) + `importPages` negatives + the **HTML-project** helpers (`normalizeHtmlPath`/`resolveHtmlPath`/`isAbsoluteRef`/`stripCommonRoot`/`htmlExtInfo`/`resolveHtmlEntry`/`htmlFileList`/`htmlProjectSize`/`htmlCapCheck`/`htmlBundleKey`/`parseSrcset`/`serializeSrcset`/`pickSrcsetCandidate`/`parseImageSet`/`setHtmlEntry` + `bundleHtmlProject` incl. its three warning layers + the `blockKind` `block.html`-vs-`type:'html'` trap guard) + the **rendered html-block iframe's sandbox attribute** + `apiFetch`'s network classification (4xx / malformed body / 5xx / timeout / wrong-password token clear, against a stubbed `window.fetch`). Open it in a browser; **535 assertions**, expect `0 failed`. `window.__testResult = {pass, fail, done}` — CI runs it headless via `.github/scripts/run-client-tests.mjs`, which asserts `pass === FLOOR` **exactly** (not `>=`: a `>=` floor is silent when a change deletes 5 assertions and adds 6 — so bump FLOOR whenever the total moves, in either direction) and fails on any uncaught page error. |
+| `tests.html` | Standalone **client** browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + `richToPlainText`/`convertBlock`/`parseCsv`/`parseJsonSafe`/`jsonPath`/`assembleRestoredTabs`/`uniqueCopyName` + deep-search cap + offline trash/history reducers (snapshots/restores the real IndexedDB cache — incl. `dl:` dead-letter keys — safe to run) + `sanitizeRichHtml` + `flushQueue` replay (FIFO/conflict-force/failure-retains + **dead-letter parking**: terminal/transient-exhausted/conflict-force-error, retry, `__codemanAdoptInto` merge, against stubbed `apiFetch`) + `importPages` negatives + the **HTML-project** helpers (`normalizeHtmlPath`/`resolveHtmlPath`/`isAbsoluteRef`/`stripCommonRoot`/`htmlExtInfo`/`resolveHtmlEntry`/`htmlFileList`/`htmlProjectSize`/`htmlCapCheck`/`htmlBundleKey`/`parseSrcset`/`serializeSrcset`/`pickSrcsetCandidate`/`parseImageSet`/`setHtmlEntry` + `bundleHtmlProject` incl. its three warning layers + the `blockKind` `block.html`-vs-`type:'html'` trap guard) + the **rendered html-block iframe's sandbox attribute** + `apiFetch`'s network classification (4xx / malformed body / 5xx / timeout / wrong-password token clear, against a stubbed `window.fetch`) + the **rich sanitizer's expanded allowlist** (`richImgSrc`/`richIntAttr`/`richToMarkdown` matrices, the two table invariants, foster-parent + foreign-content guards) + the **autosave-deferral** contract (`anyBlockEditing` incl. a per-`BLOCK_KINDS` pin, `scheduleSave` defers-but-still-marks-dirty, `safeStringify`, `afterEditSession`). Open it in a browser; **576 assertions**, expect `0 failed`. `window.__testResult = {pass, fail, done}` — CI runs it headless via `.github/scripts/run-client-tests.mjs`, which asserts `pass === FLOOR` **exactly** (not `>=`: a `>=` floor is silent when a change deletes 5 assertions and adds 6 — so bump FLOOR whenever the total moves, in either direction) and fails on any uncaught page error. |
 | `tests-api.sh` | Standalone **server** API tests (bash + curl, no deps). Spins a throwaway `php -S` against a temp `CODEMAN_DATA` dir and asserts api.php behavior the browser can't reach: path-traversal confinement, parent-dir guards, unicode `search_content`, same-second history retention, `empty_trash` history-prune + its traversal guard, save-conflict detection (stale `baseMtime` → conflict + untouched file; `force` → history snapshot), the project-nesting `move` guard, the `rename` traversal guard, the `restore_trash` round-trip, `replace_content` (preview dry-run / literal / regex), `rename_tag` (rename/merge/delete), and the password gate. `bash codeman/tests-api.sh` (exit 0 = green; hunts upward from its port if taken, so parallel/CI runs don't collide). |
 
 **No build step.** The `src/*.js` files are plain classic scripts sharing one global scope;
@@ -553,6 +553,51 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   data produces false search hits). The block uses a **plain `.html-edit` textarea**, never the Prism
   `.code-stack` overlay — zero contact with `ED_*`/`autosizeCode`/`syncScroll`, which is exactly why
   editing NON-entry files is deferred to a phase 2 with its own design pass.
+- **`sanitizeRichHtml` is a THREE-table, deny-by-default sanitizer** (`RICH_ALLOWED` tags kept /
+  `RICH_DANGEROUS` tags dropped WITH their subtree / `RICH_ATTRS` per-tag attribute allowlist +
+  `RICH_GLOBAL_ATTRS` for the value-filtered `style`). A tag named nowhere is **unwrapped** (lossless
+  for its text) — do NOT change unknown-tags to *drop*, that's a silent data-loss path. Five
+  load-bearing points: **(1)** the tag lookup **UPPERCASES `node.tagName`** — foreign content
+  (SVG/MathML, incl. an `<svg><script>`) reports a *lowercase* local name, so the raw lookup missed
+  `'SVG'` entirely and merely unwrapped it, leaking the payload's text; **(2)** the **FULL table set**
+  is allowlisted incl. `CAPTION/COLGROUP/COL` — the output is a *string* re-parsed by
+  `surface.innerHTML`, and an unwrapped caption's text becomes a direct `<table>` child that the
+  second parse **foster-parents OUT of the table**, silently relocating content; **(3)** `richImgSrc`
+  accepts **only** `https:` and non-vector `data:image/…;base64,…` — the scalable-vector MIME is
+  absent ON PURPOSE (script-bearing format ⇒ a permitted data: src is an XSS primitive); control/
+  whitespace chars are stripped before the scheme test (`java\tscript:`); a rejected `src` is REMOVED,
+  not blanked (an empty `src` re-requests the page); **(4)** deny-by-default is what makes `on*` (and
+  every FUTURE handler) impossible without enumerating it — the pure `richIntAttr` bounds
+  `width/height/colspan/rowspan/span`; **(5)** it is wrapped in `try/catch` and **must never throw** —
+  it degrades to `&<>`-escaped inert text, never to raw HTML and never to `''`. Both Sets must stay
+  **single-line literals**: the `rich-sanitizer` CI invariant greps the `const RICH_ALLOWED` line for
+  script-bearing tag names and bans any `svg` reference on a `richImgSrc` line. Consumers:
+  `richToPlainText` maps `</td>|</th>` → TAB (so rich→csv convert yields a real table) and `<img>` →
+  its `alt`; `richToMarkdown`/`richTableToGfm` (features.js) emit GFM tables — `pageToMarkdown` used
+  to read `innerText` off a **detached** div, which has no layout, so every rich block exported as one
+  run-on line. Data-URL images are a page-bloat vector (×21 on disk); `RICH_SOFT_WARN` (256 KB) is a
+  **soft toast only, never a truncation** — a hard cap could only lose content.
+- **Autosave is DEFERRED while a block edit session is open (`anyBlockEditing()`).** `scheduleSave()`
+  still adds to `pageDirty` on its first line, **unconditionally** — the choke-point contract and its
+  `tests.html` regression guard are byte-identical; only the 500 ms `setTimeout(savePage)` is skipped
+  (early-return **before** arming the timer, NOT a guard inside `savePage` — that would break the
+  `saveInFlight`/`savePending` re-save path). The predicate is **DOM-derived**
+  (`#page .block:not(.viewing):not(.checklist)`) and **fails OPEN** (`catch → false` ⇒ save): a
+  tracked Set would go stale when an editing block is deleted and would suppress autosave forever.
+  `.checklist` is excluded because it's the ONE kind with no edit session. **`flushSave` is
+  deliberately NOT gated** — every editor assigns `block.code` on `input` *before* calling
+  `scheduleSave`, so `currentPageData` always holds the live buffer and tab-switch/unload still
+  commits it; gating that would turn a retention win into DATA LOSS. Cancel is free because
+  `beforeEditSession()` snapshots the clean page (`safeStringify`, capped at `SNAPSHOT_MAX`, captured
+  BEFORE `.viewing` drops since the predicate is DOM-derived) and `afterEditSession()` clears
+  `pageDirty` when the page is byte-identical at session end — it **arms `saveTimer` directly and must
+  NEVER call `scheduleSave`**, which would re-mark dirty. Wired into all **SIX** session-bearing
+  render paths (code + note share `renderBlock`; rich, csv, json, html-entry); Esc routes through the
+  Cancel/Revert button, so wiring those covers it. `wireFocusFlush(el)` is a focus-departure **FLUSH,
+  not a session end** — sticky editing stays; it bails on an in-block `relatedTarget` (the original
+  toolbar-click gotcha) and on an open `.mini-menu` (which lives on `document.body`, so opening the
+  `⋯` would otherwise burn a history slot). **Accepted regression:** un-Saved text lives only in tab
+  memory between commit points (Save / focus departure / `visibilitychange→hidden` / `beforeunload`).
 - **Sidebar tree is keyboard-operable + ARIA (a11y pass).** `#tree` is `role="tree"`; rows
   (`.tree-row`) and Miller folder cards (`.subfolder-card`) are `role="treeitem"` with a
   `data-path`, `aria-label`, roving `tabindex` (exactly one row is `tabindex=0` via
@@ -985,10 +1030,13 @@ the server URL or `{offlineOnly:true}`.
   the SW are same-origin). **`pageToHtml`'s standalone export now emits the SAME CSP `<meta>`** —
   without it an export carrying a live HTML-project iframe would be strictly LESS restrictive than
   the app itself; `'unsafe-inline'` there covers the export's own inline `<style>`. **`img-src`
-  includes `https:`** so remote https images referenced in note/
-  rich blocks render (a self-hosted snippet manager legitimately references remote images; plain
+  includes `https:` + `data:`** so remote https images referenced in **note** blocks — and, since the
+  D-1 sanitizer pass, images in **rich** blocks too (that sentence was aspirational before: `IMG`
+  wasn't in `RICH_ALLOWED`, so a pasted rich image was deleted) — render. A self-hosted snippet
+  manager legitimately references remote images; plain
   `http:`/other schemes stay blocked — no mixed content, marginal exfil risk under the trusted
-  single-user model). At the release cut the **NAS nginx** deployment must ALSO send this header +
+  single-user model. **`richImgSrc` enforces exactly this policy client-side** (`https:` +
+  non-SVG `data:image`), so a stored rich block can never carry a src the CSP would block anyway. At the release cut the **NAS nginx** deployment must ALSO send this header +
   `X-Content-Type-Options: nosniff` in `default.conf` (can't be set from a `<meta>`; deployment step).
 - **Projects nest only in projects:** `create_project` and `move` reject placing a `.project`
   folder anywhere except the root or inside another project (a parent with its own `.project`

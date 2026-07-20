@@ -119,24 +119,56 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
   scrolls it into view with a transient pulse, and persists on reload.
 - TC-editor-02 (E): **input round-trip** — type, save, reopen → byte-identical (trailing whitespace,
   tabs vs spaces, blank lines, emoji, large paste).
-- TC-editor-03 (A): **cancel/revert** — edit a code block, then Cancel/Revert: the block **and the
-  persisted page** end up back at the original text (reload to confirm the FINAL state is correct);
-  edit then switch tab/blur → flush-vs-discard per CLAUDE.md.
-  ⚠️ **Real contract (measured, not the old wording):** the code editor calls `scheduleSave()` on
-  every keystroke, so the *intermediate, un-Saved* text **does reach the server** before you press
-  Cancel — and each of those saves snapshots the prior version, so a cancelled edit **consumes
-  History slots** (2 versions for a typical type-then-cancel). Revert then saves the original back,
-  so nothing is lost and the end state is right; only the History depth is spent. This is a **known
-  characteristic pending a product decision** (autosave-on-keystroke vs. save-on-Save), NOT a bug to
-  "fix" while verifying this case. The previous wording ("no autosave of the edit") was factually
-  wrong and would fail a literal reading against correct behavior.
+- TC-editor-03 (A): **autosave deferral + cancel/revert — the CONTRACT.** *While a block editor is
+  open, no autosave reaches the server.* Verify each line with the network panel open:
+  - Type into a code block → **zero** `save_page` requests.
+  - Click **Cancel** → **zero** writes and **zero** new History versions (check via History).
+  - Type, click **Save** → **exactly one** write.
+  - Type, then click into another block (**focus departure**) → **exactly one** write, and the
+    **edit session stays open** (Save/Revert still showing — sticky editing is deliberate).
+  - Type, then switch **browser tabs** → **one forced keepalive write.** This is the documented
+    exception: an edit backgrounded mid-session **is** persisted (gating that would be data loss),
+    so a Cancel afterwards costs one History slot. Cancel is local *unless* you backgrounded the
+    tab or left the block mid-edit.
+  - End state is always correct: after Cancel/Revert the block **and** the persisted page hold the
+    original text (reload to confirm).
+  Applies identically to **code, note, rich, csv, json and html-entry** editors. **Checklist blocks
+  have no edit session and keep immediate autosave** — that is by design, not an inconsistency.
+  Section titles / tags / block labels are also deferred while a block editor is open; they flush on
+  session end, focus departure, or tab switch.
+  **[auto: tests.html anyBlockEditing / scheduleSave-defers / afterEditSession]**
 - TC-editor-04 (E): **code layer alignment** — transparent textarea stays pixel-aligned with the
   Prism overlay + gutter, line numbers ON and OFF, while scrolling, after autosize.
 - TC-editor-05 (Pe/E): autosizing editors cap at 60vh (50dvh mobile), scroll past; resize handle;
   open 500-block page / 8000-line block render < ~150ms, no jank.
 - TC-editor-06 (A): paste `<script>`/HTML into **note** (markdown, `html:false`) and **rich**
   (sanitizer strips script/handlers/`javascript:`) — escaping holds (security boundary).
-  **[auto: tests.html sanitizeRichHtml + md escapes raw html]**
+  The rich sanitizer is **deny-by-default across three declared tables** (allowed tags / dangerous
+  tags / per-tag attributes); verify all of:
+  - **Round-trips:** a pasted **table** (incl. `<caption>`/`<colgroup>`/`<col>`, `colspan`/`rowspan`,
+    `scope`), an **`<img>`**, and **`<h5>`/`<h6>`** all survive Save → reload with their structure —
+    no cell text concatenated into one run, no caption relocated above the table.
+  - **`<img src>` accepted:** `https:` and non-vector `data:image/…;base64,…` only.
+  - **`<img src>` rejected** (attribute removed, element kept): `data:image/svg+xml` (script-bearing
+    — permanently rejected, not an incomplete MIME list), `http:`, relative, `blob:`,
+    protocol-relative.
+  - **`on*` never survives** on any tag, including an allowed `<img>` (deny-by-default, so a future
+    handler name is impossible without enumerating it).
+  - **Dropped WITH their subtree** (text must not leak through as visible text):
+    `<script>/<style>/<iframe>/<object>/<embed>/<form>/<input>/<base>/<template>/<noscript>/<math>/
+    <svg>` — note SVG/MathML report a *lowercase* tag name, so case normalization is part of this.
+  - `<a href="javascript:">` neutralized with the **link text kept**.
+  **[auto: tests.html sanitizeRichHtml / richImgSrc / richIntAttr / richToMarkdown + md escapes raw html]**
+- TC-editor-07 (A): **rich round-trip through both exports** — paste a table + an image into a rich
+  block, Save, reload (structure + image survive). Export **HTML**: the table has borders, the image
+  renders, and the CSP `<meta>` is present in the file. Export **Markdown**: the table is a GFM table
+  with a `| --- |` separator row, images degrade to their `alt` text, and the block is **not a single
+  run-on line** (it used to be — `innerText` on a detached node has no layout). Re-import the JSON
+  export and confirm the block is unchanged. Merged cells (`colspan`) collapse to one column in
+  Markdown — GFM has no colspan; that loss is expected.
+- TC-editor-08 (E): paste a **~500 KB data-URL image** into a rich block: a soft-warn toast fires
+  **once** (naming the ×21 history multiplier), the paste is **never truncated**, the page saves, and
+  History still works. Watch the page file's growth on disk.
 
 ### TC-menu — Shared popup `⋯` menus (`showMiniMenu`) — a11y + positioning parity
 **Every** `⋯`/overflow popup routes through the one `showMiniMenu` — block-kind menus ×3, section

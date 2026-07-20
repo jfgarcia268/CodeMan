@@ -970,34 +970,124 @@ function textToRichHtml(text) {
 // inside an otherwise-unwrapped tag is removed before its ancestor is unwrapped.
 // It's the user's own content, but we still strip scripts, event handlers and
 // javascript: URLs so a pasted snippet can't execute.
-const RICH_ALLOWED = new Set(['P', 'BR', 'DIV', 'SPAN', 'B', 'STRONG', 'I', 'EM', 'U', 'S', 'STRIKE', 'DEL', 'UL', 'OL', 'LI', 'H1', 'H2', 'H3', 'H4', 'BLOCKQUOTE', 'A', 'FONT', 'SUB', 'SUP', 'PRE', 'CODE', 'HR']);
-const RICH_DANGEROUS = new Set(['SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'EMBED', 'LINK', 'META', 'FORM', 'INPUT', 'BUTTON', 'SVG', 'TEXTAREA']);
-function sanitizeRichHtml(html) {
-  const tpl = document.createElement('template');
-  tpl.innerHTML = String(html || '');
-  const clean = (node) => {
-    [...node.childNodes].forEach(clean);          // children first (post-order)
-    if (node.nodeType === 8) { node.remove(); return; }   // comment
-    if (node.nodeType !== 1) return;                       // keep text nodes
-    const tag = node.tagName;
-    if (RICH_DANGEROUS.has(tag)) { node.remove(); return; }
-    if (!RICH_ALLOWED.has(tag)) {                          // unwrap unknown tag, keep text
-      const p = node.parentNode; if (!p) return;
-      while (node.firstChild) p.insertBefore(node.firstChild, node);
-      p.removeChild(node); return;
-    }
-    [...node.attributes].forEach(a => {
-      const name = a.name.toLowerCase();
-      if (name === 'style') { if (/javascript:|expression\(|url\s*\(/i.test(a.value)) node.removeAttribute('style'); }
-      else if (name === 'href' && tag === 'A') { if (!/^(https?:|mailto:)/i.test(a.value.trim())) node.removeAttribute('href'); }
-      else if ((name === 'color' || name === 'size' || name === 'face') && tag === 'FONT') { /* legacy font attrs allowed */ }
-      else node.removeAttribute(a.name);
-    });
-    if (tag === 'A') { node.setAttribute('target', '_blank'); node.setAttribute('rel', 'noopener noreferrer'); }
-  };
-  clean(tpl.content);
-  return tpl.innerHTML;
+//
+// THREE declared tables, deny-by-default: RICH_ALLOWED (kept), RICH_DANGEROUS
+// (dropped WITH their subtree), RICH_ATTRS (the only attributes that may survive,
+// per tag). Anything named nowhere is removed — which is why `onerror`/`onload`
+// and every FUTURE on* handler are impossible without enumerating them.
+// A merely-unknown tag is UNWRAPPED (lossless for its text), never dropped.
+//
+// The FULL table set is allowlisted on purpose: this function returns a serialized
+// string that is re-parsed by `surface.innerHTML = …`, and an unwrapped
+// <caption>/<colgroup>/<col> would leave bare text as a direct child of <table>,
+// which the second parse FOSTER-PARENTS out of the table — silently relocating
+// content above it.
+// CONSTRAINT: both Sets must stay SINGLE-LINE literals — the `rich-sanitizer` CI
+// invariant greps the `const RICH_ALLOWED` line for script-bearing tag names.
+const RICH_ALLOWED = new Set(['P', 'BR', 'DIV', 'SPAN', 'B', 'STRONG', 'I', 'EM', 'U', 'S', 'STRIKE', 'DEL', 'UL', 'OL', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'BLOCKQUOTE', 'A', 'FONT', 'SUB', 'SUP', 'PRE', 'CODE', 'HR', 'TABLE', 'CAPTION', 'COLGROUP', 'COL', 'THEAD', 'TBODY', 'TFOOT', 'TR', 'TH', 'TD', 'IMG']);
+const RICH_DANGEROUS = new Set(['SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'EMBED', 'LINK', 'META', 'FORM', 'INPUT', 'BUTTON', 'SVG', 'TEXTAREA', 'BASE', 'TEMPLATE', 'NOSCRIPT', 'MATH', 'FRAME', 'FRAMESET', 'APPLET', 'PORTAL', 'SELECT', 'OPTION', 'OPTGROUP']);
+// Deny-by-default: an attribute survives only if this table names it for that tag.
+const RICH_ATTRS = {
+  A: ['href', 'title'],
+  IMG: ['src', 'alt', 'title', 'width', 'height'],
+  FONT: ['color', 'size', 'face'],
+  TD: ['colspan', 'rowspan'],
+  TH: ['colspan', 'rowspan', 'scope'],
+  COL: ['span'],
+  COLGROUP: ['span'],
+};
+const RICH_GLOBAL_ATTRS = ['style'];               // value-filtered, all tags
+
+// Constrain an <img src> to exactly what the app's CSP already permits
+// (img-src 'self' data: https:). Returns the cleaned value, or '' to reject.
+// PURE, NEVER THROWS (the parseCsv/parseJsonSafe contract).
+// The MIME list is deliberately incomplete — see the note below the function.
+function richImgSrc(v) {
+  const s = String(v == null ? '' : v).replace(/[\x00-\x20\x7f]/g, '');
+  if (/^https:\/\/\S/i.test(s)) return s;
+  if (/^data:image\/(png|jpeg|jpg|gif|webp|avif|bmp);base64,[A-Za-z0-9+/=]*$/i.test(s)) return s;
+  return '';
 }
+// Why that list is short, and must STAY short:
+//  - control/whitespace chars are stripped BEFORE the scheme test, so `java\tscript:`
+//    and a leading-space `javascript:` can't split past it;
+//  - the vector image format is ABSENT ON PURPOSE. It is a script-bearing document
+//    format, so permitting it as a data: source would be an XSS primitive. This is
+//    load-bearing, not an oversight — do not "complete" the MIME list;
+//  - `http:` is rejected (the CSP blocks it anyway, and it's mixed content on HTTPS);
+//  - blob:, protocol-relative and relative paths all fall through to '' (rejected).
+
+// Bare non-negative integer within bounds, else '' (reject). PURE, NEVER THROWS.
+// Used for width/height (max 10000) and colspan/rowspan/span (max 1000): these carry
+// no script surface, and dropping them visually scrambles every pasted merged table.
+function richIntAttr(v, max) {
+  const s = String(v == null ? '' : v).trim();
+  if (!/^\d{1,5}$/.test(s)) return '';
+  const n = Math.min(parseInt(s, 10), max || 10000);
+  return n > 0 ? String(n) : '';
+}
+
+// Last-resort degradation for the sanitizer: inert escaped text, never raw HTML.
+function richEscapeText(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function sanitizeRichHtml(html) {
+  try {
+    // A <template>'s content is an INERT document fragment: no image loads, no script
+    // execution, no onerror firing while we walk it.
+    const tpl = document.createElement('template');
+    tpl.innerHTML = String(html || '');
+    const clean = (node) => {
+      [...node.childNodes].forEach(clean);          // children first (post-order)
+      if (node.nodeType === 8) { node.remove(); return; }   // comment
+      if (node.nodeType !== 1) return;                       // keep text nodes
+      // UPPERCASE, not node.tagName as-is: an HTML element's tagName is already
+      // uppercase, but a FOREIGN-CONTENT element (SVG / MathML, incl. an <svg><script>)
+      // reports its lowercase local name — so a raw lookup missed 'SVG' entirely and
+      // merely UNWRAPPED it. That silently defeated the dangerous-tag drop for exactly
+      // the mXSS surface the list exists to close. Normalize before every lookup.
+      const tag = String(node.tagName || '').toUpperCase();
+      if (RICH_DANGEROUS.has(tag)) { node.remove(); return; }   // drop WITH subtree
+      if (!RICH_ALLOWED.has(tag)) {                          // unwrap unknown tag, keep text
+        const p = node.parentNode; if (!p) return;
+        while (node.firstChild) p.insertBefore(node.firstChild, node);
+        p.removeChild(node); return;
+      }
+      const allowed = RICH_ATTRS[tag] || [];
+      [...node.attributes].forEach(a => {
+        const name = a.name.toLowerCase();
+        const val = a.value;
+        if (name === 'style' && RICH_GLOBAL_ATTRS.indexOf('style') !== -1) {
+          if (/javascript:|expression\(|url\s*\(/i.test(val)) node.removeAttribute(a.name);
+          return;
+        }
+        if (allowed.indexOf(name) === -1) { node.removeAttribute(a.name); return; }   // deny-by-default
+        if (name === 'href') { if (!/^(https?:|mailto:)/i.test(val.trim())) node.removeAttribute(a.name); return; }
+        // A rejected src is REMOVED, not blanked — an empty src re-requests the page
+        // in some engines.
+        if (name === 'src') { const okSrc = richImgSrc(val); if (okSrc) node.setAttribute('src', okSrc); else node.removeAttribute(a.name); return; }
+        if (name === 'width' || name === 'height') { const n = richIntAttr(val, 10000); if (n) node.setAttribute(name, n); else node.removeAttribute(a.name); return; }
+        if (name === 'colspan' || name === 'rowspan' || name === 'span') { const n = richIntAttr(val, 1000); if (n) node.setAttribute(name, n); else node.removeAttribute(a.name); return; }
+        if (name === 'scope') { if (['row', 'col', 'rowgroup', 'colgroup'].indexOf(val.toLowerCase()) === -1) node.removeAttribute(a.name); return; }
+        // alt / title / color / size / face: free text, attribute-escaped on serialize
+      });
+      if (tag === 'A') { node.setAttribute('target', '_blank'); node.setAttribute('rel', 'noopener noreferrer'); }
+    };
+    clean(tpl.content);
+    return tpl.innerHTML;
+  } catch (e) {
+    // A sanitizer that throws must degrade to INERT TEXT — never to unsanitized
+    // HTML, and never to '' (which would silently delete the block's content).
+    return richEscapeText(html || '');
+  }
+}
+// A rich block's stored HTML can now legally carry data: images, so one pasted
+// screenshot can balloon the page — and every page is multiplied ×21 on disk
+// (current + 20 history versions). Soft warning only: a hard cap could only
+// truncate or reject the paste, i.e. silent content loss.
+const RICH_SOFT_WARN = 262144;                  // 256 KB of stored HTML
+const richWarned = new WeakSet();               // once per block per session
 
 // A checklist (todo) block: rows of { text, done }. No code/markdown surface.
 function newChecklistBlock() {
@@ -1802,7 +1892,16 @@ function newBlockOfKind(kind) {
 function richToPlainText(html) {
   let s = String(html || '');
   s = s.replace(/<\s*br\s*\/?>/gi, '\n');
-  s = s.replace(/<\/(p|div|li|h[1-6]|blockquote|pre|tr|ul|ol)\s*>/gi, '\n');
+  // An <img> carries its meaning in alt= — keep that instead of dropping the element.
+  s = s.replace(/<img\b[^>]*>/gi, (m) => {
+    const a = /\balt\s*=\s*("([^"]*)"|'([^']*)')/i.exec(m);
+    return a ? (a[2] != null ? a[2] : (a[3] || '')) : '';
+  });
+  // Cells become TAB-separated so a table survives as a real grid (this is what makes
+  // rich→csv convert produce a table rather than one run-on line). Must run BEFORE the
+  // block-close pass, which would otherwise swallow </td> via the generic alternation.
+  s = s.replace(/<\/(td|th)\s*>/gi, '\t');
+  s = s.replace(/<\/(p|div|li|h[1-6]|blockquote|pre|tr|ul|ol|table|thead|tbody|tfoot|caption)\s*>/gi, '\n');
   s = s.replace(/<[^>]+>/g, '');                 // strip remaining tags
   const ta = document.createElement('textarea'); // decode entities (&amp; &lt; …)
   ta.innerHTML = s;
@@ -2519,6 +2618,41 @@ function createLangPicker(block, onChange) {
 // autosaves and re-renders until the session ends (save or revert).
 const blockBackups = new WeakMap();
 
+// Is a block edit session open on the active page? Derived from the DOM, NOT from a
+// tracked Set: a Set would hold a strong ref to the block object and would go stale
+// the moment an editing block is deleted (splice + renderPage) or the page is
+// re-rendered — permanently suppressing autosave with no way to notice. The DOM is
+// self-healing: renderPage rebuilds the editing state from blockBackups, and a
+// removed block simply isn't in #page any more.
+// `.checklist` is excluded because it is the ONE block kind with no edit session (it
+// is always live-editable, has no Cancel, and so never carries `.viewing`).
+function anyBlockEditing() {
+  try { return !!document.querySelector('#page .block:not(.viewing):not(.checklist)'); }
+  catch (e) { return false; }   // FAIL OPEN: a broken predicate must degrade to SAVING
+}
+
+// Focus left the block entirely → persist NOW (the crash-safety bound while autosave is
+// deferred), but DO NOT end the edit session: sticky editing is deliberate (see the
+// "no blur handler" note on the code textarea), and ending it here would hide
+// Save/Revert mid-click again. Honors the original blur gotcha — a toolbar click inside
+// the block bails via relatedTarget — plus a `.mini-menu` exemption, because a menu
+// opened from THIS block's toolbar lives on document.body and would otherwise read as a
+// departure (one history slot per menu open). The pageDirty guard caps repeated
+// clicking around at ONE write: savePage clears the flag, only a new keystroke re-marks it.
+function wireFocusFlush(el) {
+  el.addEventListener('focusout', (e) => {
+    // The SESSION ENDING is not a departure. Save / Cancel add `.viewing`, which CSS-hides
+    // the focused textarea — the browser then fires focusout with a null relatedTarget, and
+    // without this guard an explicit Save cost TWO writes (its own, plus this flush landing
+    // mid-flight → savePending → a second request) and two history versions. Likewise a
+    // convert/delete detaches the element via renderPage; that path arms its own save.
+    if (el.classList.contains('viewing') || !document.contains(el)) return;
+    if (e.relatedTarget && (el.contains(e.relatedTarget) || e.relatedTarget.closest('.mini-menu'))) return;
+    if (document.querySelector('.mini-menu')) return;
+    if (currentPagePath && pageDirty.has(currentPagePath)) savePage();
+  });
+}
+
 // Editor line metrics. The gutter, the transparent textarea, and the Prism
 // view MUST share these EXACTLY or line numbers/caret drift apart (the Prism
 // theme otherwise forces code to line-height:1.5). They're applied as INLINE
@@ -2802,7 +2936,16 @@ function renderRichBlock(block, parentArray, idx) {
     revertBtn.textContent = dirty ? 'Revert' : 'Cancel';
     revertBtn.title = dirty ? 'Undo changes made since you started editing' : 'Exit edit mode (no changes)';
   }
-  const syncFromSurface = () => { block.code = sanitizeRichHtml(surface.innerHTML); scheduleSave(); refreshRevertLabel(); };
+  // Warn ONCE per block per session when the stored HTML crosses the soft threshold
+  // (a pasted data: image is the usual cause). Never truncates — see RICH_SOFT_WARN.
+  const warnIfBig = () => {
+    if (richWarned.has(block) || (block.code || '').length <= RICH_SOFT_WARN) return;
+    richWarned.add(block);
+    toast('This rich block is ' + htmlBytesLabel((block.code || '').length)
+      + '. It is stored inside the page, and every save keeps up to 20 history versions — so it can use around '
+      + htmlBytesLabel((block.code || '').length * 21) + ' on the server.');
+  };
+  const syncFromSurface = () => { block.code = sanitizeRichHtml(surface.innerHTML); warnIfBig(); scheduleSave(); refreshRevertLabel(); };
   surface.addEventListener('input', syncFromSurface);
   // Tab / Shift+Tab nest & un-nest list items (like a real editor). Only when the
   // caret is inside a list item, so Tab elsewhere still moves focus out normally.
@@ -2884,6 +3027,7 @@ function renderRichBlock(block, parentArray, idx) {
 
   // ---- Edit / Save / Revert / Copy / Duplicate / convert / Delete ----
   function enterEdit() {
+    beforeEditSession();               // BEFORE .viewing drops (the predicate is DOM-derived)
     blockBackups.set(block, block.code || '');
     el.classList.remove('viewing');
     surface.setAttribute('contenteditable', 'true');
@@ -2913,7 +3057,7 @@ function renderRichBlock(block, parentArray, idx) {
       surface.innerHTML = sanitizeRichHtml(backup) || '<p><br></p>';
       el.classList.remove('viewing');
       surface.setAttribute('contenteditable', 'true');
-      savePage();
+      afterEditSession();
       refreshRevertLabel();
       surface.focus();
       toast('Reverted');
@@ -2921,6 +3065,7 @@ function renderRichBlock(block, parentArray, idx) {
       blockBackups.delete(block);
       el.classList.add('viewing');
       surface.setAttribute('contenteditable', 'false');
+      afterEditSession();
     }
   });
   revertBtn.className = 'secondary block-revert';
@@ -2963,6 +3108,7 @@ function renderRichBlock(block, parentArray, idx) {
   toolbar.append(labelInput, spacer, typeBtn, editBtn, saveBtn, revertBtn, copyBtn, dupBtn, overflowBtn, delBtn);
   el.append(toolbar, fmt, surface);
   refreshRevertLabel();
+  wireFocusFlush(el);
   return el;
 }
 
@@ -3069,6 +3215,7 @@ function renderCsvBlock(block, parentArray, idx) {
   });
 
   function enterEdit() {
+    beforeEditSession();               // BEFORE .viewing drops (the predicate is DOM-derived)
     blockBackups.set(block, block.code || '');
     el.classList.remove('viewing');
     refreshRevertLabel();
@@ -3094,11 +3241,12 @@ function renderCsvBlock(block, parentArray, idx) {
     if ((block.code || '') !== backup) {
       block.code = backup; textarea.value = backup;
       el.classList.remove('viewing');
-      renderTable(); autosize(); savePage(); refreshRevertLabel(); textarea.focus();
+      renderTable(); autosize(); afterEditSession(); refreshRevertLabel(); textarea.focus();
       toast('Reverted');
     } else {
       blockBackups.delete(block);
       el.classList.add('viewing');
+      afterEditSession();
     }
   });
   revertBtn.className = 'secondary block-revert';
@@ -3133,6 +3281,7 @@ function renderCsvBlock(block, parentArray, idx) {
   toolbar.append(labelInput, spacer, typeBtn, editBtn, saveBtn, revertBtn, copyBtn, dupBtn, overflowBtn, delBtn);
   el.append(toolbar, textarea, view);
   renderTable();
+  wireFocusFlush(el);
   if (!el.classList.contains('viewing')) requestAnimationFrame(autosize);
   return el;
 }
@@ -3321,6 +3470,7 @@ function renderJsonBlock(block, parentArray, idx) {
   });
 
   function enterEdit() {
+    beforeEditSession();               // BEFORE .viewing drops (the predicate is DOM-derived)
     blockBackups.set(block, block.code || '');
     el.classList.remove('viewing');
     refreshRevertLabel();
@@ -3346,11 +3496,12 @@ function renderJsonBlock(block, parentArray, idx) {
     if ((block.code || '') !== backup) {
       block.code = backup; textarea.value = backup;
       el.classList.remove('viewing');
-      renderTree(); autosize(); savePage(); refreshRevertLabel(); textarea.focus();
+      renderTree(); autosize(); afterEditSession(); refreshRevertLabel(); textarea.focus();
       toast('Reverted');
     } else {
       blockBackups.delete(block);
       el.classList.add('viewing');
+      afterEditSession();
     }
   });
   revertBtn.className = 'secondary block-revert';
@@ -3400,6 +3551,7 @@ function renderJsonBlock(block, parentArray, idx) {
   toolbar.append(labelInput, spacer, typeBtn, editBtn, saveBtn, revertBtn, treeToggleBtn, copyBtn, dupBtn, overflowBtn, delBtn);
   el.append(toolbar, textarea, view);
   renderTree();
+  wireFocusFlush(el);
   if (!el.classList.contains('viewing')) requestAnimationFrame(autosize);
   return el;
 }
@@ -3769,6 +3921,7 @@ function renderHtmlBlock(block, parentArray, idx) {
   });
 
   function enterEdit() {
+    beforeEditSession();               // BEFORE .viewing drops (the predicate is DOM-derived)
     blockBackups.set(block, block.code || '');
     el.classList.remove('viewing');
     refreshRevertLabel();
@@ -3795,11 +3948,12 @@ function renderHtmlBlock(block, parentArray, idx) {
     if ((block.code || '') !== backup) {
       block.code = backup; textarea.value = backup;
       el.classList.remove('viewing');
-      refreshAfterMutation(); autosize(); savePage(); refreshRevertLabel(); textarea.focus();
+      refreshAfterMutation(); autosize(); afterEditSession(); refreshRevertLabel(); textarea.focus();
       toast('Reverted');
     } else {
       blockBackups.delete(block);
       el.classList.add('viewing');
+      afterEditSession();
     }
   });
   revertBtn.className = 'secondary block-revert';
@@ -3898,6 +4052,7 @@ function renderHtmlBlock(block, parentArray, idx) {
 
   toolbar.append(labelInput, spacer, typeBtn, editBtn, saveBtn, revertBtn, runBtn, stopBtn, uploadBtn, copyBtn, dupBtn, overflowBtn, delBtn);
   el.append(toolbar, textarea, view);
+  wireFocusFlush(el);
 
   // Drag-and-drop a folder straight onto the block.
   el.addEventListener('dragover', (e) => { e.preventDefault(); el.classList.add('drop-active'); });
@@ -4217,6 +4372,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     // (Re)baseline this edit session to the current code, so the button reads
     // "Cancel" until you actually change something — even when re-entering a
     // block you previously edited and clicked away from.
+    beforeEditSession();               // BEFORE .viewing drops (the predicate is DOM-derived)
     blockBackups.set(block, block.code || '');
     el.classList.remove('viewing');
     updatePreview();   // show the raw template (with markers) while editing
@@ -4266,7 +4422,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
       renderVarsPanel();          // code reverted → refresh var fields
       refreshSectionVars();
       updatePreview();
-      savePage();                 // persist the revert (overrides autosaved edits)
+      afterEditSession();         // persist the revert only if it isn't provably a no-op
       refreshRevertLabel();       // back to "Cancel" now that it's clean
       textarea.focus();
       toast('Reverted');
@@ -4278,6 +4434,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
       else { codeWrap.style.height = ''; userCodeH = 0; }   // drop any manual code-editor resize on exit
       renderVarsPanel();
       updatePreview();
+      afterEditSession();
     }
   });
   revertBtn.className = 'secondary block-revert';
@@ -4667,6 +4824,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
   stack.append(view, textarea);
   codeWrap.append(gutter, stack);
   el.append(toolbar, varsPanel, codeWrap);
+  wireFocusFlush(el);
   // If this block re-rendered while mid-edit (a backup exists → not 'viewing'),
   // fit the editor once it's in the DOM (scrollHeight is 0 until attached).
   if (!el.classList.contains('viewing')) requestAnimationFrame(() => { if (block.note) autosizeNote(); else autosizeCode(); });
@@ -4711,9 +4869,51 @@ function editorCapPx() {
 let pageDirty = new Set();
 
 function scheduleSave() {
-  if (currentPagePath) pageDirty.add(currentPagePath);
-  if (saveTimer) clearTimeout(saveTimer);
+  if (currentPagePath) pageDirty.add(currentPagePath);   // UNCHANGED choke point
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+  // Defer the NETWORK write while a block editor is open, so an edit the user intends
+  // to Cancel never reaches the server and never burns a HISTORY_KEEP slot. Only the
+  // debounced write is skipped — the page stays DIRTY, and every editor assigns
+  // block.code on `input` BEFORE calling scheduleSave, so currentPageData always holds
+  // the live buffer and flushSave (tab switch / unload) still persists it. That
+  // property is what the whole deferral rests on; don't break it.
+  if (anyBlockEditing()) return;
   saveTimer = setTimeout(savePage, 500);
+}
+
+// Whole-page snapshot taken when an edit session begins on an otherwise-clean page.
+// If the page is byte-identical at session end (a Cancel/Revert that undid everything),
+// the page is provably back to the persisted state and the write can be skipped
+// entirely — that is what makes Cancel cost ZERO history versions.
+const SNAPSHOT_MAX = 262144;   // don't stringify a 1 MB html-project page twice per session
+let cleanPageSnapshot = null;
+
+// Serialize a page for identity comparison. Returns null when it can't (cycles) or when
+// it's over `limit` — callers treat null as "can't prove clean". PURE, NEVER THROWS.
+function safeStringify(data, limit) {
+  try { const s = JSON.stringify(data); return (s && s.length <= (limit || SNAPSHOT_MAX)) ? s : null; }
+  catch (e) { return null; }
+}
+
+// Capture the clean baseline as a block edit session BEGINS. Called from each
+// enterEdit BEFORE the element drops `.viewing` — the predicate is DOM-derived, so
+// the order matters (this must see "no editor open yet").
+function beforeEditSession() {
+  if (anyBlockEditing() || !currentPagePath || pageDirty.has(currentPagePath)) return;
+  cleanPageSnapshot = safeStringify(currentPageData);
+}
+
+// Called when a block edit session ENDS (Cancel / completed Revert).
+function afterEditSession() {
+  if (anyBlockEditing()) return;                       // another editor still open → stay deferred
+  if (cleanPageSnapshot != null && safeStringify(currentPageData) === cleanPageSnapshot) {
+    if (currentPagePath) pageDirty.delete(currentPagePath);   // provably back to the persisted state
+  }
+  cleanPageSnapshot = null;
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+  // Deliberately NOT scheduleSave() — that would re-mark the page dirty. scheduleSave
+  // stays the single dirty-marking choke point; this only arms the deferred timer.
+  if (currentPagePath && pageDirty.has(currentPagePath)) saveTimer = setTimeout(savePage, 500);
 }
 
 async function savePage() {
@@ -4723,6 +4923,7 @@ async function savePage() {
   // one lands after the first bumped the file's mtime → a false conflict prompt.
   // While a save is in flight, mark dirty and re-save once it returns instead.
   if (saveInFlight) { savePending = true; return; }
+  cleanPageSnapshot = null;   // once we write, the snapshot no longer describes disk
   saveInFlight = true;
   const savedPath = currentPagePath;
   try {
@@ -4791,6 +4992,7 @@ function flushSave(opts) {
   // / unload on an unchanged page must do NOTHING (no forced save → no history
   // snapshot, no mtime bump). Call sites stay unconditional; the gate lives here.
   if (!pageDirty.has(currentPagePath)) return;
+  cleanPageSnapshot = null;   // once we write, the snapshot no longer describes disk
   const path = currentPagePath, data = currentPageData;
   const tab = openPages.find(t => t.path === path);
   if (opts && opts.keepalive) {

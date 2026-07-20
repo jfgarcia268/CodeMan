@@ -558,6 +558,14 @@ switch ($action) {
                 if (strpos($content, '"b64"') !== false) {
                     $content = preg_replace('/"b64"\s*:\s*"[A-Za-z0-9+\/=]*"/', '"b64":""', $content);
                 }
+                // Rich-text blocks may embed an image INLINE as a data: URL (the sanitizer
+                // allows data:image/…;base64,…). Same false-hit problem as "b64", but the
+                // payload sits mid-string inside the block's HTML rather than under its own
+                // key — so blank the base64 run itself. Guarded by a presence strpos so
+                // pages with no inline image pay one substring check.
+                if (strpos($content, 'data:image/') !== false) {
+                    $content = preg_replace('/data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+\/=]*/i', 'data:image/x;base64,', $content);
+                }
                 // Fast path: scan the raw JSON directly (save_page stores
                 // JSON_UNESCAPED_UNICODE, so most content — incl. UTF-8 — matches as-is).
                 $matched = stripos($content, $q) !== false;
@@ -576,6 +584,9 @@ switch ($action) {
                         // reintroduce the false positives through this branch
                         if (strpos($hay, '"b64"') !== false) {
                             $hay = preg_replace('/"b64"\s*:\s*"[A-Za-z0-9+\/=]*"/', '"b64":""', $hay);
+                        }
+                        if (strpos($hay, 'data:image/') !== false) {
+                            $hay = preg_replace('/data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+\/=]*/i', 'data:image/x;base64,', $hay);
                         }
                         $matched = stripos($hay, $q) !== false;
                     }

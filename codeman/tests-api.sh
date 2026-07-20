@@ -159,6 +159,13 @@ post save_page '{"path":"Proj2.json","data":{"title":"Proj2","sections":[{"title
 hasnt "search_content fallback ignores a slash-query inside b64" "$(sc 'ap/v1')"       "Proj2.json"
 has   "search_content fallback still matches real CJK content"   "$(sc '日本語marker')" "Proj2.json"
 
+# A RICH block can embed an image INLINE as a data: URL (the sanitizer allows
+# data:image/…;base64,…). Same false-hit problem as "b64", but mid-string inside the
+# block's HTML rather than under its own key — so the base64 run itself is blanked.
+post save_page '{"path":"Rich.json","data":{"title":"Rich","sections":[{"title":"S","collapsed":false,"tags":[],"blocks":[{"type":"plaintext","rich":true,"label":"","code":"<p>quarterly notes</p><img src=\"data:image/png;base64,AAAAinvoiceAAAAledgerAAAA\">"}],"subsections":[]}]}}' >/dev/null
+hasnt "search_content ignores a word inside an inline data: image" "$(sc 'invoice')"   "Rich.json"
+has   "search_content still matches the rich block's real prose"   "$(sc 'quarterly')" "Rich.json"
+
 # --- list_tags (index-backed: pageMetaIndexed + flushIndex) ----------------
 post save_page '{"path":"TagA.json","data":{"title":"TagA","sections":[{"title":"S","collapsed":false,"tags":["alpha","shared"],"blocks":[],"subsections":[]}]}}' >/dev/null
 post save_page '{"path":"TagB.json","data":{"title":"TagB","sections":[{"title":"S","collapsed":false,"tags":["shared"],"blocks":[],"subsections":[]}]}}' >/dev/null
