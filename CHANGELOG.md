@@ -96,6 +96,17 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
   written atomically, and a version that isn't valid JSON is refused instead of replacing a good page.
 - The "Project not imported" message shown when an HTML project exceeds the size cap now has a
   single **OK** button — it previously offered a "Cancel" that did exactly the same thing.
+- **Deleting a block while editing it no longer saves the page twice**, so it costs one page-History
+  version instead of two.
+- **Esc now cancels the editor in every block kind.** It only worked in Code and Note blocks; in Rich
+  Text, Table (CSV), JSON and HTML blocks it did nothing, so the only way out was the Cancel button.
+  Esc reverts unsaved changes exactly like Cancel does — and when a `⋯` menu is open, Esc still just
+  closes the menu.
+- **`⋯` menus that open from a column-sort or Export button no longer run off the bottom of a short
+  window.** In a window under about 500px tall the last options couldn't be reached at all (the menu
+  can't be scrolled to). Menus that already fit are positioned exactly as before.
+- Multi-line messages in dialogs now keep their line breaks instead of running together — most
+  visible in the "Project not imported" list of oversized files.
 
 ### Security
 - The HTML preview runs in an iframe with `sandbox="allow-scripts"` and **no** `allow-same-origin` —

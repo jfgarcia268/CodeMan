@@ -144,6 +144,27 @@
   t('miniMenuHasCheck ignores dividers', miniMenuHasCheck([{ divider: true }, { label: 'a' }]), false);
   t('miniMenuHasCheck empty list → false', miniMenuHasCheck([]), false);
 
+  // miniMenuClampPos: the anchorRect mode's viewport guard. Its defining property is
+  // that it is a NO-OP while the box fits — the mode's contract is "plain position from
+  // the caller's rect", so a fitting menu must land on exactly the pixel it used to.
+  // Only a genuine overflow shifts it (never a flip: an anchorRect has no usable top).
+  t('miniMenuClampPos leaves a fitting box untouched',
+    miniMenuClampPos(227, 400, 200, 243, 1440, 900), { top: 227, left: 400 });
+  t('miniMenuClampPos exact bottom fit is untouched (boundary)',
+    miniMenuClampPos(657, 400, 200, 243, 1440, 900), { top: 657, left: 400 });
+  t('miniMenuClampPos exact right fit is untouched (boundary)',
+    miniMenuClampPos(100, 1240, 200, 100, 1440, 900), { top: 100, left: 1240 });
+  t('miniMenuClampPos shifts a bottom overflow back inside (the 420px-tall window bug)',
+    miniMenuClampPos(227, 400, 200, 243, 1440, 420), { top: 169, left: 400 });
+  t('miniMenuClampPos shifts a right overflow back inside',
+    miniMenuClampPos(100, 1300, 200, 100, 1440, 900), { top: 100, left: 1232 });
+  t('miniMenuClampPos pins a box taller than the viewport to the pad',
+    miniMenuClampPos(300, 400, 200, 800, 1440, 420), { top: 8, left: 400 });
+  t('miniMenuClampPos pulls a negative origin to the pad',
+    miniMenuClampPos(-30, -10, 200, 100, 1440, 900), { top: 8, left: 8 });
+  t('miniMenuClampPos honours a caller-supplied pad',
+    miniMenuClampPos(400, 0, 200, 100, 1440, 420, 20), { top: 300, left: 0 });
+
   // Duplicate deep-copy + insert-below: the copy lands at idx+1 and is independent.
   {
     const arr = [{ code: 'a' }, { code: 'b' }];
@@ -1806,19 +1827,37 @@
           // ENDING is not a departure. Save/Cancel add `.viewing`, which CSS-hides the focused
           // textarea → the browser fires focusout with a null relatedTarget, and without the
           // guard an explicit Save cost TWO writes (its own + this flush landing mid-flight).
+          // The flush's decision is DEFERRED one task (see wireFocusFlush), so these waits
+          // must clear a macrotask, not just microtasks.
+          const flushTick = async () => { await new Promise(r => setTimeout(r, 0)); await Promise.resolve(); await Promise.resolve(); };
           saves = 0;
           const fb = mk('block');
           wireFocusFlush(fb);
           pageDirty.clear(); pageDirty.add(EP);
           fb.classList.add('viewing');
           fb.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
-          await Promise.resolve(); await Promise.resolve();
+          await flushTick();
           ta('focus flush writes NOTHING when the session just ended (.viewing)', saves, 0);
           fb.classList.remove('viewing');
           fb.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
-          await Promise.resolve(); await Promise.resolve();
+          await flushTick();
           ta('focus flush writes once on a real departure from an open editor', saves, 1);
           fb.remove();
+          if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+
+          // …and a TEARDOWN is not a departure either (the delete-while-editing double
+          // write). Delete splices the block and calls renderPage(), whose `#page.innerHTML
+          // = ''` makes the engine dispatch the focused Delete button's focusout while the
+          // block is STILL in the document and still lacks `.viewing` — so the sync guards
+          // can't see it. Replayed here exactly: focusout, then the teardown, in one task.
+          saves = 0;
+          const tb = mk('block');
+          wireFocusFlush(tb);
+          pageDirty.clear(); pageDirty.add(EP);
+          tb.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
+          tb.remove();                    // stands in for renderPage() finishing the rebuild
+          await flushTick();
+          ta('focus flush writes NOTHING when the block is torn down (delete/convert)', saves, 0);
           if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
 
           // Pin the predicate against a FUTURE block kind: every kind must render either
@@ -1831,6 +1870,54 @@
             return el.classList.contains('viewing') || el.classList.contains('checklist');
           });
           ta('every BLOCK_KINDS kind renders as .viewing or .checklist', kinds, BLOCK_KINDS.map(() => true));
+
+          // Esc parity across all SIX edit-session kinds. Escape must route through the
+          // Cancel/Revert BUTTON — on a clean editor that button's observable outcome is
+          // "exit edit mode" (the block gains .viewing). It used to be wired only on the
+          // code/note textarea, so rich/csv/json/html had no Escape at all.
+          pageDirty.clear();
+          const ESC_SURFACE = { code: '.code-edit', note: '.code-edit', rich: '.rich-surface',
+                                csv: '.csv-edit', json: '.json-edit', html: '.html-edit' };
+          const escKinds = BLOCK_KINDS.map(k => k.kind).filter(k => k !== 'checklist');
+          const escResults = escKinds.map(kind => {
+            const b = newBlockOfKind(kind);
+            blockBackups.set(b, b.code || '');          // render straight into edit mode
+            const bel = renderBlock(b, [b], 0);
+            const surface = bel.querySelector(ESC_SURFACE[kind]);
+            if (!surface) return kind + ': no editing surface';
+            surface.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            blockBackups.delete(b);
+            return bel.classList.contains('viewing') || (kind + ': Esc did not exit edit mode');
+          });
+          ta('Esc exits the editor in every edit-session block kind', escResults, escKinds.map(() => true));
+
+          // …and on a DIRTY editor it must REVERT (not merely exit) — same button, dirty branch.
+          {
+            const b = newBlockOfKind('csv');
+            blockBackups.set(b, 'a,b');
+            b.code = 'a,b\n1,2';
+            const bel = renderBlock(b, [b], 0);
+            bel.querySelector('.csv-edit').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            blockBackups.delete(b);
+            ta('Esc on a dirty editor restores the backup (the Revert branch)', b.code, 'a,b');
+          }
+
+          // An open ⋯ menu owns Escape (showMiniMenu closes itself on it) — the editor
+          // must not steal it and exit edit mode underneath the menu.
+          {
+            const b = newBlockOfKind('csv');
+            blockBackups.set(b, '');
+            const bel = renderBlock(b, [b], 0);
+            const fakeMenu = document.createElement('div');
+            fakeMenu.className = 'mini-menu';
+            document.body.appendChild(fakeMenu);
+            bel.querySelector('.csv-edit').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            fakeMenu.remove();
+            blockBackups.delete(b);
+            ta('Esc is left to an open ⋯ menu (the editor stays open)', bel.classList.contains('viewing'), false);
+          }
+          pageDirty.clear();
+          if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
 
           // safeStringify: the "can I prove the page is unchanged?" primitive.
           const cyc = { a: 1 }; cyc.self = cyc;

@@ -1972,6 +1972,26 @@ function miniMenuHasCheck(items) {
   return items.some(it => it && !it.divider && it.checked !== undefined);
 }
 
+// Pure: keep an anchorRect-positioned menu box inside the viewport.
+// It returns the requested {top,left} UNCHANGED whenever the box already fits — the
+// anchorRect contract is "plain position from the caller's rect", and preserving that
+// byte-for-byte in the normal case is the whole point of the mode. Only a genuine
+// overflow moves the box, and then by the minimum needed to bring it back inside with
+// a `pad` margin. It SHIFTS, never flips: an anchorRect carries a bottom edge but not
+// necessarily a usable top edge, so there's nothing to flip around. `.mini-menu` is
+// height-capped (min(70vh,520px)) and scrolls internally, so a shifted menu always has
+// every row reachable. NEVER THROWS.
+const MINI_MENU_PAD = 8;
+function miniMenuClampPos(top, left, w, h, vw, vh, pad) {
+  const p = pad == null ? MINI_MENU_PAD : pad;
+  let t = top, l = left;
+  if (l + w > vw) l = Math.max(p, vw - p - w);
+  else if (l < 0) l = p;
+  if (t + h > vh) t = Math.max(p, vh - p - h);
+  else if (t < 0) t = p;
+  return { top: t, left: l };
+}
+
 // The single accessible popup-menu implementation, anchored to a button.
 // items: [{icon,label,active,checked,onClick}] (or {divider:true} for a separator).
 // A `checked` (boolean) makes the option a role="menuitemradio" and marks the menu
@@ -1993,8 +2013,13 @@ function miniMenuHasCheck(items) {
 //   default            — clamp to the viewport + flip upward near the bottom edge.
 //   opts.align:'right' — right-align under the anchor (openMoreMenu: left=r.right,
 //                        translateX(-100%)) so it tucks under the sidebar.
-//   opts.anchorRect    — plain position from a caller-supplied rect, no clamp/flip
-//                        (the exportMenu submenu case).
+//   opts.anchorRect    — plain position from a caller-supplied rect (the exportMenu /
+//                        colsort / Copy-as cases). No flip, and NO clamp while the box
+//                        fits — the position is then byte-identical to the rect. Only a
+//                        genuine viewport overflow shifts it back inside (see
+//                        miniMenuClampPos); without that, a short window left the last
+//                        rows unreachable (.mini-menu is position:fixed, so the page
+//                        can't be scrolled to them).
 function showMiniMenu(anchorEl, items, opts = {}) {
   const open = document.querySelector('.mini-menu');
   if (open) { const wasMine = open._anchor === anchorEl; (open._close || open.remove).call(open, false); if (wasMine) return; }
@@ -2041,10 +2066,14 @@ function showMiniMenu(anchorEl, items, opts = {}) {
 
   // --- positioning (three preserved modes) ---
   if (opts.anchorRect) {
-    // exportMenu: plain position from the supplied rect (no clamp, no flip).
+    // exportMenu / colsort / Copy-as: plain position from the supplied rect (no flip).
+    // miniMenuClampPos is a no-op while the box fits, so a menu that isn't overflowing
+    // lands on exactly the same pixel as before; only an off-viewport one is pulled back.
     const rect = opts.anchorRect;
-    menu.style.top = Math.round(rect.bottom + 4) + 'px';
-    menu.style.left = Math.round(rect.left) + 'px';
+    const pos = miniMenuClampPos(rect.bottom + 4, rect.left, menu.offsetWidth, menu.offsetHeight,
+                                 window.innerWidth, window.innerHeight);
+    menu.style.top = Math.round(pos.top) + 'px';
+    menu.style.left = Math.round(pos.left) + 'px';
   } else {
     const r = anchorEl.getBoundingClientRect();
     if (opts.align === 'right') {
@@ -2644,12 +2673,45 @@ function wireFocusFlush(el) {
     // The SESSION ENDING is not a departure. Save / Cancel add `.viewing`, which CSS-hides
     // the focused textarea — the browser then fires focusout with a null relatedTarget, and
     // without this guard an explicit Save cost TWO writes (its own, plus this flush landing
-    // mid-flight → savePending → a second request) and two history versions. Likewise a
-    // convert/delete detaches the element via renderPage; that path arms its own save.
+    // mid-flight → savePending → a second request) and two history versions.
     if (el.classList.contains('viewing') || !document.contains(el)) return;
     if (e.relatedTarget && (el.contains(e.relatedTarget) || e.relatedTarget.closest('.mini-menu'))) return;
     if (document.querySelector('.mini-menu')) return;
-    if (currentPagePath && pageDirty.has(currentPagePath)) savePage();
+    // A TEARDOWN is not a departure either. Delete/convert splice the block and call
+    // renderPage(), which does `#page.innerHTML = ''` — and the engine dispatches the
+    // focused button's focusout at the START of that removal, while this element still
+    // reports `document.contains(el) === true` and hasn't gained `.viewing`. The sync
+    // guards above therefore can't see it, and a delete-while-editing cost TWO writes
+    // (this flush, then the delete's own scheduleSave). So re-check the element's state
+    // one task later: by then the teardown has finished and `el` is detached.
+    //   Deferring (rather than a "renderPage is running" flag) keys the decision on the
+    // OBSERVABLE end state instead of on knowing every teardown path, so a future
+    // detach route is covered for free and an engine that ever dispatches this focusout
+    // asynchronously still lands on the same answer.
+    //   It cannot swallow a real departure: the only ways to fail the re-check are
+    // `.viewing` (the session ended → Save wrote, or Cancel ran afterEditSession) and
+    // detached (renderPage ran → its mutation path called scheduleSave). Both persist
+    // by their own route, and the page stays in `pageDirty` regardless.
+    setTimeout(() => {
+      if (el.classList.contains('viewing') || !document.contains(el)) return;
+      if (currentPagePath && pageDirty.has(currentPagePath)) savePage();
+    }, 0);
+  });
+}
+
+// Esc inside an open editor = a quick "done". It MUST route through the Cancel/Revert
+// BUTTON (not a bespoke revert) so the afterEditSession()/pageDirty wiring stays
+// identical across all six edit-session kinds — that button is the one place each kind
+// decides "clean ⇒ just exit" vs "dirty ⇒ restore the backup and stay open".
+// An open ⋯ menu owns Escape (showMiniMenu closes itself on it). It also holds focus
+// while open, so this listener normally can't fire then; the guard is belt-and-braces
+// for a menu opened without moving focus.
+function wireEscapeRevert(surfaceEl, revertBtn) {
+  surfaceEl.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (document.querySelector('.mini-menu')) return;
+    e.preventDefault();
+    revertBtn.click();
   });
 }
 
@@ -3069,6 +3131,7 @@ function renderRichBlock(block, parentArray, idx) {
     }
   });
   revertBtn.className = 'secondary block-revert';
+  wireEscapeRevert(surface, revertBtn);
 
   const copyBtn = mkBtn('Copy', () => {
     copyText(surface.innerText || '').then(ok => { if (ok) recordCopy(block); flashCopied(copyBtn, ok ? 'Copied to clipboard' : 'Copy failed'); });
@@ -3250,6 +3313,7 @@ function renderCsvBlock(block, parentArray, idx) {
     }
   });
   revertBtn.className = 'secondary block-revert';
+  wireEscapeRevert(textarea, revertBtn);
 
   const copyBtn = mkBtn('Copy', () => {
     copyText(block.code || '').then(ok => { if (ok) recordCopy(block); flashCopied(copyBtn, ok ? 'Copied to clipboard' : 'Copy failed'); });
@@ -3505,6 +3569,7 @@ function renderJsonBlock(block, parentArray, idx) {
     }
   });
   revertBtn.className = 'secondary block-revert';
+  wireEscapeRevert(textarea, revertBtn);
 
   const copyBtn = mkBtn('Copy', () => {
     copyText(block.code || '').then(ok => { if (ok) recordCopy(block); flashCopied(copyBtn, ok ? 'Copied to clipboard' : 'Copy failed'); });
@@ -3957,6 +4022,7 @@ function renderHtmlBlock(block, parentArray, idx) {
     }
   });
   revertBtn.className = 'secondary block-revert';
+  wireEscapeRevert(textarea, revertBtn);
 
   // Copy hands over the BUNDLED document (the thing you'd paste into a file and open).
   // Deliberately NOT recordCopy(block) — recentCopies is a localStorage array and
@@ -4737,11 +4803,9 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
   // while a block sits in edit mode. The old blur handler's side-effects (updateActiveLine/
   // renderVarsPanel/refreshSectionVars/updatePreview) only prepped the view-mode render and
   // already run on Save and on live input, so they're not needed on blur.
-  textarea.addEventListener('keydown', (e) => {
-    // Esc = a quick "done": same path as the Cancel/Revert button (cancels when
-    // clean, reverts when dirty), so blocks don't pile up open without a mouse exit.
-    if (e.key === 'Escape') { e.preventDefault(); revertBtn.click(); }
-  });
+  // Esc = a quick "done" (cancels when clean, reverts when dirty), so blocks don't pile
+  // up open without a mouse exit. Shared with the other five kinds — see wireEscapeRevert.
+  wireEscapeRevert(textarea, revertBtn);
 
   const view = document.createElement('div');
   view.className = 'code-view';

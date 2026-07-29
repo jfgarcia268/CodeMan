@@ -1789,6 +1789,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   color: var(--text);
   margin-bottom: 12px;
   line-height: 1.45;
+  /* Modal messages are plain strings; some are multi-line (the html-project over-cap
+     rejection is a \n-separated list of oversized files). pre-line honours those
+     newlines while still collapsing runs of spaces and wrapping normally, so the
+     single-line messages every other caller passes render exactly as before. */
+  white-space: pre-line;
 }
 .modal-input {
   width: 100%;

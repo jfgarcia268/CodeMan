@@ -126,6 +126,9 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
   - Type, click **Save** → **exactly one** write.
   - Type, then click into another block (**focus departure**) → **exactly one** write, and the
     **edit session stays open** (Save/Revert still showing — sticky editing is deliberate).
+  - Type, then click the block's own **Delete** → **exactly one** write and **exactly one** new
+    History version. (It used to be two: the focus flush fired as `renderPage()` tore the block
+    down, then the delete's own save followed. A teardown is not a focus departure.)
   - Type, then switch **browser tabs** → **one forced keepalive write.** This is the documented
     exception: an edit backgrounded mid-session **is** persisted (gating that would be data loss),
     so a Cancel afterwards costs one History slot. Cancel is local *unless* you backgrounded the
@@ -136,7 +139,17 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
   have no edit session and keep immediate autosave** — that is by design, not an inconsistency.
   Section titles / tags / block labels are also deferred while a block editor is open; they flush on
   session end, focus departure, or tab switch.
-  **[auto: tests.html anyBlockEditing / scheduleSave-defers / afterEditSession]**
+  **[auto: tests.html anyBlockEditing / scheduleSave-defers / afterEditSession / focus-flush
+  teardown]**
+- TC-editor-09 (P): **Esc parity across all six edit-session kinds.** Open an editor in a **code**,
+  **note**, **rich**, **csv**, **json** and **html-entry** block in turn and press **Esc**:
+  - Clean (nothing typed) → the block leaves edit mode and writes **zero** `save_page`.
+  - Dirty (typed) → the text is **reverted to the backup** and the session **stays open** — exactly
+    what the Cancel/Revert **button** does, because Esc routes through that button (it must never be
+    a bespoke revert, or the `afterEditSession`/dirty wiring drifts per kind).
+  - With a `⋯` menu open, Esc **closes the menu only** — the editor stays open; a second Esc then
+    exits it. Checklist blocks have no edit session, so Esc does nothing there.
+  **[auto: tests.html Esc-exits-every-kind / Esc-reverts-dirty / Esc-defers-to-menu]**
 - TC-editor-04 (E): **code layer alignment** — transparent textarea stays pixel-aligned with the
   Prism overlay + gutter, line numbers ON and OFF, while scrolling, after autosize.
 - TC-editor-05 (Pe/E): autosizing editors cap at 60vh (50dvh mobile), scroll past; resize handle;
@@ -191,7 +204,7 @@ and the block **Copy-as `▾`** submenu. No hand-rolled `.mini-menu` remains (gr
 - TC-menu-05 (P, positioning parity): **sidebar `⋯` (openMoreMenu)** stays **right-aligned** under
   its button (`left = r.right; translateX(-100%)`), tucked under the sidebar as before.
 - TC-menu-06 (P, positioning parity): the **Export submenu** anchors to its passed rect (plain
-  top/left, no clamp/flip) on desktop (from `exportBtn`) **and** on the **mobile page-header `⋯`
+  top/left, no flip) on desktop (from `exportBtn`) **and** on the **mobile page-header `⋯`
   path**, where it's handed the *visible* `headerMoreBtn` (never opens at 0,0).
 - TC-menu-07 (P, positioning + visual parity): the **colsort menu** opens at the same plain
   top/left as before (`anchorRect`), and the active row still shows **both** a `✓` in the aligned
@@ -200,6 +213,18 @@ and the block **Copy-as `▾`** submenu. No hand-rolled `.mini-menu` remains (gr
 - TC-menu-08 (P, positioning parity): the block **Copy-as `▾`** submenu lands in the identical
   spot as before — left clamped to `max(8, r.right − 200)`, top `r.bottom + 4` — and each item
   still copies via `copyText` (records the copy, "Copied…/Copy failed" toast).
+- TC-menu-09 (P, short viewport — the clamp): resize the window to **1440×420** and open the
+  **colsort `⇅`** and the **Export `▾`** submenus. Every row must be **inside the viewport** and
+  reachable — `.mini-menu` is `position:fixed`, so a row past the bottom edge cannot be scrolled to
+  at all. Then repeat at **1440×900**, where both menus **fit**: their position must be
+  **unchanged** from before the clamp existed (byte-identical top/left — the `anchorRect` contract
+  is "plain position from the caller's rect"; only a real overflow may move it). Also confirm at
+  1440×600 and 390×700 that **no** menu in the app moved: block-kind ×3, section `⋯`, tags, colsort,
+  page-header `⋯`, sidebar More, Export, Copy-as, html `⋯`, html height. Keyboard nav must still
+  work in a clamped menu (Arrow wrap, Home/End, Escape → focus back on the anchor) and a **page
+  scroll must still dismiss** it. **[auto: tests.html miniMenuClampPos — fit / overflow / boundary]**
+  *Known, pre-existing and out of scope:* the sidebar **More `⋯`** uses `align:'right'`, which is
+  still unclamped, and overflows the left edge at 390px while the drawer is closed.
 
 ### TC-a11y — Keyboard & screen-reader reach (AC7 / WS-5 P2/P3)
 Tabs, section headers, modals, and transient feedback are operable by keyboard and announced by
@@ -228,6 +253,13 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   the page); Escape closes; on close, **focus returns to the invoking element** (fails soft if a
   re-render dropped it). A dialog with no focusable control focuses the box itself.
   **[auto: tests.html focusTrapNextIndex]**
+- TC-a11y-03b (P, modal message formatting): `.modal-title` is `white-space: pre-line`, so a
+  **multi-line** message keeps its line breaks — check the HTML-project over-cap `showAlert`
+  ("Project not imported." / the limit lines / "Largest files:" + one file per line): each file must
+  be on its own line, blank lines preserved. Then check a **single-line** caller is unchanged (a
+  block/section delete confirm renders on one line at the same height) and a **long wrapping** one
+  is unchanged (the save-conflict prompt wraps normally, no doubled spacing, no leading indent).
+  `pre-line` still collapses runs of spaces, so no caller needs escaping.
 - TC-a11y-04 (A11y, live regions): `toast` and the `flashCopied` bubble are `role="status"
   aria-live="polite"` (the same polite channel the offline badge joined) — a copy / save / error is
   announced. `flashCopied` shows the bubble OR falls back to `toast`, never both → no double-announce.

@@ -98,7 +98,7 @@ story is squarely "non-trivial."
 | `api.php` | Filesystem API: tree, page CRUD, move, reorder, content/block search, metadata index, projects, trash, history, save-conflict detection, find & replace, tag rename, optional password gate. |
 | `vendor/prism/` | Vendored Prism (core + autoloader + grammars + theme) — **no CDN**, works offline. Grammars autoload on demand; an unviewed language won't highlight offline until first rendered. |
 | `vendor/markdown-it/` | Vendored **markdown-it** (v14, single UMD file) — **no CDN**, offline. Backs `renderMarkdown` for **note blocks** (full CommonMark + GFM). Loaded as a static `<script>` before the `src/*.js` modules so `window.markdownit` exists when `editor.js` builds its instance. See the markdown-it gotcha. |
-| `tests.html` | Standalone **client** browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + `richToPlainText`/`convertBlock`/`parseCsv`/`parseJsonSafe`/`jsonPath`/`assembleRestoredTabs`/`uniqueCopyName` + deep-search cap + offline trash/history reducers (snapshots/restores the real IndexedDB cache — incl. `dl:` dead-letter keys — safe to run) + `sanitizeRichHtml` + `flushQueue` replay (FIFO/conflict-force/failure-retains + **dead-letter parking**: terminal/transient-exhausted/conflict-force-error, retry, `__codemanAdoptInto` merge, against stubbed `apiFetch`) + `importPages` negatives + the **HTML-project** helpers (`normalizeHtmlPath`/`resolveHtmlPath`/`isAbsoluteRef`/`stripCommonRoot`/`htmlExtInfo`/`resolveHtmlEntry`/`htmlFileList`/`htmlProjectSize`/`htmlCapCheck`/`htmlBundleKey`/`parseSrcset`/`serializeSrcset`/`pickSrcsetCandidate`/`parseImageSet`/`setHtmlEntry` + `bundleHtmlProject` incl. its three warning layers + the `blockKind` `block.html`-vs-`type:'html'` trap guard) + the **rendered html-block iframe's sandbox attribute** + `apiFetch`'s network classification (4xx / malformed body / 5xx / timeout / wrong-password token clear, against a stubbed `window.fetch`) + the **rich sanitizer's expanded allowlist** (`richImgSrc`/`richIntAttr`/`richToMarkdown` matrices, the two table invariants, foster-parent + foreign-content guards) + the **autosave-deferral** contract (`anyBlockEditing` incl. a per-`BLOCK_KINDS` pin, `scheduleSave` defers-but-still-marks-dirty, `safeStringify`, `afterEditSession`). Open it in a browser; **576 assertions**, expect `0 failed`. `window.__testResult = {pass, fail, done}` — CI runs it headless via `.github/scripts/run-client-tests.mjs`, which asserts `pass === FLOOR` **exactly** (not `>=`: a `>=` floor is silent when a change deletes 5 assertions and adds 6 — so bump FLOOR whenever the total moves, in either direction) and fails on any uncaught page error. |
+| `tests.html` | Standalone **client** browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + `richToPlainText`/`convertBlock`/`parseCsv`/`parseJsonSafe`/`jsonPath`/`assembleRestoredTabs`/`uniqueCopyName` + deep-search cap + offline trash/history reducers (snapshots/restores the real IndexedDB cache — incl. `dl:` dead-letter keys — safe to run) + `sanitizeRichHtml` + `flushQueue` replay (FIFO/conflict-force/failure-retains + **dead-letter parking**: terminal/transient-exhausted/conflict-force-error, retry, `__codemanAdoptInto` merge, against stubbed `apiFetch`) + `importPages` negatives + the **HTML-project** helpers (`normalizeHtmlPath`/`resolveHtmlPath`/`isAbsoluteRef`/`stripCommonRoot`/`htmlExtInfo`/`resolveHtmlEntry`/`htmlFileList`/`htmlProjectSize`/`htmlCapCheck`/`htmlBundleKey`/`parseSrcset`/`serializeSrcset`/`pickSrcsetCandidate`/`parseImageSet`/`setHtmlEntry` + `bundleHtmlProject` incl. its three warning layers + the `blockKind` `block.html`-vs-`type:'html'` trap guard) + the **rendered html-block iframe's sandbox attribute** + `apiFetch`'s network classification (4xx / malformed body / 5xx / timeout / wrong-password token clear, against a stubbed `window.fetch`) + the **rich sanitizer's expanded allowlist** (`richImgSrc`/`richIntAttr`/`richToMarkdown` matrices, the two table invariants, foster-parent + foreign-content guards) + the **autosave-deferral** contract (`anyBlockEditing` incl. a per-`BLOCK_KINDS` pin, `scheduleSave` defers-but-still-marks-dirty, `safeStringify`, `afterEditSession`, the focus-flush **teardown** guard, and **Esc parity** across all six edit-session kinds) + `miniMenuClampPos` (the `anchorRect` viewport clamp: fits-unchanged / overflow / exact-fit boundary). Open it in a browser; **590 assertions**, expect `0 failed`. `window.__testResult = {pass, fail, done}` — CI runs it headless via `.github/scripts/run-client-tests.mjs`, which asserts `pass === FLOOR` **exactly** (not `>=`: a `>=` floor is silent when a change deletes 5 assertions and adds 6 — so bump FLOOR whenever the total moves, in either direction) and fails on any uncaught page error. |
 | `tests-api.sh` | Standalone **server** API tests (bash + curl, no deps). Spins a throwaway `php -S` against a temp `CODEMAN_DATA` dir and asserts api.php behavior the browser can't reach: path-traversal confinement, parent-dir guards, unicode `search_content`, same-second history retention, `empty_trash` history-prune + its traversal guard, save-conflict detection (stale `baseMtime` → conflict + untouched file; `force` → history snapshot), the project-nesting `move` guard, the `rename` traversal guard, the `restore_trash` round-trip, `replace_content` (preview dry-run / literal / regex), `rename_tag` (rename/merge/delete), and the password gate. `bash codeman/tests-api.sh` (exit 0 = green; hunts upward from its port if taken, so parallel/CI runs don't collide). |
 
 **No build step.** The `src/*.js` files are plain classic scripts sharing one global scope;
@@ -440,14 +440,22 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   re-click), the outside-`mousedown`-closes handler, close-on-scroll, and the "don't
   `preventDefault` the toolbar mousedown" rule are all preserved; opening one menu closes any other
   via its `_close` (clears that anchor's `aria-expanded` + listeners — no stale `.remove()` bypass).
-  **Three positioning modes, each byte-preserving a prior behavior (zero positional regression is
-  the whole point):** *default* = viewport clamp + upward flip near the bottom edge; *`opts.align:
-  'right'`* = right-align under the anchor (`left=r.right; translateX(-100%)`, the `openMoreMenu`/
-  sidebar behavior); *`opts.anchorRect`* = plain top/left from a caller-supplied rect, no clamp/flip
-  — used by the `exportMenu` submenu (passed the **visible** `headerMoreBtn` on the mobile page-header
-  path, never a hidden `exportBtn` at 0,0), the **colsort** menu (its original plain top/left), and
-  the **Copy-as** submenu (which pre-computes its bespoke `left=max(8, r.right−200)` clamp into the
-  rect so it lands identically). The
+  **Three positioning modes, each byte-preserving a prior behavior WHERE THE MENU FITS (zero
+  positional regression in the normal case is the whole point):** *default* = viewport clamp +
+  upward flip near the bottom edge; *`opts.align: 'right'`* = right-align under the anchor
+  (`left=r.right; translateX(-100%)`, the `openMoreMenu`/sidebar behavior — still unclamped);
+  *`opts.anchorRect`* = plain top/left from a caller-supplied rect, **no flip, and no clamp while
+  the box fits** — used by the `exportMenu` submenu (passed the **visible** `headerMoreBtn` on the
+  mobile page-header path, never a hidden `exportBtn` at 0,0), the **colsort** menu (its original
+  plain top/left), and the **Copy-as** submenu (which pre-computes its bespoke
+  `left=max(8, r.right−200)` clamp into the rect so it lands identically). `anchorRect` mode passes
+  through the pure `miniMenuClampPos(top,left,w,h,vw,vh,pad)`, which **returns its input unchanged
+  unless the box genuinely overflows** — so every fitting menu is still on the exact prior pixel
+  (proved by a full 4-viewport before/after rect sweep), while a short window no longer strands the
+  last rows out of reach (`.mini-menu` is `position:fixed`, so the page cannot be scrolled to them).
+  It **shifts, never flips**: an `anchorRect` carries a bottom edge but not necessarily a usable
+  top. The height cap (`max-height:min(70vh,520px)` + internal scroll) is what bounds `offsetHeight`
+  and makes the clamp tractable — don't remove it. The
   `.mini-menu-opt:focus-visible` ring (inset offset) is the keyboard affordance; no change at rest.
 - **The code-block `⋯` overflow menu now declutters BOTH desktop and mobile** (was mobile-only
   before the UI/UX pass). The secondary actions — `#` lines / `$` vars / Duplicate / Split /
@@ -593,10 +601,27 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   `pageDirty` when the page is byte-identical at session end — it **arms `saveTimer` directly and must
   NEVER call `scheduleSave`**, which would re-mark dirty. Wired into all **SIX** session-bearing
   render paths (code + note share `renderBlock`; rich, csv, json, html-entry); Esc routes through the
-  Cancel/Revert button, so wiring those covers it. `wireFocusFlush(el)` is a focus-departure **FLUSH,
-  not a session end** — sticky editing stays; it bails on an in-block `relatedTarget` (the original
-  toolbar-click gotcha) and on an open `.mini-menu` (which lives on `document.body`, so opening the
-  `⋯` would otherwise burn a history slot). **Accepted regression:** un-Saved text lives only in tab
+  Cancel/Revert button, so wiring those covers it — via the shared **`wireEscapeRevert(surfaceEl,
+  revertBtn)`**, called once per session-bearing render path (it used to be an inline handler on the
+  code/note textarea ONLY, so Esc silently did nothing in rich/csv/json/html). **Esc must always
+  `revertBtn.click()`, never a bespoke revert** — that button is where each kind decides clean-exit
+  vs restore-backup and calls `afterEditSession()`; a second implementation drifts per kind. It bails
+  while a `.mini-menu` is open (the menu owns Escape).
+  `wireFocusFlush(el)` is a focus-departure **FLUSH, not a session end** — sticky editing stays; it
+  bails on an in-block `relatedTarget` (the original toolbar-click gotcha) and on an open
+  `.mini-menu` (which lives on `document.body`, so opening the `⋯` would otherwise burn a history
+  slot). **A TEARDOWN is not a departure either, and the sync guards CANNOT see it:** delete/convert
+  splice the block then `renderPage()`, whose `#page.innerHTML = ''` makes Blink dispatch the focused
+  Delete button's `focusout` at the START of `RemoveChildren` — while `document.contains(el)` is
+  still `true` and `.viewing` is still absent. So the decision is **deferred one task**
+  (`setTimeout(…,0)`) and the `.viewing`/`document.contains` pair is **re-checked there**; by then
+  the teardown has finished and `el` is detached. Deferring keys on the OBSERVABLE end state rather
+  than on enumerating teardown paths (a "renderPage is running" flag would miss any future detach
+  route, and would break if an engine ever dispatched that focusout asynchronously). It can't swallow
+  a real departure: both failure modes (`.viewing` ⇒ Save wrote / Cancel ran `afterEditSession`;
+  detached ⇒ the mutation path called `scheduleSave`) persist by their own route, and the page stays
+  in `pageDirty` regardless. Without it, delete-while-editing cost TWO writes and two history
+  versions. **Accepted regression:** un-Saved text lives only in tab
   memory between commit points (Save / focus departure / `visibilitychange→hidden` / `beforeunload`).
 - **Sidebar tree is keyboard-operable + ARIA (a11y pass).** `#tree` is `role="tree"`; rows
   (`.tree-row`) and Miller folder cards (`.subfolder-card`) are `role="treeitem"` with a
@@ -639,7 +664,11 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   `undefined` (the caller can't branch on it, which is the point). Use it for INFORMATIONAL modals;
   `showConfirm` there renders a dead "Cancel" beside "OK" that implies an outcome the caller doesn't
   offer (the html-block over-cap rejection was the one such site). Everything else in the codebase
-  using `showConfirm` is a genuine two-outcome decision — checked, don't convert them. `focusTrapNextIndex` is pure → unit-tested. Toast + the `flashCopied` bubble are
+  using `showConfirm` is a genuine two-outcome decision — checked, don't convert them.
+  **`.modal-title` is `white-space: pre-line`** so a `\n`-separated message (the over-cap rejection's
+  file list) keeps its line breaks; `pre-line` still collapses space runs and wraps normally, so the
+  single-line messages every other caller passes render exactly as before — a modal message is a
+  plain string, never markup. `focusTrapNextIndex` is pure → unit-tested. Toast + the `flashCopied` bubble are
   `role="status" aria-live="polite"` (the offline badge's channel) — one announces per action
   (flashCopied shows the bubble OR falls back to toast, never both).
 - **Delete buttons are de-emphasized at rest.** `button.danger` is neutral (`#3a3d41` / dim-red
