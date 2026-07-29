@@ -1992,6 +1992,18 @@ function miniMenuClampPos(top, left, w, h, vw, vh, pad) {
   return { top: t, left: l };
 }
 
+// Pure: the same viewport guard for the align:'right' mode, expressed as a SHIFT of the
+// ALREADY-RENDERED box. That mode positions with `left = r.right` plus a CSS
+// translateX(-100%), so the box's visual left edge is `r.right - width`, NOT the `left`
+// property — feeding the raw property into miniMenuClampPos would be wrong in both
+// directions. Measuring the RENDERED rect sidesteps that (and the transform's sub-pixel
+// width) entirely. Returns {dx:0,dy:0} whenever the box already fits, which is what leaves
+// a fitting menu on the exact pixel it has always used. NEVER THROWS.
+function miniMenuShift(top, left, w, h, vw, vh, pad) {
+  const pos = miniMenuClampPos(top, left, w, h, vw, vh, pad);
+  return { dx: pos.left - left, dy: pos.top - top };
+}
+
 // The single accessible popup-menu implementation, anchored to a button.
 // items: [{icon,label,active,checked,onClick}] (or {divider:true} for a separator).
 // A `checked` (boolean) makes the option a role="menuitemradio" and marks the menu
@@ -2012,7 +2024,13 @@ function miniMenuClampPos(top, left, w, h, vw, vh, pad) {
 // exactly (zero positional regression is the acceptance criterion):
 //   default            — clamp to the viewport + flip upward near the bottom edge.
 //   opts.align:'right' — right-align under the anchor (openMoreMenu: left=r.right,
-//                        translateX(-100%)) so it tucks under the sidebar.
+//                        translateX(-100%)) so it tucks under the sidebar. NO clamp
+//                        while the box fits — the position is then byte-identical to
+//                        the right-aligned one. Only a genuine viewport overflow shifts
+//                        it back inside (see miniMenuShift, which clamps the RENDERED
+//                        rect because the transform moves the visual left edge); without
+//                        that, a sidebar narrowed to SIDEBAR_MIN pushed the menu off the
+//                        left edge of the window, where it can't be scrolled to.
 //   opts.anchorRect    — plain position from a caller-supplied rect (the exportMenu /
 //                        colsort / Copy-as cases). No flip, and NO clamp while the box
 //                        fits — the position is then byte-identical to the rect. Only a
@@ -2081,6 +2099,26 @@ function showMiniMenu(anchorEl, items, opts = {}) {
       menu.style.top = Math.round(r.bottom + 4) + 'px';
       menu.style.left = Math.round(r.right) + 'px';
       menu.style.transform = 'translateX(-100%)';
+      // Then keep it inside the viewport. The translateX(-100%) means the VISUAL left edge
+      // is (left - width), not the `left` property, so the clamp is measured on the
+      // RENDERED rect. miniMenuShift returns 0/0 while the box fits, and then neither
+      // style is rewritten — a fitting menu is pixel-identical to before, transform
+      // included (that byte-preservation is the mode's contract).
+      const mr = menu.getBoundingClientRect();
+      const s = miniMenuShift(mr.top, mr.left, mr.width, mr.height, window.innerWidth, window.innerHeight);
+      if (s.dy) menu.style.top = Math.round(r.bottom + 4 + s.dy) + 'px';
+      if (s.dx) {
+        // Horizontally, apply the correction as an absolute VISUAL left and drop the
+        // transform rather than nudging `left` by dx: with translateX(-100%), `left` is
+        // the box's RIGHT edge, and a position:fixed box's shrink-to-fit width is bounded
+        // by (viewport - left) — so moving `left` rightwards re-wraps the menu narrower
+        // and taller, and the dx measured from the old width no longer lands it where it
+        // was computed to. Setting the visual left can only give the box MORE room, so the
+        // measured width still holds (it can widen back into the 8px pad at most, never
+        // past the viewport edge).
+        menu.style.transform = 'none';
+        menu.style.left = Math.round(mr.left + s.dx) + 'px';
+      }
     } else {
       const mw = menu.offsetWidth, mh = menu.offsetHeight;
       menu.style.left = Math.round(Math.min(window.innerWidth - 8 - mw, Math.max(8, r.left))) + 'px';

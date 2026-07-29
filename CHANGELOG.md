@@ -107,6 +107,11 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
   can't be scrolled to). Menus that already fit are positioned exactly as before.
 - Multi-line messages in dialogs now keep their line breaks instead of running together — most
   visible in the "Project not imported" list of oversized files.
+- **The sidebar `⋯` menu no longer runs off the left edge of the window when the sidebar is narrow.**
+  With the sidebar dragged to its minimum width, the menu opened partly off-screen — the icons and
+  the first characters of every option were cut off and unreachable (it can't be scrolled to). It now
+  slides just far enough to sit fully inside the window, keeping its size; at every normal sidebar
+  width it opens exactly where it always has.
 
 ### Security
 - The HTML preview runs in an iframe with `sandbox="allow-scripts"` and **no** `allow-same-origin` —

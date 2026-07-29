@@ -202,7 +202,8 @@ and the block **Copy-as `▾`** submenu. No hand-rolled `.mini-menu` remains (gr
 - TC-menu-04 (P, positioning parity — NO regression): **default** mode — a block `⋯` menu opened
   near the viewport bottom **flips upward** and stays clamped inside the viewport (left edge ≥ 8px).
 - TC-menu-05 (P, positioning parity): **sidebar `⋯` (openMoreMenu)** stays **right-aligned** under
-  its button (`left = r.right; translateX(-100%)`), tucked under the sidebar as before.
+  its button (`left = r.right; translateX(-100%)`), tucked under the sidebar as before — wherever
+  it fits, which is every normal sidebar width (the overflow case is TC-menu-10).
 - TC-menu-06 (P, positioning parity): the **Export submenu** anchors to its passed rect (plain
   top/left, no flip) on desktop (from `exportBtn`) **and** on the **mobile page-header `⋯`
   path**, where it's handed the *visible* `headerMoreBtn` (never opens at 0,0).
@@ -223,8 +224,19 @@ and the block **Copy-as `▾`** submenu. No hand-rolled `.mini-menu` remains (gr
   page-header `⋯`, sidebar More, Export, Copy-as, html `⋯`, html height. Keyboard nav must still
   work in a clamped menu (Arrow wrap, Home/End, Escape → focus back on the anchor) and a **page
   scroll must still dismiss** it. **[auto: tests.html miniMenuClampPos — fit / overflow / boundary]**
-  *Known, pre-existing and out of scope:* the sidebar **More `⋯`** uses `align:'right'`, which is
-  still unclamped, and overflows the left edge at 390px while the drawer is closed.
+- TC-menu-10 (P, narrow sidebar — the `align:'right'` clamp): drag the **sidebar** to its minimum
+  width (`SIDEBAR_MIN` = 200px) on desktop and open the sidebar **More `⋯`**. The menu must be
+  **fully inside the viewport** (left edge ≥ 8px) with **every label readable** — before the clamp
+  it rendered at left −71, clipping the icon column and the first characters of every row (a
+  `position:fixed` box, so it can't be scrolled to). Same at 390×700 with the drawer closed. Then
+  restore a normal sidebar width (and check the phone drawer **open**, the way a real user reaches
+  it): the menu **fits**, so it must be **byte-identical** to before the clamp — same top/left AND
+  the `translateX(-100%)` transform still present, same box size. Only a genuinely overflowing menu
+  may move (it then positions by its visual left with `transform:none`, keeping its measured width
+  — nudging `left` under the transform would re-wrap the menu narrower/taller). Keyboard nav in the
+  clamped menu still works (Arrow wrap, Home/End, Enter/Space, Escape/Tab → focus back on the `⋯`)
+  and a page scroll still dismisses it.
+  **[auto: tests.html miniMenuShift — fit / left+right overflow / boundary / both axes]**
 
 ### TC-a11y — Keyboard & screen-reader reach (AC7 / WS-5 P2/P3)
 Tabs, section headers, modals, and transient feedback are operable by keyboard and announced by

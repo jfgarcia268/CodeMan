@@ -165,6 +165,25 @@
   t('miniMenuClampPos honours a caller-supplied pad',
     miniMenuClampPos(400, 0, 200, 100, 1440, 420, 20), { top: 300, left: 0 });
 
+  // miniMenuShift: the same guard for the align:'right' mode (sidebar More ⋯), which
+  // positions with left=r.right + translateX(-100%) — so the box's VISUAL left edge is
+  // (r.right - width) and the clamp runs on the RENDERED rect, correcting by a delta.
+  // Same defining property: a fitting menu must not move by a single pixel.
+  t('miniMenuShift leaves a fitting right-aligned menu untouched',
+    miniMenuShift(34, 119, 233, 277, 1440, 900), { dx: 0, dy: 0 });
+  t('miniMenuShift left-overflow: sidebar at SIDEBAR_MIN pushes it off the left edge',
+    miniMenuShift(34, -71, 233, 277, 1440, 900), { dx: 79, dy: 0 });
+  t('miniMenuShift left-overflow: the 390px drawer-closed case',
+    miniMenuShift(38, -276, 233, 277, 390, 700), { dx: 284, dy: 0 });
+  t('miniMenuShift exact left fit is untouched (boundary)',
+    miniMenuShift(34, 0, 233, 277, 1440, 900), { dx: 0, dy: 0 });
+  t('miniMenuShift right-overflow shifts back inside',
+    miniMenuShift(34, 1300, 233, 100, 1440, 900), { dx: -101, dy: 0 });
+  t('miniMenuShift exact right fit is untouched (boundary)',
+    miniMenuShift(34, 1207, 233, 100, 1440, 900), { dx: 0, dy: 0 });
+  t('miniMenuShift bottom-overflow shifts up (both axes at once)',
+    miniMenuShift(34, -71, 233, 277, 1440, 300), { dx: 79, dy: -19 });
+
   // Duplicate deep-copy + insert-below: the copy lands at idx+1 and is independent.
   {
     const arr = [{ code: 'a' }, { code: 'b' }];
