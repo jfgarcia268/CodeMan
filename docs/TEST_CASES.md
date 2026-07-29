@@ -95,7 +95,10 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
 - TC-search-02 (P): deep content search (`⊃`) matches page content, incl. **unicode/emoji/CJK**. **[auto: tests-api search_content]**
 - TC-search-03 (E): **deep-search cap** — a broad term matching > `DEEP_MATCH_CAP` (200) renders only
   the cap and shows the "Showing first N of M — refine your search" banner; banner hides when the
-  result set ≤ cap or search cleared. **[auto: tests.html updateSearchCapNote]**
+  result set ≤ cap or search cleared. **[auto: tests.html — the cap itself is driven through the real
+  `runDeepSearch` against a stubbed `search_content` returning 500 paths (rendered set capped to 200,
+  `deepMatchTotal` = 500, banner text); `updateSearchCapNote`'s hide/show states are separate. Manual:
+  that the capped render is actually FAST at ~1200 pages (TC-ext-perf).]**
 - TC-search-04 (Pe): name search + tree render stay snappy at ~1200 pages (< ~100ms render). Search
   keystrokes now **coalesce** the sidebar re-render (`debounce` ~120ms trailing); the in-page block
   filter (deep-search) rides the same window so it still reflects the query within ~250ms.
@@ -139,8 +142,13 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
   have no edit session and keep immediate autosave** — that is by design, not an inconsistency.
   Section titles / tags / block labels are also deferred while a block editor is open; they flush on
   session end, focus departure, or tab switch.
-  **[auto: tests.html anyBlockEditing / scheduleSave-defers / afterEditSession / focus-flush
-  teardown]**
+  **[auto: tests.html — `anyBlockEditing` (incl. its fail-OPEN catch) / `scheduleSave` defers but
+  still marks dirty / `beforeEditSession` captures the clean snapshot through the REAL `enterEdit`
+  (so the "Cancel → zero writes, zero History versions" bullet is automated end-to-end) /
+  `afterEditSession` reached from the Revert button of every session-bearing kind / the focus flush
+  wired by `renderBlock`, incl. the teardown guard (the "Delete-while-editing → exactly one write"
+  bullet). Manual: the `save_page` counts as seen in the network panel, the History-version counts,
+  the browser-tab-switch keepalive write, and the after-reload end state.]**
 - TC-editor-09 (P): **Esc parity across all six edit-session kinds.** Open an editor in a **code**,
   **note**, **rich**, **csv**, **json** and **html-entry** block in turn and press **Esc**:
   - Clean (nothing typed) → the block leaves edit mode and writes **zero** `save_page`.
@@ -171,7 +179,11 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
     `<script>/<style>/<iframe>/<object>/<embed>/<form>/<input>/<base>/<template>/<noscript>/<math>/
     <svg>` — note SVG/MathML report a *lowercase* tag name, so case normalization is part of this.
   - `<a href="javascript:">` neutralized with the **link text kept**.
-  **[auto: tests.html sanitizeRichHtml / richImgSrc / richIntAttr / richToMarkdown + md escapes raw html]**
+  **[auto: tests.html sanitizeRichHtml / richImgSrc (accepted + ALL FOUR rejections: `data:image/svg+xml`,
+  `http:`, `blob:`, protocol-relative and relative) / richIntAttr / richToMarkdown +
+  richTableToGfm (pipe-in-cell escaping, ragged-row padding, `<caption>` dropped without corrupting
+  the table, a non-top-level table falling back to tab-separated text, and the never-throws fallback)
+  + md escapes raw html]**
 - TC-editor-07 (A): **rich round-trip through both exports** — paste a table + an image into a rich
   block, Save, reload (structure + image survive). Export **HTML**: the table has borders, the image
   renders, and the CSP `<meta>` is present in the file. Export **Markdown**: the table is a GFM table
@@ -182,6 +194,8 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
 - TC-editor-08 (E): paste a **~500 KB data-URL image** into a rich block: a soft-warn toast fires
   **once** (naming the ×21 history multiplier), the paste is **never truncated**, the page saves, and
   History still works. Watch the page file's growth on disk.
+  **[auto: tests.html — a rich block over `RICH_SOFT_WARN` toasts exactly ONCE per session and the
+  stored HTML is never truncated. Manual: a real clipboard paste, the on-disk growth, History.]**
 
 ### TC-menu — Shared popup `⋯` menus (`showMiniMenu`) — a11y + positioning parity
 **Every** `⋯`/overflow popup routes through the one `showMiniMenu` — block-kind menus ×3, section
@@ -191,14 +205,25 @@ and the block **Copy-as `▾`** submenu. No hand-rolled `.mini-menu` remains (gr
   `role="menuitemradio"` + `aria-checked` in the checkable colsort menu), dividers
   `role="separator"`; the anchor button carries `aria-haspopup="menu"` + `aria-expanded` toggling
   `true` on open / `false` on close. Screen reader announces "menu" + item count.
+  **[auto: tests.html — the roles (`menu`/`menuitem`/`menuitemradio`+`aria-checked`/`separator`), the
+  `aria-label` taken from the trigger, `aria-haspopup`, and `aria-expanded` on open AND on close, all
+  on a real menu. Manual: the actual screen-reader announcement, and that every one of the 9+ call
+  sites reaches `showMiniMenu` (grep-verified).]**
 - TC-menu-02 (A11y): **keyboard-only, all sites incl. colsort + Copy-as** — open a menu, focus
   lands on the first item; ArrowDown/Up move and **wrap** at both ends; Home/End jump to first/last;
   Enter/Space activate the focused item; Escape closes and **returns focus to the anchor**; Tab
-  closes. Every menu action is operable with no mouse. **[auto: tests.html miniMenuWrapIndex]**
+  closes. Every menu action is operable with no mouse.
+  **[auto: tests.html — `miniMenuWrapIndex` (pure) PLUS the real menu's focus-on-open (and
+  focus-on-the-`checked`-row in a checkable menu), Arrow wrap both ways, Home/End, Enter and Space
+  activation, and Escape/Tab closing with focus returned to the anchor. Manual: doing it at each
+  call site with a real keyboard.]**
 - TC-menu-03 (A11y): closing by outside-click or by scrolling closes cleanly (fails soft — no error
   — if the anchor was removed by a re-render); clicking the anchor again toggles the menu shut.
   Opening any menu while another is open closes the first via its `_close` path (its anchor's
   `aria-expanded` resets, its dismiss listeners are removed — no lingering `.remove()` bypass).
+  **[auto: tests.html — outside-`mousedown` dismissal, page-scroll dismissal, same-anchor re-open
+  toggling shut, and one menu closing another through `_close` (asserting exactly one `.mini-menu`
+  survives and the first anchor's `aria-expanded` reset). Manual: the fails-soft re-render case.]**
 - TC-menu-04 (P, positioning parity — NO regression): **default** mode — a block `⋯` menu opened
   near the viewport bottom **flips upward** and stays clamped inside the viewport (left edge ≥ 8px).
 - TC-menu-05 (P, positioning parity): **sidebar `⋯` (openMoreMenu)** stays **right-aligned** under
@@ -223,7 +248,12 @@ and the block **Copy-as `▾`** submenu. No hand-rolled `.mini-menu` remains (gr
   1440×600 and 390×700 that **no** menu in the app moved: block-kind ×3, section `⋯`, tags, colsort,
   page-header `⋯`, sidebar More, Export, Copy-as, html `⋯`, html height. Keyboard nav must still
   work in a clamped menu (Arrow wrap, Home/End, Escape → focus back on the anchor) and a **page
-  scroll must still dismiss** it. **[auto: tests.html miniMenuClampPos — fit / overflow / boundary]**
+  scroll must still dismiss** it.
+  **[auto: tests.html — `miniMenuClampPos` as a pure function (fit / overflow / exact-fit boundary)
+  AND its WIRING into `showMiniMenu`'s `anchorRect` mode: a real menu opened at a fitting viewport
+  lands on the caller's rect UNCHANGED, and at a short/narrow one is shifted inside with the 8px pad.
+  Manual: the 4-viewport sweep across all ten real menus in the app, keyboard nav inside a clamped
+  menu, and page-scroll dismissal of one.]**
 - TC-menu-10 (P, narrow sidebar — the `align:'right'` clamp): drag the **sidebar** to its minimum
   width (`SIDEBAR_MIN` = 200px) on desktop and open the sidebar **More `⋯`**. The menu must be
   **fully inside the viewport** (left edge ≥ 8px) with **every label readable** — before the clamp
@@ -236,7 +266,12 @@ and the block **Copy-as `▾`** submenu. No hand-rolled `.mini-menu` remains (gr
   — nudging `left` under the transform would re-wrap the menu narrower/taller). Keyboard nav in the
   clamped menu still works (Arrow wrap, Home/End, Enter/Space, Escape/Tab → focus back on the `⋯`)
   and a page scroll still dismisses it.
-  **[auto: tests.html miniMenuShift — fit / left+right overflow / boundary / both axes]**
+  **[auto: tests.html — `miniMenuShift` as a pure function (fit / left+right overflow / exact-fit
+  boundary / both axes) AND its WIRING into `showMiniMenu`'s `align:'right'` mode: a real menu that
+  fits keeps its `top`, its `left` AND its `translateX(-100%)` untouched, a left-overflowing one is
+  repositioned by its **visual** left with `transform:none`, a bottom-overflowing one shifts its top
+  while KEEPING the transform, and both-axes does both. Manual: dragging the real sidebar to
+  `SIDEBAR_MIN`, the phone drawer, the box-size check, keyboard nav and scroll dismissal.]**
 
 ### TC-a11y — Keyboard & screen-reader reach (AC7 / WS-5 P2/P3)
 Tabs, section headers, modals, and transient feedback are operable by keyboard and announced by
@@ -272,6 +307,8 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   block/section delete confirm renders on one line at the same height) and a **long wrapping** one
   is unchanged (the save-conflict prompt wraps normally, no doubled spacing, no leading indent).
   `pre-line` still collapses runs of spaces, so no caller needs escaping.
+  **[auto: tests.html — the COMPUTED `white-space` of a `.modal-title` against the real `style.css`
+  is `pre-line`. Manual: the rendered over-cap message, and the single-line / long-wrapping callers.]**
 - TC-a11y-04 (A11y, live regions): `toast` and the `flashCopied` bubble are `role="status"
   aria-live="polite"` (the same polite channel the offline badge joined) — a copy / save / error is
   announced. `flashCopied` shows the bubble OR falls back to `toast`, never both → no double-announce.

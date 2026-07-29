@@ -98,7 +98,7 @@ story is squarely "non-trivial."
 | `api.php` | Filesystem API: tree, page CRUD, move, reorder, content/block search, metadata index, projects, trash, history, save-conflict detection, find & replace, tag rename, optional password gate. |
 | `vendor/prism/` | Vendored Prism (core + autoloader + grammars + theme) — **no CDN**, works offline. Grammars autoload on demand; an unviewed language won't highlight offline until first rendered. |
 | `vendor/markdown-it/` | Vendored **markdown-it** (v14, single UMD file) — **no CDN**, offline. Backs `renderMarkdown` for **note blocks** (full CommonMark + GFM). Loaded as a static `<script>` before the `src/*.js` modules so `window.markdownit` exists when `editor.js` builds its instance. See the markdown-it gotcha. |
-| `tests.html` | Standalone **client** browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + `richToPlainText`/`convertBlock`/`parseCsv`/`parseJsonSafe`/`jsonPath`/`assembleRestoredTabs`/`uniqueCopyName` + deep-search cap + offline trash/history reducers (snapshots/restores the real IndexedDB cache — incl. `dl:` dead-letter keys — safe to run) + `sanitizeRichHtml` + `flushQueue` replay (FIFO/conflict-force/failure-retains + **dead-letter parking**: terminal/transient-exhausted/conflict-force-error, retry, `__codemanAdoptInto` merge, against stubbed `apiFetch`) + `importPages` negatives + the **HTML-project** helpers (`normalizeHtmlPath`/`resolveHtmlPath`/`isAbsoluteRef`/`stripCommonRoot`/`htmlExtInfo`/`resolveHtmlEntry`/`htmlFileList`/`htmlProjectSize`/`htmlCapCheck`/`htmlBundleKey`/`parseSrcset`/`serializeSrcset`/`pickSrcsetCandidate`/`parseImageSet`/`setHtmlEntry` + `bundleHtmlProject` incl. its three warning layers + the `blockKind` `block.html`-vs-`type:'html'` trap guard) + the **rendered html-block iframe's sandbox attribute** + `apiFetch`'s network classification (4xx / malformed body / 5xx / timeout / wrong-password token clear, against a stubbed `window.fetch`) + the **rich sanitizer's expanded allowlist** (`richImgSrc`/`richIntAttr`/`richToMarkdown` matrices, the two table invariants, foster-parent + foreign-content guards) + the **autosave-deferral** contract (`anyBlockEditing` incl. a per-`BLOCK_KINDS` pin, `scheduleSave` defers-but-still-marks-dirty, `safeStringify`, `afterEditSession`, the focus-flush **teardown** guard, and **Esc parity** across all six edit-session kinds) + `miniMenuClampPos` (the `anchorRect` viewport clamp: fits-unchanged / overflow / exact-fit boundary) + `miniMenuShift` (the same guard for `align:'right'`, as a `{dx,dy}` on the RENDERED rect: fits-unchanged / left+right overflow / exact-fit boundary / both axes). Open it in a browser; **597 assertions**, expect `0 failed`. `window.__testResult = {pass, fail, done}` — CI runs it headless via `.github/scripts/run-client-tests.mjs`, which asserts `pass === FLOOR` **exactly** (not `>=`: a `>=` floor is silent when a change deletes 5 assertions and adds 6 — so bump FLOOR whenever the total moves, in either direction) and fails on any uncaught page error. |
+| `tests.html` | Standalone **client** browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + `richToPlainText`/`convertBlock`/`parseCsv`/`parseJsonSafe`/`jsonPath`/`assembleRestoredTabs`/`uniqueCopyName` + deep-search cap + offline trash/history reducers (snapshots/restores the real IndexedDB cache — incl. `dl:` dead-letter keys — safe to run) + `sanitizeRichHtml` + `flushQueue` replay (FIFO/conflict-force/failure-retains + **dead-letter parking**: terminal/transient-exhausted/conflict-force-error, retry, `__codemanAdoptInto` merge, against stubbed `apiFetch`) + `importPages` negatives + the **HTML-project** helpers (`normalizeHtmlPath`/`resolveHtmlPath`/`isAbsoluteRef`/`stripCommonRoot`/`htmlExtInfo`/`resolveHtmlEntry`/`htmlFileList`/`htmlProjectSize`/`htmlCapCheck`/`htmlBundleKey`/`parseSrcset`/`serializeSrcset`/`pickSrcsetCandidate`/`parseImageSet`/`setHtmlEntry` + `bundleHtmlProject` incl. its three warning layers + the `blockKind` `block.html`-vs-`type:'html'` trap guard) + the **rendered html-block iframe's sandbox attribute** + `apiFetch`'s network classification (4xx / malformed body / 5xx / timeout / wrong-password token clear, against a stubbed `window.fetch`) + the **rich sanitizer's expanded allowlist** (`richImgSrc`/`richIntAttr`/`richToMarkdown` matrices, the two table invariants, foster-parent + foreign-content guards) + the **autosave-deferral** contract (`anyBlockEditing` incl. a per-`BLOCK_KINDS` pin, `scheduleSave` defers-but-still-marks-dirty, `safeStringify`, `afterEditSession`, the focus-flush **teardown** guard, and **Esc parity** across all six edit-session kinds) + `miniMenuClampPos` (the `anchorRect` viewport clamp: fits-unchanged / overflow / exact-fit boundary) + `miniMenuShift` (the same guard for `align:'right'`, as a `{dx,dy}` on the RENDERED rect: fits-unchanged / left+right overflow / exact-fit boundary / both axes) + **`showMiniMenu` itself** (the pure clamps' WIRING — a real menu opened in all three positioning modes at a fitting AND an overflowing viewport, asserting the applied `top`/`left`/`transform`, incl. `transform:'none'` on the `dx` branch — plus the full ARIA/keyboard/dismissal contract: roles, `aria-expanded` on open AND close, focus-on-open (and on the `checked` row), Arrow wrap, Home/End, Enter/Space, Escape/Tab → focus back on the anchor, outside-click, page-scroll, same-anchor toggle, one menu closing another via `_close`) + **`beforeEditSession` driven through the real `enterEdit`** (the snapshot must be captured, and captured BEFORE `.viewing` drops) + the **per-render-path wiring** (the focus flush asserted THROUGH `renderBlock`; a no-op Revert clearing `pageDirty` in every session-bearing kind; a `.toString()` census that all five paths wire all four hooks) + `anyBlockEditing`'s fail-OPEN catch + the **real `runDeepSearch` render cap** (a stubbed `search_content` returning 500 paths ⇒ 200 rendered + the "first N of M" banner) + `RICH_SOFT_WARN` (warns once, never truncates) + the computed `.modal-title` `white-space` against the real `style.css`. Open it in a browser; **647 assertions**, expect `0 failed`. `window.__testResult = {pass, fail, done}` — CI runs it headless via `.github/scripts/run-client-tests.mjs`, which asserts `pass === FLOOR` **exactly** (not `>=`: a `>=` floor is silent when a change deletes 5 assertions and adds 6 — so bump FLOOR whenever the total moves, in either direction) and fails on any uncaught page error. |
 | `tests-api.sh` | Standalone **server** API tests (bash + curl, no deps). Spins a throwaway `php -S` against a temp `CODEMAN_DATA` dir and asserts api.php behavior the browser can't reach: path-traversal confinement, parent-dir guards, unicode `search_content`, same-second history retention, `empty_trash` history-prune + its traversal guard, save-conflict detection (stale `baseMtime` → conflict + untouched file; `force` → history snapshot), the project-nesting `move` guard, the `rename` traversal guard, the `restore_trash` round-trip, `replace_content` (preview dry-run / literal / regex), `rename_tag` (rename/merge/delete), and the password gate. `bash codeman/tests-api.sh` (exit 0 = green; hunts upward from its port if taken, so parallel/CI runs don't collide). |
 
 **No build step.** The `src/*.js` files are plain classic scripts sharing one global scope;
@@ -328,10 +328,19 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   `0 failed`) and run `bash codeman/tests-api.sh` (server API, exit 0). **Both run in CI on every
   push/PR** (`.github/workflows/tests.yml` — the client suite headless via
   `.github/scripts/run-client-tests.mjs`, which enforces an EXACT pass count + zero page errors, plus
-  a grep `invariants` job — 7 invariants: SW version single-sourcing, api.php never precached, atomic
+  a grep `invariants` job — **11** invariants: SW version single-sourcing, api.php never precached, atomic
   JSON writes (no `copy(`/`fwrite(`/bare `file_put_contents(`), **no `allow-same-origin` in
-  `codeman/`**, `index.html` keeps its CSP meta, the single `setTreeData` write point, and CSRF
-  allowlist parity). The **full set of regression
+  `codeman/`**, `index.html` keeps its CSP meta, the single `setTreeData` write point, CSRF
+  allowlist parity, the **edit-session wiring census** (exact call-site counts in `editor.js`:
+  `beforeEditSession()`=5, `afterEditSession()`=10 (2 per path), `wireEscapeRevert(`/`wireFocusFlush(`=6
+  each = 5 calls + 1 definition — an EXACT count, because losing one hook from one render path is
+  per-kind DRIFT no single behavioural assertion can see), **`afterEditSession` never calls
+  `scheduleSave(`** (scoped to its body — that call would re-mark the page dirty), and **no
+  `renderPage()` inside `renderHtmlBlock`** outside the two lines that deliberately tear the block down
+  (allowlisted by `convertBlock` / `parentArray.splice` — a stray one silently kills a live iframe,
+  which no assertion can observe). Every invariant is verified to FIRE on an injected violation; note
+  the runner's shell is `bash -eo pipefail`, so a local reproduction must use the same flags or a
+  multi-grep step passes on its last line only.). The **full set of regression
   test cases lives in [docs/TEST_CASES.md](docs/TEST_CASES.md)**, split into a **Core** tier (run every
   regression) and an **Extended/release-gate** tier (cross-browser, packaged/Windows builds, CI,
   real-device, perf-at-scale, desktop native dialogs — run on demand). **Full regression is run by the
@@ -466,6 +475,17 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   top. The height cap (`max-height:min(70vh,520px)` + internal scroll) is what bounds `offsetHeight`
   and makes the clamp tractable — don't remove it. The
   `.mini-menu-opt:focus-visible` ring (inset offset) is the keyboard affordance; no change at rest.
+  **Both clamps are now pinned at the WIRING level, not just as pure math.** Unit-testing
+  `miniMenuClampPos`/`miniMenuShift` in isolation left both fixes DELETABLE with a green build
+  (mutation-proved: `if (s.dx) → if (false && s.dx)`, and passing the raw rect straight through, both
+  shipped green). The suite now opens a REAL menu in each of the three modes at a fitting AND an
+  overflowing viewport and asserts the applied `top`/`left`/`transform` — the **fitting** assertions are
+  the load-bearing half (they ARE the "zero positional regression" contract), the overflowing ones catch
+  a deleted clamp. The box is sized by a scoped test-only `.mini-menu` rule (tests.html doesn't load
+  `style.css`) and `innerWidth`/`innerHeight` are `Object.defineProperty`-stubbed. A new positioning
+  mode needs the same fit + overflow pair or it is unguarded. The ARIA/keyboard/dismissal contract is
+  covered the same way (it had ZERO automated coverage before — the suite named `showMiniMenu` exactly
+  once, in a comment).
 - **The code-block `⋯` overflow menu now declutters BOTH desktop and mobile** (was mobile-only
   before the UI/UX pass). The secondary actions — `#` lines / `$` vars / Duplicate / Split /
   `⤵ To subsection` / block-kind `.type-menu` / copy-as `.copy-as` — are hidden by **unconditional**
@@ -557,7 +577,11 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   kill a live iframe. Every in-block mutation (upload, file remove, entry change, height drag, entry
   edit) updates its own subtree, calls `remountFrame()` **and `scheduleSave()`** (the `pageDirty`
   contract — a path that forgets it silently fails to persist on tab switch/unload). Only
-  convert/delete/duplicate call `renderPage()`. `htmlRunState` (module-scope Map, FIFO-capped at 64)
+  convert/delete/duplicate call `renderPage()`. **Now grep-guarded** (`no html-block mutation calls
+  renderPage`): the CI job awks `renderHtmlBlock`'s body and permits `renderPage()` ONLY on a line that
+  also contains `convertBlock` or `parentArray.splice` (the convert + delete teardowns) — same shape as
+  the `writeJsonAtomic` primitive ban with its two allowlisted lines. It guards a failure NO assertion
+  can observe: a live iframe silently killed by `#page.innerHTML = ''`. `htmlRunState` (module-scope Map, FIFO-capped at 64)
   keys `htmlBundleKey` → `'running'|'stopped'`; **binaries hash by base64 LENGTH only**, which is
   safe ONLY because every explicit mutation calls `remountFrame()` directly.
   Other traps that bit during implementation: `readEntries` **pages at 100 entries** — loop until it
@@ -632,6 +656,18 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   in `pageDirty` regardless. Without it, delete-while-editing cost TWO writes and two history
   versions. **Accepted regression:** un-Saved text lives only in tab
   memory between commit points (Save / focus departure / `visibilitychange→hidden` / `beforeunload`).
+  **Guarded three ways now, because the hooks are pure WIRING and wiring rots silently** (all
+  mutation-proved to have shipped green before): (a) `beforeEditSession` is exercised through the REAL
+  `enterEdit` — an emptied body AND the call MOVED below `el.classList.remove('viewing')` both left the
+  old suite green, since it set `cleanPageSnapshot` by hand and only called `afterEditSession`; (b) the
+  focus flush is asserted THROUGH `renderBlock` (not on a synthetic `<div>`) and a no-op Revert must
+  clear `pageDirty` in EVERY session-bearing kind (that's what catches losing one `afterEditSession`
+  call from one kind); (c) a CI `edit-session wiring census` counts the call sites EXACTLY
+  (`beforeEditSession()`=5 · `afterEditSession()`=10 · `wireEscapeRevert(`=`wireFocusFlush(`=6 incl. the
+  definition) and a second invariant greps `afterEditSession`'s BODY for `scheduleSave(` — the
+  "never call scheduleSave" rule has no observable behavioural difference, so a grep is the only guard
+  that can exist for it. Adding or removing a session-bearing render path means updating BOTH the
+  census counts and the tests.html census.
 - **Sidebar tree is keyboard-operable + ARIA (a11y pass).** `#tree` is `role="tree"`; rows
   (`.tree-row`) and Miller folder cards (`.subfolder-card`) are `role="treeitem"` with a
   `data-path`, `aria-label`, roving `tabindex` (exactly one row is `tabindex=0` via
@@ -711,6 +747,24 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   the offline-reducer tests must seed/read/snapshot/restore through `kvGet/kvSet/kvDel` +
   `pageGet/pageSet/pageDel` (NOT raw `idbGet/idbSet('kv'|'pages', …)`), or they'd miss the active
   namespace AND fail to restore the real cache. Keep that contract when adding offline tests.
+- **An assertion must CALL production code, and coverage of a pure helper is not coverage of its
+  caller.** A suite audit by **mutation testing** (inject a realistic single-point regression, run the
+  suite, see if it goes red) found **10 of 20** injected regressions shipping green at a fully-green
+  suite. Every one had the same two shapes: **(1) a tautology** — the deep-search-cap "test"
+  re-implemented `all.slice(0, DEEP_MATCH_CAP)` *inside its own expectation*, so it passed with the cap
+  deleted; **(2) coverage of the pure part only** — `miniMenuClampPos`/`miniMenuShift`,
+  `afterEditSession` and `wireFocusFlush` were all exercised in isolation while the WIRING that calls
+  them (`showMiniMenu`'s three modes, each render path's `enterEdit`/Revert) was untested, so both menu
+  clamp fixes and `beforeEditSession` could be deleted outright. Two rules fall out: **drive the real
+  entry point** (click the rendered Edit/Revert button, open a real menu, call `runDeepSearch` against a
+  stubbed `api`) rather than the helper it delegates to; and where a rule has **no observable
+  behavioural difference** (`afterEditSession` must not route through `scheduleSave`; no `renderPage()`
+  inside `renderHtmlBlock`; a hook wired once per render path) a **scoped CI grep is the only guard that
+  can exist** — write it, allowlist by what the line does, and prove it fires by injecting the
+  violation. **When adding an assertion, prove it fails on the regression it is meant to catch** —
+  otherwise the gap is still open, just now with a green tick over it. (Local reproduction of an
+  invariant must use `bash -eo pipefail`, the runner's shell: without `-e` a multi-grep step only
+  reports its LAST line's status.)
 - **iOS home-screen PWA top inset:** `body.is-mobile .main` gets `padding-top:env(safe-area-inset-top)`
   + a `#1b1b1b` background (the tab-bar colour) so the tab bar/header clear the Dynamic Island in
   standalone mode (status bar is `black-translucent`, `viewport-fit=cover`). The floating ☰ is
@@ -832,7 +886,10 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   broad term on a large library would otherwise paint thousands of sidebar rows synchronously (~1.5s
   at 1200 pages). `updateSearchCapNote` (tree.js, called from `renderTree`) shows the
   `#searchCapNote` "Showing first N of M — refine your search" banner when capped, hidden otherwise.
-  It's a render cap, not a server cap (search_content still scans everything) — don't remove it.
+  It's a render cap, not a server cap (search_content still scans everything) — don't remove it. The
+  cap is now driven through the REAL `runDeepSearch` against a stubbed `search_content` (500 paths ⇒ 200
+  rendered + `deepMatchTotal` 500 + the banner); the case it replaced re-implemented
+  `all.slice(0, DEEP_MATCH_CAP)` INSIDE its own expectation, so deleting the cap left it green.
 - **`setTreeData(t)` is the SINGLE write point for `treeData` (tree.js) — no bare `treeData = …`
   survives outside it (grep-verified).** It sets the global AND calls `invalidateTreeMemos()`, which
   drops the `folderCounts`/`folderMeta` WeakMap caches (memoized by node identity — those aggregates

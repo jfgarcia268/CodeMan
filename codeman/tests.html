@@ -615,6 +615,14 @@
       richImgSrc('data:image/svg+xml;base64,AA'), richImgSrc('javascript:alert(1)'),
       richImgSrc('java\tscript:alert(1)'), richImgSrc(''),
     ], ['https://x.test/a.png', 'data:image/png;base64,AA', '', '', '', '']);
+    // The four rejections TC-editor-06 names but nothing asserted: plain http (mixed
+    // content, and blocked by the CSP anyway), blob: (an opaque handle the sanitized
+    // string outlives), protocol-relative (inherits the page scheme → http on a plain
+    // NAS) and a relative path (there is no per-page asset root to resolve it against).
+    t('richImgSrc rejects http / blob / protocol-relative / relative', [
+      richImgSrc('http://x.test/a.png'), richImgSrc('blob:https://x.test/9f-1'),
+      richImgSrc('//evil.test/x.png'), richImgSrc('./x.png'),
+    ], ['', '', '', '']);
     t('richIntAttr matrix (ok / clamp / zero / junk / float / null)',
       [richIntAttr('7', 1000), richIntAttr('99999', 1000), richIntAttr('0', 1000), richIntAttr('abc', 1000), richIntAttr('1.5', 1000), richIntAttr(null, 1000)],
       ['7', '1000', '', '', '', '']);
@@ -633,6 +641,36 @@
     t('richToMarkdown emits a GFM table with a separator row', md, '| A | B |\n| --- | --- |\n| 1 | 2 |');
     const mdMix = richToMarkdown('<p>intro</p><table><tr><td>a</td></tr></table>');
     t('richToMarkdown keeps prose + table, blank-line separated', mdMix, 'intro\n\n| a |\n| --- |');
+    // A literal pipe in a cell would END the cell in GFM — richTableToGfm escapes it.
+    // The escape existed but nothing asserted it, so deleting it stayed green.
+    t('richTableToGfm escapes a pipe inside a cell',
+      richToMarkdown('<table><tr><td>a|b</td><td>c</td></tr></table>'),
+      '| a\\|b | c |\n| --- | --- |');
+    // Ragged rows are padded to the widest row: a short row must not shift the columns
+    // (GFM requires every row to carry the same cell count as the separator).
+    t('richTableToGfm pads a ragged row to the widest row',
+      richToMarkdown('<table><tr><td>a</td><td>b</td></tr><tr><td>c</td></tr></table>'),
+      '| a | b |\n| --- | --- |\n| c |  |');
+    // <caption> is not a row, so it is DROPPED from the GFM table (GFM has no caption
+    // syntax). Pinned so the loss is a known, deliberate limitation rather than a
+    // surprise: the important half is that it does not become a phantom row/column.
+    t('richTableToGfm drops a <caption> without corrupting the table',
+      richToMarkdown('<table><caption>Cap</caption><tr><td>a</td></tr></table>'),
+      '| a |\n| --- |');
+    // Only TOP-LEVEL tables become GFM; a wrapped/nested one falls through to
+    // richToPlainText (TAB-separated cells), never to an empty string.
+    t('a non-top-level table falls back to tab-separated text',
+      richToMarkdown('<div><table><tr><td>a</td><td>b</td></tr></table></div>'), 'a\tb');
+    // NEVER THROWS: any failure degrades to richToPlainText of the whole input. Forced
+    // by making the table converter throw (both are top-level function declarations).
+    {
+      const _rtg = richTableToGfm;
+      richTableToGfm = () => { throw new Error('boom'); };
+      try {
+        t('richToMarkdown never throws — degrades to plain text',
+          richToMarkdown('<table><tr><td>a</td></tr></table>'), 'a');
+      } finally { richTableToGfm = _rtg; }
+    }
   })();
 
   // parseJsonSafe: tolerant JSON parse — never throws; { ok, value, error }.
@@ -1178,10 +1216,12 @@
     t('parseCsv empty string → one empty row', parseCsv('').rows, [['']]);
   })();
 
-  // Deep-search render cap (DEEP_MATCH_CAP) + the "showing N of M" note
+  // The "showing N of M" cap note. (The CAP ITSELF is exercised through the real
+  // runDeepSearch in the async section — the case that used to live here re-implemented
+  // `all.slice(0, DEEP_MATCH_CAP)` inside its own expectation and never called
+  // production code, so deleting the cap left it green.)
   (function () {
     const savedDS = deepSearch, savedDM = deepMatches, savedDT = deepMatchTotal;
-    t('DEEP_MATCH_CAP slices to the cap', new Set(Array.from({ length: 500 }, (_, i) => 'p' + i).slice(0, DEEP_MATCH_CAP)).size, DEEP_MATCH_CAP);
     const note = document.getElementById('searchCapNote');
     // capped: total > rendered
     deepSearch = true; deepMatchTotal = 500; deepMatches = new Set(['a', 'b']);
@@ -1970,6 +2010,399 @@
           cleanPageSnapshot = null;
           if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
         }
+      }
+
+      // ---- showMiniMenu: the WIRING of the two viewport clamps ---------------------
+      // miniMenuClampPos / miniMenuShift are unit-tested as pure functions above, but
+      // nothing pinned that showMiniMenu actually CALLS them and applies the result — so
+      // BOTH clamp fixes could be deleted outright with the whole suite still green.
+      // These drive the real function in all THREE positioning modes at a FITTING and an
+      // OVERFLOWING viewport and assert the applied style. The fitting half is the
+      // load-bearing one: "zero positional regression where the menu fits" is the
+      // documented contract of the align:'right' and anchorRect modes.
+      //   The box is given a deterministic size by a scoped test-only rule — tests.html
+      // does not load style.css, so an unstyled .mini-menu would measure whatever the
+      // body width happens to be. The clamp math is what's under test, not the CSS.
+      {
+        // Shadow the live accessors with own data properties, then `delete` them so the
+        // real (live) accessors come back — restoring by assignment would leave a frozen
+        // number behind for anything that resizes later.
+        const vp = (w, h) => {
+          Object.defineProperty(window, 'innerWidth', { value: w, configurable: true });
+          Object.defineProperty(window, 'innerHeight', { value: h, configurable: true });
+        };
+        const css = document.createElement('style');
+        css.textContent = '.mini-menu{position:fixed;box-sizing:border-box;margin:0;width:220px;height:300px;overflow:hidden}';
+        document.head.appendChild(css);
+        const anchor = document.createElement('button');
+        anchor.title = 'More actions';
+        document.body.appendChild(anchor);
+        const at = (r) => { anchor.getBoundingClientRect = () => r; };
+        const shut = () => { const m = document.querySelector('.mini-menu'); if (m) (m._close || m.remove).call(m, false); };
+        // open + return [top, left, transform] as applied
+        const openPos = (opts) => {
+          showMiniMenu(anchor, [{ label: 'One', onClick() {} }, { divider: true }, { label: 'Two', onClick() {} }], opts);
+          const m = document.querySelector('.mini-menu');
+          const p = [m.style.top, m.style.left, m.style.transform];
+          shut();
+          return p;
+        };
+        try {
+          // --- default mode: clamp + flip upward near the bottom edge ---
+          vp(1000, 800); at({ top: 80, bottom: 100, left: 100, right: 200, width: 100, height: 20 });
+          ta('menu default mode fits: opens below-left of the anchor, no transform',
+             openPos({}), ['104px', '100px', '']);
+          vp(1000, 400);
+          ta('menu default mode overflowing the bottom: FLIPS above the anchor',
+             openPos({}), ['8px', '100px', '']);
+
+          // --- anchorRect mode (exportMenu / colsort / Copy-as): plain top/left, no flip.
+          // A fitting menu must land on EXACTLY the caller's rect — that byte-preservation
+          // is the mode's contract, and it is what the clamp is written not to disturb.
+          vp(1000, 800);
+          ta('menu anchorRect mode fits: plain rect position, UNCHANGED',
+             openPos({ anchorRect: { top: 80, bottom: 100, left: 300, right: 400 } }), ['104px', '300px', '']);
+          // …and a rect near the bottom-right corner is pulled back inside with an 8px pad
+          // (a position:fixed box, so a row past the edge cannot be scrolled to at all).
+          vp(1000, 400);
+          ta('menu anchorRect mode overflowing: shifted inside the viewport (8px pad)',
+             openPos({ anchorRect: { top: 360, bottom: 380, left: 900, right: 980 } }), ['92px', '772px', '']);
+
+          // --- align:'right' mode (sidebar More ⋯): left = r.right + translateX(-100%),
+          // so the VISUAL left edge is (left - width) and the guard runs on the RENDERED
+          // rect. A fitting menu keeps its top, its left AND its transform.
+          vp(1000, 800); at({ top: 80, bottom: 100, left: 400, right: 500, width: 100, height: 20 });
+          ta("menu align:'right' fits: right-aligned under the anchor, transform kept",
+             openPos({ align: 'right' }), ['104px', '500px', 'translateX(-100%)']);
+          // Left overflow (the shipped bug: a sidebar dragged to SIDEBAR_MIN put the menu
+          // at left:-71, clipped off-screen). Corrected by setting the absolute VISUAL
+          // left and DROPPING the transform — never by nudging `left` by dx.
+          at({ top: 80, bottom: 100, left: 50, right: 150, width: 100, height: 20 });
+          ta("menu align:'right' overflowing LEFT: visual left + transform:none",
+             openPos({ align: 'right' }), ['104px', '8px', 'none']);
+          // Vertical overflow only: the top shifts, the right-alignment (and transform) stay.
+          vp(1000, 400); at({ top: 360, bottom: 380, left: 400, right: 500, width: 100, height: 20 });
+          ta("menu align:'right' overflowing the BOTTOM: top shifts, transform kept",
+             openPos({ align: 'right' }), ['92px', '500px', 'translateX(-100%)']);
+          // Both axes at once.
+          at({ top: 360, bottom: 380, left: 50, right: 150, width: 100, height: 20 });
+          ta("menu align:'right' overflowing BOTH axes: shifted on both",
+             openPos({ align: 'right' }), ['92px', '8px', 'none']);
+        } finally {
+          shut();
+          css.remove(); anchor.remove();
+          delete window.innerWidth; delete window.innerHeight;
+        }
+      }
+
+      // ---- showMiniMenu: the ARIA + keyboard + dismissal contract ------------------
+      // The ONE popup-menu implementation, with 9+ call sites depending on it — and it
+      // had ZERO automated coverage (the suite named it exactly once, in a comment).
+      {
+        const anchor = document.createElement('button');
+        anchor.title = 'Block actions';
+        const other = document.createElement('button');
+        other.title = 'Other actions';
+        document.body.append(anchor, other);
+        const shut = () => { const m = document.querySelector('.mini-menu'); if (m) (m._close || m.remove).call(m, false); };
+        const key = (m, k) => m.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true }));
+        const picked = [];
+        const items = () => [
+          { icon: '❐', label: 'Duplicate', onClick: () => picked.push('dup') },
+          { divider: true },
+          { label: 'Convert', onClick: () => picked.push('conv') },
+        ];
+        try {
+          showMiniMenu(anchor, items());
+          let m = document.querySelector('.mini-menu');
+          let opts = [...m.querySelectorAll('.mini-menu-opt')];
+          ta('mini-menu is role=menu, named from the trigger title',
+             [m.getAttribute('role'), m.getAttribute('aria-label')], ['menu', 'Block actions']);
+          ta('mini-menu options are role=menuitem with a roving tabindex=-1',
+             opts.map(o => [o.getAttribute('role'), o.tabIndex]), [['menuitem', -1], ['menuitem', -1]]);
+          ta('mini-menu divider is role=separator', m.querySelector('.mini-menu-sep').getAttribute('role'), 'separator');
+          ta('opening marks the trigger aria-expanded (+ haspopup)',
+             [anchor.getAttribute('aria-expanded'), anchor.getAttribute('aria-haspopup')], ['true', 'menu']);
+          ta('focus lands on the first item on open', document.activeElement === opts[0], true);
+          key(m, 'ArrowDown');
+          ta('ArrowDown moves to the next item', document.activeElement === opts[1], true);
+          key(m, 'ArrowDown');
+          ta('ArrowDown WRAPS past the last item', document.activeElement === opts[0], true);
+          key(m, 'ArrowUp');
+          ta('ArrowUp WRAPS past the first item', document.activeElement === opts[1], true);
+          key(m, 'Home');
+          ta('Home jumps to the first item', document.activeElement === opts[0], true);
+          key(m, 'End');
+          ta('End jumps to the last item', document.activeElement === opts[1], true);
+          key(m, 'Enter');
+          ta('Enter activates the focused item and closes the menu',
+             [picked.slice(), !!document.querySelector('.mini-menu')], [['conv'], false]);
+          ta('closing resets the trigger aria-expanded', anchor.getAttribute('aria-expanded'), 'false');
+
+          // Space activates too (the ARIA menu-button pattern), then Escape / Tab close
+          // and hand focus BACK to the anchor so the next Tab continues from there.
+          picked.length = 0;
+          showMiniMenu(anchor, items());
+          m = document.querySelector('.mini-menu');
+          key(m, ' ');
+          ta('Space activates the focused item', picked.slice(), ['dup']);
+          showMiniMenu(anchor, items());
+          m = document.querySelector('.mini-menu');
+          key(m, 'Escape');
+          ta('Escape closes and returns focus to the anchor',
+             [!!document.querySelector('.mini-menu'), document.activeElement === anchor], [false, true]);
+          showMiniMenu(anchor, items());
+          m = document.querySelector('.mini-menu');
+          key(m, 'Tab');
+          ta('Tab closes and returns focus to the anchor',
+             [!!document.querySelector('.mini-menu'), document.activeElement === anchor], [false, true]);
+
+          // Pointer dismissal: an outside mousedown, and a PAGE scroll (the anchor moves
+          // out from under the menu). Both listeners are attached in a setTimeout(0) so
+          // the opening click can't self-close the menu — hence the macrotask wait.
+          showMiniMenu(anchor, items());
+          await new Promise(r => setTimeout(r, 0));
+          other.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+          ta('an outside mousedown dismisses the menu', !!document.querySelector('.mini-menu'), false);
+          showMiniMenu(anchor, items());
+          await new Promise(r => setTimeout(r, 0));
+          window.dispatchEvent(new Event('scroll'));
+          ta('a page scroll dismisses the menu', !!document.querySelector('.mini-menu'), false);
+
+          // Re-clicking the SAME anchor toggles the menu shut (not a second menu).
+          showMiniMenu(anchor, items());
+          showMiniMenu(anchor, items());
+          ta('re-opening from the same anchor toggles the menu shut',
+             [!!document.querySelector('.mini-menu'), anchor.getAttribute('aria-expanded')], [false, 'false']);
+
+          // Opening a DIFFERENT menu closes the first through its _close (its anchor's
+          // aria-expanded resets + its listeners come off — no stale .remove() bypass).
+          showMiniMenu(anchor, items());
+          showMiniMenu(other, items());
+          m = document.querySelector('.mini-menu');
+          ta('opening another menu closes the first via _close',
+             [document.querySelectorAll('.mini-menu').length, m._anchor === other, anchor.getAttribute('aria-expanded')],
+             [1, true, 'false']);
+          shut();
+
+          // A CHECKABLE menu (the per-column sort picker) becomes a radio group, reserves
+          // the icon column on EVERY row, and opens focused on the checked row.
+          showMiniMenu(anchor, [
+            { label: 'Name', checked: false, onClick() {} },
+            { label: 'Kind', checked: true, onClick() {} },
+          ]);
+          m = document.querySelector('.mini-menu');
+          opts = [...m.querySelectorAll('.mini-menu-opt')];
+          ta('a checkable menu uses role=menuitemradio + aria-checked',
+             opts.map(o => [o.getAttribute('role'), o.getAttribute('aria-checked')]),
+             [['menuitemradio', 'false'], ['menuitemradio', 'true']]);
+          ta('a checkable menu reserves the icon column on every row (✓ only when checked)',
+             opts.map(o => (o.querySelector('.mm-ic') || {}).textContent), ['', '✓']);
+          ta('a checkable menu opens focused on the CHECKED row', document.activeElement === opts[1], true);
+        } finally {
+          shut();
+          anchor.remove(); other.remove();
+        }
+      }
+
+      // ---- beforeEditSession: the D-2 headline property, AND its ordering trap ------
+      // beforeEditSession() must run BEFORE the block drops `.viewing`: the predicate it
+      // guards on (anyBlockEditing) is DOM-derived, so one line later it reads "an editor
+      // is already open" and silently skips the snapshot — and the snapshot is the whole
+      // reason Cancel is free. Coverage used to set cleanPageSnapshot BY HAND and only
+      // call afterEditSession, so an EMPTY beforeEditSession body and a MOVED call both
+      // shipped green. This drives the real enterEdit through the rendered Edit button.
+      {
+        const _cpp = currentPagePath, _cpd = currentPageData, _api = window.api;
+        const pageEl = document.getElementById('page');
+        try {
+          const BP = RUN + 'before/Edit.json';
+          let saves = 0;
+          window.api = async (a) => { if (a === 'save_page') saves++; return { ok: true, mtime: 1 }; };
+          const b = { type: 'bash', label: '', code: 'echo one' };
+          currentPagePath = BP;
+          currentPageData = { title: 'b', sections: [{ title: 's', collapsed: false, tags: [], blocks: [b], subsections: [] }] };
+          pageDirty.clear(); cleanPageSnapshot = null;
+          if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+          const el = renderBlock(b, currentPageData.sections[0].blocks, 0);
+          pageEl.appendChild(el);                 // IN #page: the predicate reads the live DOM
+          const clean = safeStringify(currentPageData);
+          el.querySelector('.block-edit').click();          // the real enterEdit()
+          ta('enterEdit captured the CLEAN-page snapshot (beforeEditSession ran, and ran first)',
+             cleanPageSnapshot, clean);
+          ta('enterEdit leaves the block in edit mode', el.classList.contains('viewing'), false);
+          const textarea = el.querySelector('.code-edit');
+          textarea.value = 'echo two';
+          textarea.dispatchEvent(new Event('input', { bubbles: true }));
+          ta('typing marks the page dirty and arms NO write while the editor is open',
+             [pageDirty.has(BP), saveTimer, saves], [true, null, 0]);
+          el.querySelector('.block-revert').click();        // dirty → Revert, stays open
+          ta('Revert restores the original text', b.code, 'echo one');
+          el.querySelector('.block-revert').click();        // clean → Cancel, session ends
+          await Promise.resolve(); await Promise.resolve();
+          ta('Cancel after a full revert clears dirty and earns ZERO writes',
+             [pageDirty.has(BP), saveTimer, saves], [false, null, 0]);
+          el.remove();
+        } finally {
+          pageEl.innerHTML = '';
+          currentPagePath = _cpp; currentPageData = _cpd; window.api = _api;
+          pageDirty.clear(); cleanPageSnapshot = null;
+          if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+        }
+      }
+
+      // ---- the per-render-path wiring, asserted THROUGH the render functions -------
+      // The focus flush and the session-end hook were only ever exercised by calling them
+      // directly (wireFocusFlush on a synthetic <div>, afterEditSession with a hand-set
+      // snapshot), so deleting either CALL from a render path shipped green.
+      {
+        const _cpp = currentPagePath, _cpd = currentPageData, _api = window.api;
+        const pageEl = document.getElementById('page');
+        const detached = document.createElement('div');   // off-#page ⇒ no editor "open"
+        try {
+          const WP = RUN + 'wiring/W.json';
+          let saves = 0;
+          window.api = async (a) => { if (a === 'save_page') saves++; return { ok: true, mtime: 1 }; };
+          currentPagePath = WP;
+          const flushTick = async () => { await new Promise(r => setTimeout(r, 0)); await Promise.resolve(); await Promise.resolve(); };
+
+          // (a) renderBlock must WIRE the focus flush: a real departure from a rendered,
+          // open code editor persists exactly once (the crash-safety bound while autosave
+          // is deferred). Tested through renderBlock, not on a synthetic element.
+          const fb = { type: 'bash', label: '', code: 'x' };
+          currentPageData = { title: 'w', sections: [{ title: 's', collapsed: false, tags: [], blocks: [fb], subsections: [] }] };
+          blockBackups.set(fb, fb.code);                  // render straight into edit mode
+          const fel = renderBlock(fb, currentPageData.sections[0].blocks, 0);
+          pageEl.appendChild(fel);
+          pageDirty.clear(); pageDirty.add(WP); saves = 0;
+          fel.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
+          await flushTick();
+          ta('renderBlock wires the focus flush (a departure persists once)', saves, 1);
+          blockBackups.delete(fb);
+          pageEl.innerHTML = '';
+          if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+
+          // (b) EVERY session-bearing kind must end its session through afterEditSession:
+          // a Revert that puts the page back byte-for-byte clears the dirty flag and arms
+          // NOTHING. Losing the call from ONE kind (per-kind drift) fails here.
+          const kinds = BLOCK_KINDS.map(k => k.kind).filter(k => k !== 'checklist');
+          const revertResults = [];
+          for (const kind of kinds) {
+            const b = newBlockOfKind(kind);
+            const cleanCode = b.code || '';
+            currentPageData = { title: 'w', sections: [{ title: 's', collapsed: false, tags: [], blocks: [b], subsections: [] }] };
+            blockBackups.set(b, cleanCode);
+            const bel = renderBlock(b, currentPageData.sections[0].blocks, 0);
+            detached.appendChild(bel);
+            cleanPageSnapshot = safeStringify(currentPageData);   // the pre-edit baseline
+            b.code = cleanCode + '\nedited';                      // …then a dirty edit
+            pageDirty.clear(); pageDirty.add(WP);
+            bel.querySelector('.block-revert').click();           // dirty branch → afterEditSession
+            revertResults.push(kind + ':' + (pageDirty.has(WP) ? 'still-dirty' : 'clean')
+                                    + '/' + (saveTimer ? 'armed' : 'idle'));
+            blockBackups.delete(b);
+            bel.remove();
+            if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+          }
+          ta('every session-bearing kind clears dirty on a no-op Revert (afterEditSession)',
+             revertResults, kinds.map(k => k + ':clean/idle'));
+
+          // (c) …and the census itself: each of the FIVE session-bearing render paths
+          // wires all four hooks. Mirrors the CI `edit-session wiring census` invariant so
+          // the client suite fails too when one path silently loses one.
+          ta('every session-bearing render path wires all four edit-session hooks',
+             [renderBlock, renderRichBlock, renderCsvBlock, renderJsonBlock, renderHtmlBlock]
+               .map(f => ['beforeEditSession()', 'afterEditSession()', 'wireEscapeRevert(', 'wireFocusFlush(']
+                 .filter(h => !f.toString().includes(h))),
+             [[], [], [], [], []]);
+        } finally {
+          pageEl.innerHTML = '';
+          currentPagePath = _cpp; currentPageData = _cpd; window.api = _api;
+          pageDirty.clear(); cleanPageSnapshot = null;
+          if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+        }
+      }
+
+      // ---- anyBlockEditing FAILS OPEN -------------------------------------------
+      // A broken predicate must degrade to SAVING. Fail-closed (returning true) would
+      // suppress autosave permanently, with every other assertion still green.
+      {
+        const _qs = document.querySelector;
+        try {
+          document.querySelector = function () { throw new Error('selector engine down'); };
+          ta('anyBlockEditing fails OPEN when the DOM query throws', anyBlockEditing(), false);
+        } finally { document.querySelector = _qs; }
+      }
+
+      // ---- runDeepSearch: the render cap is a real perf guard ----------------------
+      // The cap keeps a broad term on a large library from painting thousands of sidebar
+      // rows synchronously (~1.5 s at 1200 pages). Driven through the real function
+      // against a stubbed search_content, so removing the slice fails here.
+      {
+        const _api = window.api, _sq = searchQuery, _ds = deepSearch,
+              _dm = deepMatches, _dt = deepMatchTotal;
+        const note = document.getElementById('searchCapNote');
+        try {
+          const all = Array.from({ length: 500 }, (_, i) => 'p/' + i + '.json');
+          window.api = async (a) => (a === 'search_content' ? all : []);
+          deepSearch = true; searchQuery = 'widget';
+          deepMatches = new Set(); deepMatchTotal = 0;
+          runDeepSearch();
+          await new Promise(r => setTimeout(r, 500));   // 220 ms fetch debounce + renderTree
+          ta('runDeepSearch renders at most DEEP_MATCH_CAP matches', deepMatches.size, DEEP_MATCH_CAP);
+          ta('runDeepSearch keeps the FULL match count for the note', deepMatchTotal, 500);
+          ta('the capped-results banner shows "first N of M"', [note.hidden, note.textContent],
+             [false, 'Showing first ' + DEEP_MATCH_CAP + ' of 500 content matches — refine your search']);
+        } finally {
+          window.api = _api; searchQuery = _sq; deepSearch = _ds;
+          deepMatches = _dm; deepMatchTotal = _dt;
+          renderTree();
+        }
+      }
+
+      // ---- RICH_SOFT_WARN: a soft, ONCE-per-block toast — never a truncation --------
+      // A data-URL image pasted into a rich block is a ×21 on-disk bloat vector, so the
+      // block warns; a hard cap could only LOSE content, which is why this must stay a
+      // warning. Both halves were undefended.
+      {
+        const _cpp = currentPagePath, _toast = window.toast;
+        try {
+          const toasts = [];
+          window.toast = (m) => toasts.push(String(m));
+          currentPagePath = RUN + 'rich/Big.json';
+          pageDirty.clear();
+          const big = '<p>' + 'a'.repeat(RICH_SOFT_WARN + 64) + '</p>';
+          const b = { rich: true, type: 'rich', label: '', code: big };
+          blockBackups.set(b, big);
+          const bel = renderBlock(b, [b], 0);
+          const surface = bel.querySelector('.rich-surface');
+          surface.dispatchEvent(new Event('input', { bubbles: true }));
+          surface.dispatchEvent(new Event('input', { bubbles: true }));
+          ta('an oversized rich block warns exactly ONCE per session',
+             toasts.filter(m => m.includes('rich block')).length, 1);
+          ta('the oversize warning never truncates the stored HTML', b.code.length > RICH_SOFT_WARN, true);
+          blockBackups.delete(b); bel.remove();
+        } finally {
+          window.toast = _toast; currentPagePath = _cpp;
+          pageDirty.clear();
+          if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+        }
+      }
+
+      // ---- .modal-title honours \n (the over-cap rejection's file list) ------------
+      // A modal message is a plain string, and one caller passes a \n-separated list of
+      // oversized files. `pre-line` is what keeps those line breaks. Asserted on the
+      // COMPUTED style against the real stylesheet, loaded (and removed) just for this.
+      {
+        const link = document.createElement('link');
+        link.rel = 'stylesheet'; link.href = 'style.css';
+        await new Promise((resolve) => { link.onload = resolve; link.onerror = resolve; document.head.appendChild(link); });
+        const probe = document.createElement('div');
+        probe.className = 'modal-title';
+        document.body.appendChild(probe);
+        const ws = getComputedStyle(probe).whiteSpace;
+        probe.remove(); link.remove();
+        ta('.modal-title keeps newlines (white-space: pre-line)', ws, 'pre-line');
       }
 
       // importPages negatives: malformed / wrong-shape input fails gracefully —
