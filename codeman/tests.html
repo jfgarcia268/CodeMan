@@ -2622,7 +2622,8 @@
           ta('EVERY page in the bundle lands, at its full path',
              calls.filter(c => c[0] === 'save_page').map(c => c[1]).sort(),
              ['A/B/C/Three.json', 'AtRoot.json', 'Notes/Recipe.json', 'QA Kinds/Deep/Leaf.json']);
-          ta('…and the toast counts them all, reporting no failures', toasts, ['Imported 4 pages']);
+          ta('…and the toast counts them all, reporting no failures',
+             toasts, ['Imported 4 pages — ' + BUNDLE_SCOPE_SHORT + '.']);
 
           // A page that FAILS must be counted and surfaced. A success toast over partial
           // data loss on the documented backup path is the core defect.
@@ -2633,10 +2634,75 @@
           let saves = 0;
           window.api = async (action) => (action === 'save_page' && ++saves === 1 ? { error: 'boom' } : { ok: true });
           await runImport({ 'One.json': { sections: [] }, 'Two.json': { sections: [] } }, 'p.json');
-          ta('a PARTIAL import reports both the wins and the losses', toasts, ['Imported 1 page, 1 failed']);
+          ta('a PARTIAL import reports both the wins and the losses',
+             toasts, ['Imported 1 page, 1 failed — ' + BUNDLE_SCOPE_SHORT + '.']);
+
+          // ---- Item 1: a JSON bundle's SCOPE is stated at import ------------------
+          // "Imported N pages" was an unqualified success claim, but the bundle is page
+          // CONTENT only — project markers, manual order, column sort, trash and history
+          // are silently absent from the restore, so a restored library reads as plain
+          // folders with no history and no way to tell that from a failed restore.
+          window.api = async () => ({ ok: true, mtime: 1 });
+          await runImport({ 'One.json': { sections: [] } }, 'b.json');
+          t('a bundle import names what a JSON bundle does not carry',
+            toasts[0], 'Imported 1 page — ' + BUNDLE_SCOPE_SHORT + '.');
+          for (const bit of ['project markers', 'manual order', 'trash', 'history'])
+            t('…naming ' + bit + ' specifically', toasts[0].includes(bit), true);
+          t('…and it does NOT claim the page content is incomplete',
+            /page content only/.test(toasts[0]), true);
+          // A SINGLE page (This page → JSON) has no library shape to lose — the caveat
+          // would be noise, and wrong: nothing about that export was ever library-wide.
+          toasts.length = 0;
+          importPages();
+          Object.defineProperty(lastInput, 'files', {
+            value: [new File([JSON.stringify({ title: 'Solo', sections: [] })], 'Solo.json')], configurable: true });
+          await lastInput.onchange();
+          ta('a SINGLE-page import gets no bundle caveat (nothing library-wide to lose)',
+             toasts, ['Imported 1 page']);
+          // Nor does a bundle that imported nothing — "0 pages" is a different message.
+          window.api = async (action) => (action === 'create_page' ? { error: 'nope' } : { ok: true });
+          await runImport({ 'One.json': { sections: [] } }, 'n.json');
+          ta('a bundle that imported NOTHING gets no caveat either', toasts, ['Imported 0 pages, 1 failed']);
         } finally {
           document.createElement = _create; HTMLInputElement.prototype.click = _click;
           window.toast = _toast; window.loadTree = _load; window.api = _api;
+        }
+      }
+
+      // ---- Item 1: the EXPORT side states the bundle's scope, unmissably ----------------
+      // Export is the moment a user forms the belief that they have a backup — init.js's
+      // offline-only desktop nudge sends them straight into exportAll, and on that machine
+      // IndexedDB is the only other copy. A transient toast reading "Exported 12 pages" is
+      // what let a page-content-only bundle be mistaken for a full library backup, so the
+      // scope note is an acknowledge-only showAlert here (nothing to decide — the file is
+      // already downloaded), not a toast.
+      {
+        const _api = window.api, _dl = window.download, _toast = window.toast,
+              _alert = window.showAlert, _cpp = window.collectPagePaths;
+        try {
+          const toasts = [], alerts = []; let dl = null;
+          window.api = async () => ({ title: 'P', sections: [], _mtime: 7 });
+          window.download = (name) => { dl = name; };
+          window.toast = (m) => toasts.push(String(m));
+          window.showAlert = async (m) => { alerts.push(String(m)); };
+          window.collectPagePaths = () => new Set(['A.json', 'B/C.json']);
+          await exportAll();
+          ta('exportAll still downloads the bundle', [dl], ['codeman-export-2-pages.json']);
+          t('exactly one acknowledgement, and it is the modal', alerts.length, 1);
+          t('…which announces the count', /^Exported 2 pages\./.test(alerts[0] || ''), true);
+          t('…and no toast repeats an unqualified success claim',
+            toasts.filter(m => /^Exported/.test(m)).length, 0);
+          for (const bit of ['project markers', 'manual folder order', 'column sort', 'trash', 'version history'])
+            t('export names what a bundle does NOT carry: ' + bit, (alerts[0] || '').includes(bit), true);
+          t('…while staying accurate that page CONTENT is complete',
+            (alerts[0] || '').includes('Every page restores exactly as it is now'), true);
+          // .modal-title is white-space:pre-line, so the note must be newline-separated
+          // (a single run-on paragraph is how this gets skimmed past).
+          t('the note is multi-line, which .modal-title (pre-line) renders as such',
+            (alerts[0] || '').split('\n').length >= 3, true);
+        } finally {
+          window.api = _api; window.download = _dl; window.toast = _toast;
+          window.showAlert = _alert; window.collectPagePaths = _cpp;
         }
       }
 

@@ -709,6 +709,24 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   **offline** save reads **"Saved offline — will sync"** (a queued write is durable but is not on the
   server yet). **[auto: tests.html F-1 (pre-resolve silence · once · rejected · offline wording ·
   per-render-path drift census)]**
+- TC-data-12 (A/N, critical): **a create-then-save sequence must leave no history version whose
+  restoration would destroy the page.** `create_page` writes `{"title":…,"sections":[]}` and the very
+  next `save_page` used to snapshot that stub — so after restoring a JSON bundle, **every** page's
+  entire history was one 47-byte empty version, offered by the History panel with a normal blue
+  **Restore** button. Restoring it EMPTIED the page, and the real prior versions were never in the
+  bundle: worse than no history, a loaded gun where the safety net should be. Verify: restore a
+  bundle into an empty data root (TC-io-03), open a restored page → **History says "No saved versions
+  yet"**. Then check the two halves that bound the guard, because the risk here is over-suppression:
+  **(a) normal history is untouched** — edit that restored page 3× → 3 versions, the OLDEST holding
+  the imported content, and restoring it brings that content back; `HISTORY_KEEP` still prunes 25
+  saves to the newest 20 (TC-data-08). **(b) authored content is never skipped** — a page you
+  deliberately EMPTY still versions the work it replaced, and once a page has any history even
+  stub-shaped content is versioned (the skip only ever applies to a page's first snapshot); a page
+  whose only content is its title (renamed, never given a section) keeps every authored title.
+  Same sequence in `duplicatePageFromTree` and in a queued create+save replaying on reconnect —
+  which is why the guard lives in `snapshotHistory`, not in the importer.
+  **[auto: tests-api create-then-save (zero versions · no destructive version · next save versions ·
+  deliberately-emptied · emptied-state-then-versioned · title-only)]**
 
 ### TC-prod — Productivity
 - TC-prod-01 (P): Command palette ⌘K — jump to page (substring match), path-subtitle disambiguation;
@@ -742,6 +760,19 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   `404 {"error":"parent folder does not exist"}` and materialises **nothing** — it no longer
   recursive-mkdirs an invented parent chain inside the data root. A legitimate nested folder (parent
   created first) still succeeds. **[auto: tests-api.sh]**
+- TC-io-06 (P): **a JSON bundle's SCOPE is stated, not implied.** `Exported N pages` / `Imported N
+  pages` were unqualified success claims over a bundle that carries page CONTENT only, so a restore
+  silently drops project markers, manual folder order, column sort, trash and history — and the
+  restored library (plain folders, no history) is indistinguishable from a failed restore. Verify:
+  **Export ▸ All pages → JSON** → the file downloads AND an acknowledge-only modal reads
+  `Exported N pages.` + `Every page restores exactly as it is now.` + the list of what a bundle does
+  not carry (multi-line — `.modal-title` is `white-space: pre-line`); no toast repeats the claim.
+  **Import…** a bundle that lands ≥1 page → the toast names the same omissions. It must NOT fire
+  where it doesn't apply: **Export ▸ This page → JSON** still just toasts `Exported <name>` (no
+  modal), a **single-page** import toasts a bare `Imported 1 page`, and a bundle that imported
+  nothing keeps its `Imported 0 pages, M failed` wording. Mobile (375px): the toast wraps inside the
+  viewport (it is `max-width`-capped) and the modal fits. **[auto: tests.html export scope-note +
+  import caveat (bundle · single page · zero pages)]**
 
 ### TC-offline — Offline + Service Worker
 - TC-offline-01 (P): SW registers (secure context incl. localhost) + precaches the shell.

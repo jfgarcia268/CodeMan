@@ -64,6 +64,23 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
   Checklist blocks are unaffected — they have no Edit/Cancel and still save immediately.
 
 ### Fixed
+- **Restoring a backup no longer leaves a history version that would empty the page.** After
+  importing an `All pages → JSON` bundle, every restored page's History showed exactly one saved
+  version — and that version was empty. Clicking **Restore** on it (the only version there, presented
+  like any normal one) wiped the page's content, and the page's real earlier versions had never been
+  in the bundle to begin with. History on a restored page now correctly reads *"No saved versions
+  yet"*, and starts collecting real versions from your first edit. The same empty version was created
+  whenever a page was made and saved in one step — duplicating a page from the sidebar, or an offline
+  page syncing when you reconnect — so those are fixed too. Normal history is unchanged: pages you
+  deliberately empty still snapshot the work they replaced, and nothing that was ever saved with
+  content is affected.
+- **Export and import now say what a JSON bundle actually contains.** `Exported 12 pages` /
+  `Imported 12 pages` read as a complete backup, but a bundle carries **page content only** — project
+  markers, manual folder order, column sort, trash and version history are not in it, so a restored
+  library came back as plain folders with no history and no explanation. Exporting all pages now
+  confirms the count *and* lists what the bundle does not include (page content itself restores
+  exactly), and a bundle import repeats the caveat. Exporting or importing a **single** page is
+  unchanged — the caveat doesn't apply there.
 - **Rich Text blocks no longer silently destroy pasted content.** Pasting a **table** dropped all its
   markup and ran every cell's text together into one line; **images** were deleted outright; and
   **Heading 5 / Heading 6** were flattened to plain text. Tables (including captions, column groups

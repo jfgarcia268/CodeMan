@@ -1066,6 +1066,18 @@ function exportCurrentPage(fmt) {
   toast('Exported ' + base);
 }
 
+// What an "All pages → JSON" bundle does and does not carry. The bundle is
+// { path: pageData } — page CONTENT only — so everything the library's SHAPE lives in
+// (the .project markers, .order.json, .colsort.json, .trash and .history) is absent.
+// Stated in full at export, because that is the moment a user forms the belief that
+// they have a backup (the offline-only desktop nudge in init.js sends them straight
+// here), and abbreviated at import, where it explains what they're looking at.
+const BUNDLE_SCOPE_NOTE = 'Every page restores exactly as it is now.\n'
+  + 'A JSON bundle carries page content only — project markers, manual folder order, '
+  + 'column sort, trash and version history are not included.';
+const BUNDLE_SCOPE_SHORT = 'a JSON bundle carries page content only, not project markers, '
+  + 'manual order, trash or history';
+
 // Export every page as one JSON bundle ({ path: pageData }).
 async function exportAll() {
   toast('Bundling…');
@@ -1077,7 +1089,10 @@ async function exportAll() {
     bundle[p] = d;
   }
   download('codeman-export-' + paths.length + '-pages.json', JSON.stringify(bundle, null, 2), 'application/json');
-  toast('Exported ' + paths.length + ' pages');
+  // showAlert, not toast: this one must not be missed. A transient toast that says
+  // "Exported N pages" is what let a bundle be mistaken for a full backup. Acknowledge
+  // -only (one button) — there is nothing to decide, the file is already downloaded.
+  await showAlert('Exported ' + paths.length + ' page' + (paths.length === 1 ? '' : 's') + '.\n\n' + BUNDLE_SCOPE_NOTE);
 }
 
 // Import a single page JSON, or a bundle ({path: data}), creating pages.
@@ -1090,9 +1105,10 @@ function importPages() {
     let parsed;
     try { parsed = JSON.parse(await file.text()); } catch (e) { toast('Invalid JSON'); return; }
     if (!parsed || typeof parsed !== 'object') { toast('Invalid JSON'); return; } // falsy-but-valid JSON (null/false/0) has no pages
-    const items = (parsed && parsed.sections) // single page
-      ? { [nameFromPath(file.name)]: parsed }
-      : parsed; // assume bundle of { path: data }
+    const isBundle = !(parsed && parsed.sections); // a single page carries `sections`; a bundle is { path: data }
+    const items = isBundle
+      ? parsed
+      : { [nameFromPath(file.name)]: parsed };
     let n = 0, failed = 0;
     for (const [rel, data] of Object.entries(items)) {
       if (!data || !Array.isArray(data.sections)) continue;   // not a page shape — nothing to import
@@ -1125,7 +1141,12 @@ function importPages() {
       n++;
     }
     await loadTree();
-    toast('Imported ' + n + ' page' + (n === 1 ? '' : 's') + (failed ? ', ' + failed + ' failed' : ''));
+    // Name what a bundle didn't carry, so a restored library reading as plain folders
+    // with no history is understood as the bundle's scope rather than a failed restore.
+    // Bundle-only and only when something actually landed: a single-page import (This
+    // page → JSON) has no library shape to lose, and "0 pages" is a different message.
+    const note = (isBundle && n) ? ' — ' + BUNDLE_SCOPE_SHORT + '.' : '';
+    toast('Imported ' + n + ' page' + (n === 1 ? '' : 's') + (failed ? ', ' + failed + ' failed' : '') + note);
   };
   inp.click();
 }

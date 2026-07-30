@@ -390,7 +390,11 @@ has "pathological regex (backtrack limit) → clean 'regex too complex'" "$(body
 post create_project '{"name":"OProj","parent":""}' >/dev/null
 r=$(post create_folder '{"parent":"OProj","name":"OFold"}')
 eqs "replay create_folder (nested) → 200" "$(code "$r")" "200"
-r=$(post save_page '{"path":"OProj/OFold/OPage.json","data":{"title":"OPage","sections":[]},"force":true}')
+# The replayed page carries a section (as a real replayed save does) so that the re-save
+# below snapshots: a page whose content is exactly {"title":"<filename>","sections":[]} is
+# the create_page stub, and snapshotHistory deliberately never versions that (see the
+# "create-then-save leaves no destructive empty version" case).
+r=$(post save_page '{"path":"OProj/OFold/OPage.json","data":{"title":"OPage","sections":[{"title":"S","collapsed":false,"tags":[],"blocks":[],"subsections":[]}]},"force":true}')
 eqs "replay save_page (nested, force) → 200" "$(code "$r")" "200"
 test -f "$DATA/OProj/OFold/OPage.json" && ok "replay wrote the nested page on disk" || bad "replay wrote the nested page" "missing"
 r=$(post get_page '{"path":"OProj/OFold/OPage.json"}')
@@ -452,12 +456,59 @@ kn=$(ls "$DATA/.history/Keep.json" 2>/dev/null | wc -l | tr -d ' ')
 eqs "25 saves prune to exactly HISTORY_KEEP (20) versions" "$kn" "20"
 knew="$DATA/.history/Keep.json/$(ls "$DATA/.history/Keep.json" | sort -n | tail -1)"
 kold="$DATA/.history/Keep.json/$(ls "$DATA/.history/Keep.json" | sort -n | head -1)"
-# snapshots hold the content BEFORE each save: v1…v24 plus the create → surviving
-# window is v5…v24 (the 20 newest), so the extremes pin the direction of the prune.
+# snapshots hold the content BEFORE each save: v1…v24 (the create_page stub is not
+# versioned — see the create-then-save case below) → surviving window is v5…v24 (the
+# 20 newest), so the extremes pin the direction of the prune.
 has "the NEWEST surviving version is the most recent one (v24)" "$(cat "$knew")" '"title": "v24"'
 has "the OLDEST surviving version is v5 (older ones were pruned)" "$(cat "$kold")" '"title": "v5"'
 kl=$(curl -sG "$BASE" --data-urlencode "action=list_history" --data-urlencode "path=Keep.json")
 eqs "list_history reports the same 20 versions" "$(printf '%s' "$kl" | grep -o '"ts":' | wc -l | tr -d ' ')" "20"
+
+# --- create-then-save leaves NO destructive empty version in history --------------
+# importPages restores a bundle as create_page (which writes {"title":…,"sections":[]})
+# then save_page (the real content) — so every restored page's ONLY history version was
+# that empty stub. The History panel presented it as a normal restorable version, and
+# restoring it EMPTIED the page: a restored backup shipped with a loaded gun where its
+# safety net should be. Same sequence in duplicatePageFromTree and in a queued
+# create+save replaying on reconnect, so the guard lives in snapshotHistory, not in the
+# importer: a page's FIRST snapshot is skipped when the prior content is exactly the
+# create_page stub FOR THAT FILENAME.
+hcount() { curl -sG "$BASE" --data-urlencode "action=list_history" --data-urlencode "path=$1" | grep -o '"ts":' | wc -l | tr -d ' '; }
+post create_folder '{"name":"Restore","parent":""}' >/dev/null
+post create_page '{"name":"Imported","parent":"Restore"}' >/dev/null
+post save_page '{"path":"Restore/Imported.json","data":{"title":"Imported","sections":[{"title":"S","collapsed":false,"tags":["t"],"blocks":[{"type":"bash","label":"","code":"restored content"}],"subsections":[]}]}}' >/dev/null
+has "the restored page holds the imported content" "$(cat "$DATA/Restore/Imported.json")" 'restored content'
+eqs "create_page→save_page leaves ZERO history versions (no empty stub)" "$(hcount 'Restore/Imported.json')" "0"
+# THE acceptance bar, stated directly: no version a user could restore would empty the page.
+destructive=0
+for v in "$DATA"/.history/Restore/Imported.json/*.json; do
+  [ -e "$v" ] || continue
+  php -r '$d=json_decode(@file_get_contents($argv[1]),true); exit((is_array($d) && empty($d["sections"]))?1:0);' "$v" || destructive=$((destructive+1))
+done
+eqs "no listed version of a restored page would destroy it if restored" "$destructive" "0"
+# ...and normal history is UNAFFECTED — the next save versions the real prior content.
+post save_page '{"path":"Restore/Imported.json","data":{"title":"Imported","sections":[{"title":"S2","collapsed":false,"tags":[],"blocks":[{"type":"bash","label":"","code":"second edit"}],"subsections":[]}]}}' >/dev/null
+eqs "the next save DOES version (history still works after a restore)" "$(hcount 'Restore/Imported.json')" "1"
+has "…and that version holds the real content, not an empty stub" "$(cat "$DATA"/.history/Restore/Imported.json/*.json)" 'restored content'
+
+# CONSERVATIVE HALF: content a user could have authored is NEVER skipped.
+# (a) a page a user deliberately EMPTIED is real data — its content versions normally,
+#     and once the page has history even stub-shaped content is versioned, so the skip
+#     can only ever apply to a page's very first snapshot.
+post create_page '{"name":"Emptied","parent":""}' >/dev/null
+post save_page '{"path":"Emptied.json","data":{"title":"Emptied","sections":[{"title":"S","collapsed":false,"tags":[],"blocks":[{"type":"bash","label":"","code":"authored work"}],"subsections":[]}]}}' >/dev/null
+post save_page '{"path":"Emptied.json","data":{"title":"Emptied","sections":[]}}' >/dev/null
+eqs "deliberately emptying a page versions the work it replaced" "$(hcount 'Emptied.json')" "1"
+has "…and that version is the authored content" "$(cat "$DATA"/.history/Emptied.json/*.json)" 'authored work'
+post save_page '{"path":"Emptied.json","data":{"title":"Emptied","sections":[{"title":"S","collapsed":false,"tags":[],"blocks":[{"type":"bash","label":"","code":"back again"}],"subsections":[]}]}}' >/dev/null
+eqs "the emptied state itself is then versioned like any other content" "$(hcount 'Emptied.json')" "2"
+# (b) a page whose only content IS its title (renamed, never given a section) keeps every
+#     authored title — "sections is empty" alone must never qualify as the stub.
+post create_page '{"name":"Titled","parent":""}' >/dev/null
+post save_page '{"path":"Titled.json","data":{"title":"Renamed once","sections":[]}}' >/dev/null
+post save_page '{"path":"Titled.json","data":{"title":"Renamed twice","sections":[]}}' >/dev/null
+eqs "a title-only page's authored title IS versioned" "$(hcount 'Titled.json')" "1"
+has "…holding the authored title, not the create_page stub" "$(cat "$DATA"/.history/Titled.json/*.json)" '"Renamed once"'
 
 # --- contentFileIterator: content scans NEVER descend into dot-dirs ----------------
 # .history/.trash hold ~20 versions per page. A bare RecursiveDirectoryIterator would

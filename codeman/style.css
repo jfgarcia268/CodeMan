@@ -1782,6 +1782,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   opacity: 0;
   transition: opacity 0.2s;
   pointer-events: none;
+  /* Most toasts are a few words, but a couple carry a real sentence (the import
+     bundle-scope note). Unbounded, those grew a single line right across the viewport
+     and off the left edge on mobile — cap + wrap. Short toasts are shrink-to-fit and
+     unaffected. */
+  max-width: min(460px, calc(100vw - 32px));
+  line-height: 1.45;
 }
 .toast.show { opacity: 1; }
 

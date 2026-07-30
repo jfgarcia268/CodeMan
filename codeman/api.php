@@ -426,6 +426,28 @@ function rrmdir($path) {
     }
 }
 
+// Is $json byte-for-byte-equivalent to what create_page writes for the page named
+// $name — {"title":"<name>","sections":[]} and NOTHING else? Deliberately STRUCTURAL
+// (so it can't be broken by re-formatting) and exact on all three counts: EXACTLY the
+// keys title+sections, the title create_page itself derived from the filename, and a
+// sections list of length 0. Any extra key, any section, a DIFFERENT title, anything
+// that doesn't parse → false.
+//
+// The title check is not decoration. Without it "any empty-sections page" qualifies,
+// and a page whose only content IS its title (renamed but never given a section) would
+// have every one of those titles silently dropped from history — authored content. This
+// is the only content a history snapshot is ever allowed to skip; it must not be
+// loosened into "looks empty enough".
+function isCreatePageStub($json, $name) {
+    $d = json_decode($json, true);
+    if (!is_array($d)) return false;
+    $keys = array_keys($d);
+    sort($keys);
+    if ($keys !== ['sections', 'title']) return false;
+    if (!is_string($d['title']) || $d['title'] !== $name) return false;
+    return is_array($d['sections']) && count($d['sections']) === 0;
+}
+
 // Snapshot a page's current content into .history before it's overwritten,
 // pruning to the most recent HISTORY_KEEP versions.
 function snapshotHistory($base, $rel, $path) {
@@ -439,8 +461,27 @@ function snapshotHistory($base, $rel, $path) {
     // best-effort no-op so a future unguarded caller can't reintroduce a .history escape.
     $hdir = safePath($historyDir, $rel);
     if ($hdir === null) return;
+    $vers = is_dir($hdir) ? (glob($hdir . '/*.json') ?: []) : [];
+    // Never version the create_page stub as a page's FIRST history entry. Any
+    // create-then-immediately-save sequence — importPages restoring a JSON bundle,
+    // duplicatePageFromTree, a queued create+save replaying on reconnect — writes an
+    // empty page and then the real content one call later, so the page's ONLY history
+    // version became {"title":…,"sections":[]}. The History panel presented that as a
+    // normal restorable version, and restoring it EMPTIES the page: a restored backup
+    // shipped with a loaded gun where its safety net should be.
+    //
+    // BOTH conditions are load-bearing, and together they bound this to a page's very
+    // first snapshot of content nobody authored:
+    //   (1) the page has NO versions yet — a page that has ever been saved is untouched
+    //       by this, so a page a user DELIBERATELY emptied still versions normally (its
+    //       real content is already in history, and the empty state it was emptied INTO
+    //       is snapshotted by the next save like any other content); and
+    //   (2) the prior content is the create_page stub FOR THIS FILENAME — reproducible
+    //       from the filename alone, so there is literally nothing to lose.
+    // Never widen this. Suppressing a snapshot is destroying a recovery point, and
+    // failing OPEN (snapshotting a stub) is only noise — failing closed loses data.
+    if (!$vers && isCreatePageStub($old, basename($path, '.json'))) return;
     if (!is_dir($hdir)) mkdir($hdir, 0777, true);
-    $vers = glob($hdir . '/*.json') ?: [];
     $stamp = @filemtime($path) ?: time();
     // mtime is second-granularity, so two saves in the same second collide on the
     // version filename. Bump to the next free integer key (filenames must stay
