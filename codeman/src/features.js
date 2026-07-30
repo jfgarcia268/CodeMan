@@ -32,9 +32,13 @@ function fmtTime(ts) {
 async function openTrash() {
   openPanel('Trash', async (body, foot, close) => {
     body.innerHTML = '<div class="panel-loading">Loading…</div>';
-    const items = await api('list_trash');
+    // A malformed/non-array response ({error:…}, an unparseable body) is a FAILURE, not
+    // an empty trash — normalize like the tags panel does so .length/.forEach below
+    // can't throw, and say which of the two it was.
+    const raw = await api('list_trash');
+    const items = Array.isArray(raw) ? raw : [];
     body.innerHTML = '';
-    if (!items.length) { body.innerHTML = '<div class="panel-empty">Trash is empty</div>'; }
+    if (!items.length) { body.innerHTML = '<div class="panel-empty">' + (Array.isArray(raw) ? 'Trash is empty' : 'Could not load the trash') + '</div>'; }
     items.forEach(it => {
       const row = document.createElement('div'); row.className = 'panel-row';
       const info = document.createElement('div'); info.className = 'panel-row-info';
@@ -192,9 +196,12 @@ function openDeadLetterInspect(it) {
 async function openHistory(path) {
   openPanel('History — ' + nameFromPath(path), async (body, foot, close) => {
     body.innerHTML = '<div class="panel-loading">Loading…</div>';
-    const versions = await api('list_history', undefined, 'path=' + encodeURIComponent(path));
+    // Same shape guard as the trash/tags panels: a non-array response must not read as
+    // "no versions" (that hides a real failure behind a reassuring empty state).
+    const raw = await api('list_history', undefined, 'path=' + encodeURIComponent(path));
+    const versions = Array.isArray(raw) ? raw : [];
     body.innerHTML = '';
-    if (!versions.length) { body.innerHTML = '<div class="panel-empty">No saved versions yet</div>'; return; }
+    if (!versions.length) { body.innerHTML = '<div class="panel-empty">' + (Array.isArray(raw) ? 'No saved versions yet' : 'Could not load history') + '</div>'; return; }
     versions.forEach((v, i) => {
       const row = document.createElement('div'); row.className = 'panel-row';
       const info = document.createElement('div'); info.className = 'panel-row-info';

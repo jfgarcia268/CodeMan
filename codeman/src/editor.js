@@ -4597,7 +4597,12 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     const code = block.code || '';
     let parts = code.split(/\n[ \t]*\n[ \t]*\n*/).map(s => s.replace(/^\n+|\n+$/g, '')).filter(s => s.trim() !== '');
     if (parts.length < 2) {
-      const pos = (document.activeElement === textarea) ? textarea.selectionStart : 0;
+      // Use the caret REMEMBERED from the live edit session (lastCaret, recorded by
+      // updateActiveLine), not document.activeElement — by the time this runs the ⋯
+      // menu owns focus. In view mode there is no caret, so 0 keeps the existing
+      // "add a blank line or place the cursor" semantic (as does a caret at 0 or at
+      // the very end — neither is a split point).
+      const pos = el.classList.contains('viewing') ? 0 : lastCaret;
       if (pos > 0 && pos < code.length) parts = [code.slice(0, pos).replace(/\n+$/, ''), code.slice(pos).replace(/^\n+/, '')];
     }
     if (parts.length < 2) { toast('Nothing to split — add a blank line or place the cursor'); return; }
@@ -4740,6 +4745,11 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     }
     updateActiveLine();
   }
+  // Last caret offset seen while this block was in an EDIT session. Split reads it
+  // instead of document.activeElement: its only UI route is the block ⋯ menu, and
+  // showMiniMenu moves focus to its first item on open, so an activeElement check
+  // never matched and caret-Split was dead (it always fell back to pos 0 and refused).
+  let lastCaret = 0;
   // Highlight the gutter number for the caret's line — only while editing.
   function updateActiveLine() {
     const lines = gutter.children;
@@ -4748,6 +4758,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
       return;
     }
     const pos = textarea.selectionStart || 0;
+    lastCaret = pos;   // remembered here, while the textarea still owns the caret
     const idx = (textarea.value.slice(0, pos).match(/\n/g) || []).length;
     for (let i = 0; i < lines.length; i++) lines[i].classList.toggle('active', i === idx);
   }

@@ -98,7 +98,7 @@ story is squarely "non-trivial."
 | `api.php` | Filesystem API: tree, page CRUD, move, reorder, content/block search, metadata index, projects, trash, history, save-conflict detection, find & replace, tag rename, optional password gate. |
 | `vendor/prism/` | Vendored Prism (core + autoloader + grammars + theme) — **no CDN**, works offline. Grammars autoload on demand; an unviewed language won't highlight offline until first rendered. |
 | `vendor/markdown-it/` | Vendored **markdown-it** (v14, single UMD file) — **no CDN**, offline. Backs `renderMarkdown` for **note blocks** (full CommonMark + GFM). Loaded as a static `<script>` before the `src/*.js` modules so `window.markdownit` exists when `editor.js` builds its instance. See the markdown-it gotcha. |
-| `tests.html` | Standalone **client** browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + `richToPlainText`/`convertBlock`/`parseCsv`/`parseJsonSafe`/`jsonPath`/`assembleRestoredTabs`/`uniqueCopyName` + deep-search cap + offline trash/history reducers (snapshots/restores the real IndexedDB cache — incl. `dl:` dead-letter keys — safe to run) + `sanitizeRichHtml` + `flushQueue` replay (FIFO/conflict-force/failure-retains + **dead-letter parking**: terminal/transient-exhausted/conflict-force-error, retry, `__codemanAdoptInto` merge, against stubbed `apiFetch`) + `importPages` negatives + the **HTML-project** helpers (`normalizeHtmlPath`/`resolveHtmlPath`/`isAbsoluteRef`/`stripCommonRoot`/`htmlExtInfo`/`resolveHtmlEntry`/`htmlFileList`/`htmlProjectSize`/`htmlCapCheck`/`htmlBundleKey`/`parseSrcset`/`serializeSrcset`/`pickSrcsetCandidate`/`parseImageSet`/`setHtmlEntry` + `bundleHtmlProject` incl. its three warning layers + the `blockKind` `block.html`-vs-`type:'html'` trap guard) + the **rendered html-block iframe's sandbox attribute** + `apiFetch`'s network classification (4xx / malformed body / 5xx / timeout / wrong-password token clear, against a stubbed `window.fetch`) + the **rich sanitizer's expanded allowlist** (`richImgSrc`/`richIntAttr`/`richToMarkdown` matrices, the two table invariants, foster-parent + foreign-content guards) + the **autosave-deferral** contract (`anyBlockEditing` incl. a per-`BLOCK_KINDS` pin, `scheduleSave` defers-but-still-marks-dirty, `safeStringify`, `afterEditSession`, the focus-flush **teardown** guard, and **Esc parity** across all six edit-session kinds) + `miniMenuClampPos` (the `anchorRect` viewport clamp: fits-unchanged / overflow / exact-fit boundary) + `miniMenuShift` (the same guard for `align:'right'`, as a `{dx,dy}` on the RENDERED rect: fits-unchanged / left+right overflow / exact-fit boundary / both axes) + **`showMiniMenu` itself** (the pure clamps' WIRING — a real menu opened in all three positioning modes at a fitting AND an overflowing viewport, asserting the applied `top`/`left`/`transform`, incl. `transform:'none'` on the `dx` branch — plus the full ARIA/keyboard/dismissal contract: roles, `aria-expanded` on open AND close, focus-on-open (and on the `checked` row), Arrow wrap, Home/End, Enter/Space, Escape/Tab → focus back on the anchor, outside-click, page-scroll, same-anchor toggle, one menu closing another via `_close`) + **`beforeEditSession` driven through the real `enterEdit`** (the snapshot must be captured, and captured BEFORE `.viewing` drops) + the **per-render-path wiring** (the focus flush asserted THROUGH `renderBlock`; a no-op Revert clearing `pageDirty` in every session-bearing kind; a `.toString()` census that all five paths wire all four hooks) + `anyBlockEditing`'s fail-OPEN catch + the **real `runDeepSearch` render cap** (a stubbed `search_content` returning 500 paths ⇒ 200 rendered + the "first N of M" banner) + `RICH_SOFT_WARN` (warns once, never truncates) + the computed `.modal-title` `white-space` against the real `style.css`. Open it in a browser; **647 assertions**, expect `0 failed`. `window.__testResult = {pass, fail, done}` — CI runs it headless via `.github/scripts/run-client-tests.mjs`, which asserts `pass === FLOOR` **exactly** (not `>=`: a `>=` floor is silent when a change deletes 5 assertions and adds 6 — so bump FLOOR whenever the total moves, in either direction) and fails on any uncaught page error. |
+| `tests.html` | Standalone **client** browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + `richToPlainText`/`convertBlock`/`parseCsv`/`parseJsonSafe`/`jsonPath`/`assembleRestoredTabs`/`uniqueCopyName` + deep-search cap + offline trash/history reducers (snapshots/restores the real IndexedDB cache — incl. `dl:` dead-letter keys — safe to run) + `sanitizeRichHtml` + `flushQueue` replay (FIFO/conflict-force/failure-retains + **dead-letter parking**: terminal/transient-exhausted/conflict-force-error, retry, `__codemanAdoptInto` merge, against stubbed `apiFetch`) + `importPages` negatives + the **HTML-project** helpers (`normalizeHtmlPath`/`resolveHtmlPath`/`isAbsoluteRef`/`stripCommonRoot`/`htmlExtInfo`/`resolveHtmlEntry`/`htmlFileList`/`htmlProjectSize`/`htmlCapCheck`/`htmlBundleKey`/`parseSrcset`/`serializeSrcset`/`pickSrcsetCandidate`/`parseImageSet`/`setHtmlEntry` + `bundleHtmlProject` incl. its three warning layers + the `blockKind` `block.html`-vs-`type:'html'` trap guard) + the **rendered html-block iframe's sandbox attribute** + `apiFetch`'s network classification (4xx / malformed body / 5xx / timeout / wrong-password token clear, against a stubbed `window.fetch`) + the **rich sanitizer's expanded allowlist** (`richImgSrc`/`richIntAttr`/`richToMarkdown` matrices, the two table invariants, foster-parent + foreign-content guards) + the **autosave-deferral** contract (`anyBlockEditing` incl. a per-`BLOCK_KINDS` pin, `scheduleSave` defers-but-still-marks-dirty, `safeStringify`, `afterEditSession`, the focus-flush **teardown** guard, and **Esc parity** across all six edit-session kinds) + `miniMenuClampPos` (the `anchorRect` viewport clamp: fits-unchanged / overflow / exact-fit boundary) + `miniMenuShift` (the same guard for `align:'right'`, as a `{dx,dy}` on the RENDERED rect: fits-unchanged / left+right overflow / exact-fit boundary / both axes) + **`showMiniMenu` itself** (the pure clamps' WIRING — a real menu opened in all three positioning modes at a fitting AND an overflowing viewport, asserting the applied `top`/`left`/`transform`, incl. `transform:'none'` on the `dx` branch — plus the full ARIA/keyboard/dismissal contract: roles, `aria-expanded` on open AND close, focus-on-open (and on the `checked` row), Arrow wrap, Home/End, Enter/Space, Escape/Tab → focus back on the anchor, outside-click, page-scroll, same-anchor toggle, one menu closing another via `_close`) + **`beforeEditSession` driven through the real `enterEdit`** (the snapshot must be captured, and captured BEFORE `.viewing` drops) + the **per-render-path wiring** (the focus flush asserted THROUGH `renderBlock`; a no-op Revert clearing `pageDirty` in every session-bearing kind; a `.toString()` census that all five paths wire all four hooks) + `anyBlockEditing`'s fail-OPEN catch + the **real `runDeepSearch` render cap** (a stubbed `search_content` returning 500 paths ⇒ 200 rendered + the "first N of M" banner) + `RICH_SOFT_WARN` (warns once, never truncates) + the computed `.modal-title` `white-space` against the real `style.css` + the **malformed-`tree` shape guard** (`setTreeData` rejects every non-array shape and keeps the last good tree; `loadTree` falls back to the offline mirror, flags offline and toasts; navigation afterwards does not throw — the pre-fix code fails 9 of these, one with the live crash `nodes is not iterable`) + **caret-Split through the real `⋯` menu** (rendered block → real Edit → caret at an offset → the menu takes focus → the Split item splits AT the caret, not at 0). Open it in a browser; **665 assertions**, expect `0 failed`. `window.__testResult = {pass, fail, done}` — CI runs it headless via `.github/scripts/run-client-tests.mjs`, which asserts `pass === FLOOR` **exactly** (not `>=`: a `>=` floor is silent when a change deletes 5 assertions and adds 6 — so bump FLOOR whenever the total moves, in either direction) and fails on any uncaught page error. |
 | `tests-api.sh` | Standalone **server** API tests (bash + curl, no deps). Spins a throwaway `php -S` against a temp `CODEMAN_DATA` dir and asserts api.php behavior the browser can't reach: path-traversal confinement, parent-dir guards, unicode `search_content`, same-second history retention, `empty_trash` history-prune + its traversal guard, save-conflict detection (stale `baseMtime` → conflict + untouched file; `force` → history snapshot), the project-nesting `move` guard, the `rename` traversal guard, the `restore_trash` round-trip, `replace_content` (preview dry-run / literal / regex), `rename_tag` (rename/merge/delete), and the password gate. `bash codeman/tests-api.sh` (exit 0 = green; hunts upward from its port if taken, so parallel/CI runs don't collide). |
 
 **No build step.** The `src/*.js` files are plain classic scripts sharing one global scope;
@@ -466,7 +466,14 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   the box fits** — used by the `exportMenu` submenu (passed the **visible** `headerMoreBtn` on the
   mobile page-header path, never a hidden `exportBtn` at 0,0), the **colsort** menu (its original
   plain top/left), and the **Copy-as** submenu (which pre-computes its bespoke
-  `left=max(8, r.right−200)` clamp into the rect so it lands identically). `anchorRect` mode passes
+  `left=max(8, r.right−200)` clamp into the rect so it lands identically). **Two of those `anchorRect`
+  call sites are DEAD in the shipped CSS and must not be documented or tested as live positioning:**
+  the block-kind `.type-menu` submenu and the Copy-as `.copy-as` submenu both anchor to their own
+  trigger, and both triggers are `display:none` at **every** width (the unconditional `.block-toolbar`
+  declutter rules) — the block `⋯` menu **rebuilds** both as its own items precisely because a hidden
+  button's rect is invalid. The code is correct and worth keeping (it's the fallback if a trigger is
+  ever un-hidden), but the *positional* behavior is unreachable: only the exportMenu and colsort
+  `anchorRect` paths are user-observable. `anchorRect` mode passes
   through the pure `miniMenuClampPos(top,left,w,h,vw,vh,pad)`, which **returns its input unchanged
   unless the box genuinely overflows** — so every fitting menu is still on the exact prior pixel
   (proved by a full 4-viewport before/after rect sweep), while a short window no longer strands the
@@ -504,6 +511,25 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   route through `duplicateBlock`/`duplicateSection` (deep-copy + splice **below** the source, not
   push-to-end) so a copy lands directly beneath its original and `pendingRevealObj`/`revealNewEl`
   pulse it into view.
+  **Corollary — a hidden-and-proxied action MUST NOT read `document.activeElement`.** `showMiniMenu`
+  moves focus to its first item on open, so by the time a proxied handler runs, the menu owns focus.
+  **Split** was the casualty: it read `document.activeElement === textarea ? textarea.selectionStart :
+  0`, which — now that `.block-split` is hidden at every width and the `⋯` menu is the ONLY route —
+  never matched. `pos` was always 0, so caret-Split silently refused with "add a blank line or place
+  the cursor" *at a cursor the user had just placed*: a shipped feature that was dead on both desktop
+  and mobile. Fix: `renderBlock` keeps a `lastCaret`, recorded in `updateActiveLine` (which already
+  runs on the textarea's keyup/click/focus/select **and** on `input` via `updateGutter`, and already
+  bails while `.viewing`) — i.e. captured while the textarea still owns the caret. Split reads
+  `el.classList.contains('viewing') ? 0 : lastCaret`, preserving the existing semantic that view mode,
+  caret-at-0 and caret-at-end are all "no split point". Any future menu-proxied action that needs
+  selection/focus state must capture it the same way, at the source.
+- **Line endings are normalized to LF on the first edit+save — intended, not a bug.** `block.code` is
+  written from `<textarea>.value`, and the DOM API normalizes `\r\n` → `\n` on read; a CRLF-bearing
+  block (imported, or written through the API) therefore re-saves as LF. Viewing costs nothing (open +
+  Cancel is a no-op — `flushSave` is dirty-guarded). This is standard editor behavior and is
+  **deliberately not "fixed"**: a CR-restoring save pass would have to guess the file's original
+  convention, would fight the platform on every keystroke path, and would risk mixed endings. Don't add
+  one.
 - **ALL block kinds get the icon toolbar (not just code/note).** `renderChecklistBlock` and
   `renderRichBlock` mirror the same mobile treatment: Edit→`✎`/Save→`✓` (rich), Copy→`⧉`, Delete→`✕`,
   label on its own row, and a `.block-overflow` (`⋯`) that folds Duplicate + the block-kind convert
@@ -903,6 +929,31 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   `treeData =` in `codeman/src/` outside the declaration + `setTreeData` definition — mirroring the
   `writeJsonAtomic` invariant; keep source comments free of a literal `treeData =` token so they
   don't trip it.
+  **It is ALSO the single SHAPE guard: `treeData` must stay an ARRAY, and a non-array write is
+  REJECTED (returns `false`) rather than applied.** Being the choke point is what makes one guard
+  cover all five writers. The bug it closes: `api()` only falls back to the IndexedDB mirror when
+  `apiFetch` **throws**, so a *reachable* server answering **200 with a non-array body** —
+  `{"error":…}`, `null`, or an unparseable body (→ the `_transient` error object) — sailed straight
+  into `treeData`. The library rendered as the EMPTY onboarding state, the offline mirror was
+  **BYPASSED** (a user with a perfectly good cache saw nothing), and the next navigation threw
+  `TypeError: folderChildren(...).find is not a function` from `nodeAtPath`. So: **a bad shape is a
+  FAILURE, never "the library is empty"** — `loadTree` checks the return, reads `offlineApi('tree')`,
+  calls `setOffline(true)` (which starts the self-healing probe loop) and toasts. The two offline.js
+  sites that call `apiFetch('tree')` directly (`probeBackend`, `flushQueue`'s reconcile) need their
+  OWN `Array.isArray` check as well, because they `kvSet('tree', fresh)` — an unguarded write there
+  poisoned the **PERSISTED** mirror, not just the in-memory global; `probeBackend` stays offline and
+  re-schedules, `flushQueue` skips only the reconcile (its writes did land). **The load-bearing one
+  is `cacheOnSuccess` (offline.js), found only by live-testing the fix:** `api()` runs it BEFORE
+  returning, so the malformed body overwrote `kv.tree` and the library still went empty *with*
+  `loadTree`'s fallback in place — the mirror was already poisoned by the time the fallback read it.
+  It now refuses to mirror anything with an `.error`, and shape-checks per action (`tree` must be an
+  array, `col_sorts` a plain object, `get_page` must carry a `sections` array). **A fallback is only
+  as good as the cache behind it: never let a failed response write the mirror.** Same class, same fix, in
+  the two array-returning panels that were unguarded: **Trash** and **History** normalize a non-array
+  response and say "Could not load…" instead of "empty"/"no versions" (deep search, block search and
+  the tags panel were already `Array.isArray`-guarded). Any new consumer that assumes an API response
+  shape needs the same one-line guard — a reachable-but-wrong response is not a connectivity error and
+  nothing upstream will catch it for you.
 - **Single-column tree is LAZY-built — a collapsed folder's `.tree-children` is left unbuilt
   (`data-lazy="1"`, empty) and constructed on first expand (tree.js `renderTreeNode` folder branch +
   its `toggleExpand`).** This is what stops the sidebar scaling with library size (collapsed

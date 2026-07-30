@@ -17,7 +17,16 @@ let treeData = [];
 // anywhere else would leave those aggregates stale; a CI grep invariant (tests.yml
 // `invariants` job) enforces that no bare assignment survives outside this function.
 // Reads of the global stay direct everywhere.
-function setTreeData(t) { treeData = t; invalidateTreeMemos(); }
+// It is ALSO the single shape guard: treeData must stay an ARRAY or every consumer
+// (folderChildren → nodeAtPath → renderTree/navigation) throws. A malformed `tree`
+// response — a 200 carrying {error:…}, null, or a PHP notice — used to land here
+// verbatim: the library rendered as the EMPTY onboarding state and the next click
+// threw "folderChildren(...).find is not a function". A bad shape is REJECTED (the
+// last good tree survives) and reported as `false` so the caller can fall back to the
+// offline mirror instead of showing an empty library — see loadTree below. Guarding at
+// the choke point covers all five writers (loadTree + offline.js's probeBackend /
+// flushQueue reconcile / restoreNodeToTree / mutateTreeCache).
+function setTreeData(t) { if (!Array.isArray(t)) return false; treeData = t; invalidateTreeMemos(); return true; }
 // Memoize a pure node→value function by node identity (WeakMap). Repeated renders
 // (sidebar resize, Miller window paging, keyboard-driven re-renders) re-request the
 // same folder aggregates; caching by the node object avoids re-walking the subtree
@@ -123,7 +132,19 @@ async function loadTree() {
     api('tree'),
     api('col_sorts').catch(() => null),   // preserve col_sorts-failure tolerance
   ]);
-  setTreeData(tree);
+  // A non-array `tree` is a FAILURE, not "the library is empty". api() only falls back
+  // to the IndexedDB mirror when apiFetch THROWS, so a *reachable* server answering 200
+  // with {error:…}/null/an unparseable body (→ the _transient error object) sails
+  // straight through and used to poison treeData — bypassing a perfectly good offline
+  // cache. Treat it like unreachable: read the mirror, flag offline (which also starts
+  // the self-healing probe loop), and say so out loud rather than silently rendering
+  // an empty library.
+  if (!setTreeData(tree)) {
+    const cached = await offlineApi('tree');   // namespaced local mirror ([] if none)
+    setTreeData(cached);
+    setOffline(true);
+    toast((tree && tree.error) || 'Could not load the library — showing the offline copy');
+  }
   colSort = cols || {};                    // null/undefined → default {} (as today)
   renderTree();
 }

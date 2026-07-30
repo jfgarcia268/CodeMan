@@ -340,6 +340,11 @@ async function probeBackend() {
   if (!offlineState) return true;
   try {
     const fresh = await apiFetch('tree');         // reachable? (throws/aborts if not)
+    // apiFetch only THROWS on unreachable/5xx — a 200 with {error:…} or an unparseable
+    // body comes back as an object, so an unguarded write here poisoned the PERSISTED
+    // mirror as well as treeData. Reachable-but-malformed = still not usable: keep the
+    // cache + tree as they are and stay offline so the backoff loop retries.
+    if (!Array.isArray(fresh)) { scheduleReconnect(); return false; }
     await kvSet('tree', fresh);
     setTreeData(fresh); renderTree();
     setOffline(false);                            // clears state + flushes the queue
@@ -422,8 +427,13 @@ async function flushQueue() {
     }
     if (!syncQueue.length) {
       const fresh = await apiFetch('tree');     // reconcile cache with server truth
-      await kvSet('tree', fresh);
-      setTreeData(fresh); renderTree();
+      // Same shape guard as probeBackend: a malformed 200 body must not overwrite the
+      // mirror. The queued writes DID land, so the sync still reports success — only
+      // the reconcile is skipped (the next probe/loadTree picks it up).
+      if (Array.isArray(fresh)) {
+        await kvSet('tree', fresh);
+        setTreeData(fresh); renderTree();
+      }
       if (dead) toast('Synced — ' + dead + ' change' + (dead === 1 ? '' : 's') + ' could not sync (review)');
       else if (conflicts) toast('Synced — ' + conflicts + ' conflict' + (conflicts === 1 ? '' : 's') + ' overwritten (prior versions in History)');
       else toast('Synced');
@@ -433,11 +443,18 @@ async function flushQueue() {
 }
 
 // Keep the IndexedDB mirror current after a successful backend call.
+// NEVER mirror a response the caller can't actually use. apiFetch RESOLVES (rather than
+// throwing) for a reachable server's 4xx body and for a malformed 200 (the `_transient`
+// error object), so an unguarded write here overwrote a GOOD mirror with garbage — and it
+// ran BEFORE the caller could fall back to that mirror. That's what made a malformed
+// `tree` response empty the library even WITH loadTree's fallback: by the time loadTree
+// read the mirror, cacheOnSuccess had already poisoned it. Shape-check per action.
 async function cacheOnSuccess(action, body, query, data) {
   try {
-    if (action === 'tree') await kvSet('tree', data);
-    else if (action === 'col_sorts') await kvSet('colsorts', data);
-    else if (action === 'get_page') { const p = (body && body.path) || qparam(query, 'path'); if (p) { const copy = Object.assign({}, data); delete copy._mtime; await pageSet(p, copy); } }
+    if (data && data.error) return;                       // an error body is not content
+    if (action === 'tree') { if (Array.isArray(data)) await kvSet('tree', data); }
+    else if (action === 'col_sorts') { if (data && typeof data === 'object' && !Array.isArray(data)) await kvSet('colsorts', data); }
+    else if (action === 'get_page') { const p = (body && body.path) || qparam(query, 'path'); if (p && data && Array.isArray(data.sections)) { const copy = Object.assign({}, data); delete copy._mtime; await pageSet(p, copy); } }
     else if (action === 'save_page' && body) { const copy = Object.assign({}, body.data); delete copy._mtime; await pageSet(body.path, copy); }
     else if (action === 'delete' && body) await pageDel(body.path);
   } catch (e) {}

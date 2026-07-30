@@ -112,6 +112,17 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
   the first characters of every option were cut off and unreachable (it can't be scrolled to). It now
   slides just far enough to sit fully inside the window, keeping its size; at every normal sidebar
   width it opens exactly where it always has.
+- **A bad reply from the server no longer makes your whole library look empty.** If the server was
+  reachable but answered the sidebar's request with something unusable (an error message, an empty
+  reply, or output with a stray warning in front of it), CodeMan showed the "no pages yet" welcome
+  screen — ignoring the offline copy it already had — and clicking anywhere in the sidebar then
+  failed. It now recognises the bad reply as a failure, shows your offline copy instead, tells you so,
+  and starts retrying in the background. The Trash and History panels likewise say "Could not load…"
+  rather than claiming they're empty.
+- **Splitting a block at the cursor works again.** `Split` in a block's `⋯` menu ignored where you had
+  put the cursor and refused with "add a blank line or place the cursor" — even though you just had.
+  It now splits exactly at the cursor. (Blocks containing a blank line still split on the gaps, and
+  view mode / cursor at the very start or end still correctly report there's nothing to split.)
 
 ### Security
 - The HTML preview runs in an iframe with `sandbox="allow-scripts"` and **no** `allow-same-origin` —

@@ -65,6 +65,28 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
 - TC-tree-08 (P): **reveal-into-unbuilt-subtree** — opening a deep page from a cleared/collapsed
   tree (from search, favorites, or a duplicate) expands its ancestor chain, **builds** the subtree,
   and the page row is visible + reachable; roving tabindex stays singular. Single + Miller.
+- TC-tree-09 (N): **a malformed `tree` response never empties the library.** Make a *reachable*
+  server answer `action=tree` with a non-array 200 body — the realistic shapes are `{"error":…}`, a
+  bare PHP notice printed before the JSON (→ apiFetch's `_transient` error object), or `null` (e.g.
+  add `echo " ";` above api.php's tree handler, or intercept the response in devtools). Reload. The
+  library must **NOT** render the empty onboarding state: `setTreeData` rejects the shape, `loadTree`
+  reads the **IndexedDB mirror** instead, the offline badge lights (self-healing probe starts), and a
+  toast says the library couldn't be loaded. Then click around the sidebar / open a page — **no
+  uncaught page error** (the old failure was `TypeError: folderChildren(...).find is not a function`
+  from `nodeAtPath`, plus a silently empty library that bypassed a perfectly good offline cache).
+  With **nothing** cached the library may legitimately be empty, but still no throw. Same guard
+  applies to the two `apiFetch('tree')` reconcile sites (`probeBackend`, `flushQueue`): a malformed
+  body there must leave the **persisted** `kv.tree` mirror untouched rather than overwriting it.
+  **The mirror check is the critical half** — inspect IndexedDB (`codeman` → `kv` → the namespaced
+  `tree` key) after the bad reload: it must still hold the good tree. `cacheOnSuccess` runs *before*
+  the caller sees the response, so if it mirrors the bad body the fallback has nothing left to read
+  (that was a real second defect, invisible to the unit suite until the live run). Prime the mirror
+  first (a healthy boot, or `⋯ → Prime offline cache`), then break the response.
+  Related shape guards: the **Trash** and **History** panels say "Could not load…" on a non-array
+  response instead of claiming they're empty. **[auto: tests.html — malformed-tree guard (setTreeData
+  rejects every non-array shape / loadTree falls back to the mirror / navigation does not throw /
+  cacheOnSuccess leaves the kv mirror intact on a malformed, 4xx or null body, and still caches a
+  valid one)]**
 
 ### TC-crud — Create / rename / delete (inline rows)
 - TC-crud-01 (P): create project/folder/page targets the selected folder; new items prepend.
@@ -121,7 +143,14 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
   **Duplicate now inserts the copy DIRECTLY BELOW the source** (not appended to the section end),
   scrolls it into view with a transient pulse, and persists on reload.
 - TC-editor-02 (E): **input round-trip** — type, save, reopen → byte-identical (trailing whitespace,
-  tabs vs spaces, blank lines, emoji, large paste).
+  tabs vs spaces, blank lines, emoji, large paste). **One INTENDED exception: line endings are
+  normalized to LF.** A block whose stored content carries CRLF (`\r\n`) — e.g. imported or written
+  via the API — keeps its CRLF while it's only *viewed* (open + Cancel changes nothing on disk), but
+  the first **edit + save** rewrites it as LF. That's `<textarea>.value` behavior (the DOM API
+  normalizes on read) surfaced by the textarea being the single source of truth for `block.code`, and
+  it is **accepted, not a defect**: LF-normalization is standard editor behavior, and a CR-restoring
+  save pass would be fragile and fight the platform. Verify only that content is otherwise
+  byte-identical and that a view-only open does NOT rewrite the file.
 - TC-editor-03 (A): **autosave deferral + cancel/revert — the CONTRACT.** *While a block editor is
   open, no autosave reaches the server.* Verify each line with the network panel open:
   - Type into a code block → **zero** `save_page` requests.
@@ -236,9 +265,14 @@ and the block **Copy-as `▾`** submenu. No hand-rolled `.mini-menu` remains (gr
   top/left as before (`anchorRect`), and the active row still shows **both** a `✓` in the aligned
   24px icon column **and** the accent `.active` background; inactive rows keep the reserved column
   so all labels line up. **[auto: tests.html miniMenuHasCheck — icon-column reservation]**
-- TC-menu-08 (P, positioning parity): the block **Copy-as `▾`** submenu lands in the identical
-  spot as before — left clamped to `max(8, r.right − 200)`, top `r.bottom + 4` — and each item
-  still copies via `copyText` (records the copy, "Copied…/Copy failed" toast).
+- TC-menu-08 (P, behavior only — NOT positioning): the block **Copy-as** formats are reached through
+  the block `⋯` menu, which **rebuilds them as its own items**; the standalone Copy-as `▾` trigger is
+  `display:none` at **every** width (`.block-toolbar .copy-as`), so its self-anchored submenu — and the
+  `anchorRect` clamp to `max(8, r.right − 200)` / `r.bottom + 4` that positions it — is **not
+  user-reachable** in the shipped CSS and must not be tested as live positioning. Verify only the
+  behavior: each `Copy: <format>` item in the `⋯` menu copies via `copyText` (records the copy,
+  "Copied…/Copy failed" toast). The same is true of the block-kind submenu's own trigger
+  (`.type-menu`, also hidden at every width) — its kinds are likewise rebuilt as `⋯` items.
 - TC-menu-09 (P, short viewport — the clamp): resize the window to **1440×420** and open the
   **colsort `⇅`** and the **Export `▾`** submenus. Every row must be **inside the viewport** and
   reachable — `.mini-menu` is `position:fixed`, so a row past the bottom edge cannot be scrolled to
@@ -246,7 +280,9 @@ and the block **Copy-as `▾`** submenu. No hand-rolled `.mini-menu` remains (gr
   **unchanged** from before the clamp existed (byte-identical top/left — the `anchorRect` contract
   is "plain position from the caller's rect"; only a real overflow may move it). Also confirm at
   1440×600 and 390×700 that **no** menu in the app moved: block-kind ×3, section `⋯`, tags, colsort,
-  page-header `⋯`, sidebar More, Export, Copy-as, html `⋯`, html height. Keyboard nav must still
+  page-header `⋯`, sidebar More, Export, html `⋯`, html height. (**Not** the Copy-as `▾` or the
+  block-kind `.type-menu` submenus — both triggers are `display:none` at every width, so their
+  positioning is unreachable; see TC-menu-08.) Keyboard nav must still
   work in a clamped menu (Arrow wrap, Home/End, Escape → focus back on the anchor) and a **page
   scroll must still dismiss** it.
   **[auto: tests.html — `miniMenuClampPos` as a pure function (fit / overflow / exact-fit boundary)
@@ -559,6 +595,15 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
 ### TC-merge — Split / merge / reorder / to-subsection
 - TC-merge-01 (P): per-block Split; ⛶ Merge (unified across blocks + subsections); ⇅ Reorder
   (sections + blocks); ⤵ To subsection / ⤴ Dissolve. **[auto: tests.html mergeBlocksAndSubs]**
+- TC-merge-02 (A): **caret-Split works through the `⋯` menu** — the only route there is (`.block-split`
+  is `display:none` at every width). In a code block with **no blank line** (e.g. `one` / `two` on two
+  lines), Edit, click to put the caret mid-content (after `one`), then `⋯ → Split`. It must split **at
+  the caret** into two blocks (`one`, `two`) — *not* refuse with "Nothing to split — add a blank line
+  or place the cursor". The refusal is correct only when there genuinely is no split point: view mode
+  (no caret), caret at offset 0, or caret at the very end. A block that *does* contain a blank line
+  still splits on the gaps regardless of the caret. Was dead before: `showMiniMenu` moves focus to its
+  first item on open, so the old `document.activeElement === textarea` check never matched.
+  **[auto: tests.html — Split via the ⋯ menu splits AT the caret]**
 
 ### TC-notes — Markdown notes & links
 - TC-notes-01 (P): markdown-it renders tables, strikethrough, task lists, nested lists, autolinks,

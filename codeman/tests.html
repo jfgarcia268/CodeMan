@@ -2251,6 +2251,54 @@
         }
       }
 
+      // ---- Split must reach the caret THROUGH the ⋯ menu ---------------------------
+      // Split's only UI route is the block ⋯ menu (.block-split is display:none at every
+      // width), and showMiniMenu moves focus to its first item on open — so the old
+      // `document.activeElement === textarea` test never matched, pos fell back to 0, and
+      // caret-Split was a DEAD feature that told the user to place a cursor they had just
+      // placed. Driven end-to-end: real Edit → real caret → real ⋯ (which steals focus) →
+      // the real Split item. The block lives in document.body so the focus move is real.
+      {
+        const _cpp = currentPagePath, _cpd = currentPageData, _api = window.api,
+              _renderPage = window.renderPage, _toast = window.toast;
+        let sel = null;
+        try {
+          const SP = RUN + 'split/S.json';
+          const toasts = [];
+          window.api = async () => ({ ok: true, mtime: 1 });
+          window.renderPage = () => {};        // Split re-renders the page; not the subject here
+          window.toast = (m) => toasts.push(String(m));
+          const b = { type: 'bash', label: '', code: 'one\ntwo' };   // no blank line ⇒ caret path
+          const arr = [b];
+          currentPagePath = SP;
+          currentPageData = { title: 's', sections: [{ title: 's', collapsed: false, tags: [], blocks: arr, subsections: [] }] };
+          pageDirty.clear();
+          if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+          sel = renderBlock(b, arr, 0);
+          document.body.appendChild(sel);                  // rendered ⇒ focus really moves
+          sel.querySelector('.block-edit').click();        // real enterEdit → textarea.focus()
+          const textarea = sel.querySelector('.code-edit');
+          textarea.selectionStart = textarea.selectionEnd = 3;   // caret right after "one"
+          textarea.dispatchEvent(new Event('keyup'));            // → updateActiveLine records it
+          sel.querySelector('.block-overflow').click();          // ⋯ opens AND takes focus
+          ta('opening the ⋯ menu takes focus off the textarea (why activeElement failed)',
+             document.activeElement === textarea, false);
+          const item = [...document.querySelectorAll('.mini-menu .mini-menu-opt')]
+            .find(o => o.textContent.includes('Split'));
+          ta('the block ⋯ menu offers Split', !!item, true);
+          if (item) item.click();
+          ta('Split via the ⋯ menu splits AT the caret, not at 0', arr.map(x => x.code), ['one', 'two']);
+          ta('Split via the ⋯ menu never refuses a placed caret', toasts.filter(m => m.includes('Nothing to split')), []);
+        } finally {
+          document.querySelectorAll('.mini-menu').forEach(m => { if (m._close) m._close(); else m.remove(); });
+          if (sel) sel.remove();
+          currentPagePath = _cpp; currentPageData = _cpd; window.api = _api;
+          window.renderPage = _renderPage; window.toast = _toast;
+          pageDirty.clear(); cleanPageSnapshot = null;
+          if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+        }
+      }
+
       // ---- the per-render-path wiring, asserted THROUGH the render functions -------
       // The focus flush and the session-end hook were only ever exercised by calling them
       // directly (wireFocusFlush on a synthetic <div>, afterEditSession with a hand-set
@@ -2436,6 +2484,98 @@
         } finally {
           document.createElement = _create; HTMLInputElement.prototype.click = _click;
           window.toast = _toast; window.loadTree = _load;
+        }
+      }
+
+      // ---- a malformed `tree` response must never poison treeData -------------------
+      // api() routes to the IndexedDB mirror only when apiFetch THROWS. A *reachable*
+      // server answering 200 with {error:…}/null/a string sailed straight through
+      // setTreeData: the library rendered as the EMPTY onboarding state, the offline
+      // mirror was BYPASSED, and the next navigation threw
+      // "folderChildren(...).find is not a function". setTreeData is now the shape guard
+      // (covering all five writers) and loadTree treats a bad shape as a failure.
+      {
+        const _api = window.api, _offlineApi = window.offlineApi, _setOffline = window.setOffline,
+              _renderTree = window.renderTree, _toast = window.toast, _colSort = colSort;
+        const goodTree = [{ type: 'folder', name: 'F', path: 'F', project: false, children: [
+          { type: 'page', name: 'P', path: 'F/P.json', tags: [], langs: [] }] }];
+        try {
+          const toasts = []; let offlineFlags = [];
+          window.renderTree = () => {};                  // no sidebar paint in the harness
+          window.toast = (m) => toasts.push(String(m));
+          window.setOffline = (on) => { offlineFlags.push(on); };
+          window.offlineApi = async (action) => (action === 'tree' ? goodTree : {});
+
+          // (a) the choke-point guard: every non-array shape is REJECTED, the last good
+          //     tree survives, and the rejection is REPORTED so a caller can fall back.
+          setTreeData(goodTree);
+          const shapes = [{}, null, undefined, 'nope', 42, { error: 'boom' }];
+          ta('setTreeData rejects every non-array shape', shapes.map(s => setTreeData(s)), shapes.map(() => false));
+          ta('a rejected write keeps the last good tree', treeData, goodTree);
+          ta('setTreeData still accepts (and confirms) a real array', setTreeData([]), true);
+
+          // (b) loadTree on a malformed response: mirror consulted, library NOT empty,
+          //     offline flagged (starts the self-healing probe), and the user told.
+          setTreeData([]); offlineFlags = []; toasts.length = 0;
+          window.api = async (a) => (a === 'tree'
+            ? { error: 'malformed server response (200)', _transient: true } : {});
+          await loadTree();
+          ta('loadTree falls back to the offline mirror on a malformed tree', treeData, goodTree);
+          ta('a malformed tree does NOT render an empty library', treeData.length, 1);
+          ta('a malformed tree flags offline', offlineFlags.includes(true), true);
+          ta('a malformed tree tells the user instead of failing silently', toasts.length, 1);
+
+          // (c) …and the crash itself: navigating the poisoned tree used to throw.
+          let threw = null;
+          try { nodeAtPath('F/P.json'); folderChildren('F'); projectChain('F/P.json'); }
+          catch (e) { threw = String(e && e.message); }
+          ta('navigation after a malformed tree does not throw', threw, null);
+
+          // (d) nothing cached either (a poisoned/empty mirror): still a usable array.
+          window.offlineApi = async () => null;
+          setTreeData([]);
+          await loadTree();
+          ta('an empty mirror + a malformed tree still leaves treeData an array', Array.isArray(treeData), true);
+        } finally {
+          window.api = _api; window.offlineApi = _offlineApi; window.setOffline = _setOffline;
+          window.renderTree = _renderTree; window.toast = _toast;
+          colSort = _colSort; setTreeData([]);
+        }
+      }
+
+      // ---- …and cacheOnSuccess must not POISON the mirror it is the fallback for ----
+      // loadTree's fallback is worthless if the mirror is already garbage by the time it
+      // reads it: api() runs cacheOnSuccess BEFORE returning, and apiFetch RESOLVES on a
+      // reachable server's 4xx / a malformed 200 — so the unguarded `kvSet('tree', data)`
+      // overwrote a GOOD mirror first. Found live (the library still went empty WITH the
+      // loadTree fallback in place), so it is asserted against the real kv store.
+      {
+        const _fetch = window.fetch, _setOffline = window.setOffline, _renderTree = window.renderTree;
+        const goodTree = [{ type: 'folder', name: 'M', path: 'M', children: [] }];
+        try {
+          window.setOffline = () => {}; window.renderTree = () => {};
+          const res = (status, bodyText) => Promise.resolve({
+            status, ok: status < 400, json: async () => JSON.parse(bodyText),
+          });
+          await kvSet('tree', goodTree);
+          window.fetch = () => res(200, '<br />Warning: oops<br />[]');   // unparseable body
+          await api('tree');
+          ta('a malformed tree response leaves the kv mirror INTACT', await kvGet('tree'), goodTree);
+          window.fetch = () => res(400, '{"error":"nope"}');              // reachable 4xx
+          await api('tree');
+          ta('a 4xx tree response leaves the kv mirror INTACT', await kvGet('tree'), goodTree);
+          window.fetch = () => res(200, 'null');                          // 200, wrong shape
+          await api('tree');
+          ta('a null tree response leaves the kv mirror INTACT', await kvGet('tree'), goodTree);
+          window.fetch = () => res(200, '{"error":"nope"}');               // 200 + error body
+          await api('get_page', undefined, 'path=' + encodeURIComponent(RUN + 'mirror/P.json'));
+          ta('an error get_page response is not mirrored as a page',
+             await pageGet(RUN + 'mirror/P.json'), undefined);
+          window.fetch = () => res(200, '[]');                            // a real array still caches
+          await api('tree');
+          ta('a VALID tree response still updates the kv mirror', await kvGet('tree'), []);
+        } finally {
+          window.fetch = _fetch; window.setOffline = _setOffline; window.renderTree = _renderTree;
         }
       }
 
