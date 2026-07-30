@@ -2492,6 +2492,26 @@
         ta('a 10-column rich table keeps its columns on one line', probeTable(richShell, 10).tall, false);
         ta('a 20-column rich table keeps its columns on one line AND scrolls',
            probeTable(richShell, 20), { tall: false, scrolls: true });
+        // D-B3c: the CSV block carried the IDENTICAL defect wearing a different property
+        // name, which is why the note/rich investigation walked past it — `word-break:
+        // break-word` is the DEPRECATED ALIAS specified as `word-break: normal` +
+        // `overflow-wrap: anywhere`, so it fed min-content sizing exactly as the inherited
+        // prose `anywhere` did (measured pre-fix at 1440px: 20 columns → 45×59-75px cells,
+        // .csv-table-wrap scrollWidth 939 == clientWidth 939, right-hand columns unreachable;
+        // at 390px, 31×171px). Note the scroller here is the WRAPPER div, not the table.
+        // At this probe width a 10-column table fits either way, so the 20-column pair is the
+        // actual discriminator; the 10-column row is the unharmed-narrow-table control.
+        const csvShell = (cols) =>
+          '<div class="block csv viewing"><div class="csv-view"><div class="csv-table-wrap">' +
+          tableHtml(cols).replace('<table>', '<table class="csv-table">') + '</div></div></div>';
+        const probeCsv = (cols) => {
+          host.innerHTML = csvShell(cols);
+          const wrap = host.querySelector('.csv-table-wrap'), cell = host.querySelector('th');
+          return { tall: cell.offsetHeight > 45, scrolls: wrap.scrollWidth > wrap.clientWidth };
+        };
+        ta('a 10-column CSV table keeps its columns on one line', probeCsv(10).tall, false);
+        ta('a 20-column CSV table keeps its columns on one line AND scrolls',
+           probeCsv(20), { tall: false, scrolls: true });
         // …and the deliberate prose wrapping is untouched: a 400-char unbroken token wraps
         // inside the block rather than overflowing it.
         const probeProse = (shell, sel) => {

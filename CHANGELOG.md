@@ -157,6 +157,14 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
   vertically (a 20-column table rendered as 47px-wide, 245px-tall cells) rather than letting the table
   scroll sideways. Columns now keep a sensible width and the table scrolls horizontally, on desktop and
   on phones. Long unbroken words in ordinary note/rich prose still wrap inside the block as before.
+- **Wide Table (CSV) blocks now scroll too.** The same defect reached the CSV block by a different
+  route and was missed the first time: a table with many columns was squeezed to about one character
+  per column (a 20-column table rendered as 45px-wide, 75px-tall cells on a laptop, and roughly two
+  characters per column stacked six lines deep on a phone), and the right-hand columns could not be
+  reached because the block never grew a horizontal scrollbar — the in-app view was actually worse
+  than the same table in an exported HTML page. Columns now keep their natural width and the block
+  scrolls sideways, on desktop and on phones. Cells with line breaks inside them still show those
+  line breaks.
 - **"Saved" is no longer announced before the save has happened.** Saving a block reported "Saved"
   immediately and then again when the write completed (announced twice to screen readers) — and if the
   server refused the write, the false "Saved" appeared first and was only corrected a moment later.

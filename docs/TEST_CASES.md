@@ -450,7 +450,8 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   no-space run) **wraps** and stays inside the block (`overflow-wrap:anywhere` on `.block.note .code-view`)
   — it does not overflow/clip or grow a horizontal scrollbar. Fenced code + tables in the same note still
   scroll. (Prose wraps; only code/tables scroll.)
-- TC-hscroll-12 (P): a **WIDE table** in a note block **and** in a rich block (10 and 20 columns)
+- TC-hscroll-12 (P): a **WIDE table** in a note block, in a rich block **and in a CSV block** (10 and
+  20 columns)
   keeps each column at its natural width (single-line headers) and **scrolls horizontally** once the
   columns no longer fit — it must NOT shrink to fit by collapsing every cell to ~1 character. Measured
   post-fix at 1440px: 20 columns → 80×31px cells, `table.scrollWidth 1711 > clientWidth 939`
@@ -459,6 +460,16 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   `break-word`. **The reset is cell-scoped — TC-hscroll-11's prose wrapping must still hold** (verify
   both in the same pass). Also verify at ≤768px (`body.is-mobile`): the tables scroll, cells stay
   single-line. **[auto: tests.html geometry probe against the real style.css]**
+  **CSV (the same defect under a different property name — verify it separately):** the CSV block
+  reached the identical state via `word-break: break-word`, the **deprecated alias** for
+  `word-break: normal` + `overflow-wrap: anywhere`. Its scroller is the **wrapper** `.csv-table-wrap`,
+  not the table. Measured pre-fix at 1440px: 20 columns → 45–48×59–75px cells, `scrollWidth 939 ==
+  clientWidth 939` (right-hand columns unreachable); at 390px, 31×171px cells. Post-fix the block
+  scrolls with natural single-line columns, and `white-space: pre-wrap` is retained so a cell with an
+  embedded newline still breaks. A 10-column table fits at a ~1000px probe width either way, so the
+  **20-column case is the discriminator**; the 10-column case is the unharmed-narrow control. The
+  `pageToHtml` **export** (`table.csv`) never carried `word-break` and was always correct — it needs
+  no reset; check it still renders after any change here.
 
 ### TC-csv — CSV / table block
 - TC-csv-01 (P): add a CSV block; enter `name,age\nAda,36` → view mode renders a table with the

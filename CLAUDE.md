@@ -1181,9 +1181,20 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   columns → 45×70px cells, `scrollWidth == clientWidth`, no scrollbar until 30 columns had already been
   crushed). Cells now set `overflow-wrap: break-word; word-break: normal` — min-content-neutral, so
   columns keep their natural width and a wide table genuinely overflows and scrolls (20 columns →
-  80×31px, `1711 > 939`). **Scope the reset to cells only; the prose `anywhere` is deliberate.** The
-  `.csv-table`/`.csv-table-wrap` pair is the reference implementation. `pageToHtml`'s export CSS never
-  set `anywhere`, so the export path had nothing to fix.
+  80×31px, `1711 > 939`). **Scope the reset to cells only; the prose `anywhere` is deliberate.**
+  **`word-break: break-word` is the DEPRECATED ALIAS for `word-break: normal` + `overflow-wrap:
+  anywhere` — so it causes the identical defect under a different property name; never put it on a
+  table cell.** That is exactly what `.csv-table` carried, which is why the CSV block stayed broken
+  for two releases after note/rich were fixed (and why an early draft of this note wrongly cited
+  `.csv-table` as the reference implementation — it was the *last* victim). Measured pre-fix at
+  1440px: 20 columns → 45×59–75px cells, `.csv-table-wrap` `scrollWidth 939 == clientWidth`; at 390px,
+  31×171px cells. The reference implementation is the **declaration**, identical in all three places
+  (`.block.note .code-view`, `.rich-surface`, `.csv-table` cells): `overflow-wrap: break-word;
+  word-break: normal` — plus `white-space: pre-wrap` on CSV cells, which is orthogonal (embedded
+  newlines) and min-content-neutral. `pageToHtml`'s export CSS never set `anywhere` **nor**
+  `word-break`, so the export path had nothing to fix — its `table.csv` already scrolled correctly,
+  i.e. the in-app view was worse than its own exported copy. **Don't mirror the reset into the export
+  CSS**; there is nothing there to reset.
 - **`navigator.storage.persist()` on boot (init.js) + `apiHeaders()` single header attach point
   (core.js).** Persist keeps the IndexedDB mirror/queue/dead-letters from being evicted under storage
   pressure (best-effort, no prompt). `apiHeaders()` is the ONE place request headers are built — both

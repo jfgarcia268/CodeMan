@@ -1522,8 +1522,13 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
      every column was already one character).
      `break-word` keeps a long unbroken token from spilling out of its cell but is
      min-content-NEUTRAL, so columns keep their natural width and a wide table overflows and
-     scrolls — the .csv-table recipe. Prose keeps `anywhere` (a 400-char token must still wrap
-     inside the block): the reset is scoped to cells ONLY. */
+     scrolls. Prose keeps `anywhere` (a 400-char token must still wrap inside the block): the
+     reset is scoped to cells ONLY.
+     THE ONE-LINE RECIPE for any table cell in this file is exactly the declaration below —
+     `overflow-wrap: break-word; word-break: normal`. Do NOT reach for `word-break: break-word`:
+     it is the DEPRECATED ALIAS specified as `word-break: normal` + `overflow-wrap: anywhere`,
+     i.e. it CAUSES this defect under a different name (it is what broke .csv-table for two
+     releases after the note/rich cells were fixed). */
   overflow-wrap: break-word; word-break: normal;
 }
 .block.note .code-view th { background: var(--surface, #2d2d30); font-weight: 600; color: #fff; }
@@ -2091,7 +2096,19 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .csv-table { border-collapse: collapse; width: 100%; font-size: 13px; }
 .csv-table th, .csv-table td {
   border: 1px solid var(--border-2); padding: 5px 10px; text-align: left;
-  vertical-align: top; white-space: pre-wrap; word-break: break-word;
+  vertical-align: top; white-space: pre-wrap;
+  /* Same cell-scoped reset as the note/rich tables, and for the same reason wearing a
+     different property name: `word-break: break-word` is the DEPRECATED ALIAS specified as
+     `word-break: normal` + `overflow-wrap: anywhere` — so it fed break opportunities into
+     MIN-CONTENT sizing exactly as the inherited prose `anywhere` did. Every column collapsed
+     to ~one character, the auto table layout always shrank to fit, and the overflow-x:auto on
+     .csv-table-wrap was unreachable (measured at 1440px: 20 columns → 45×59-75px cells,
+     scrollWidth 939 == clientWidth; at 390px, 31×171px cells). NEVER use `word-break:
+     break-word` on a table cell. `overflow-wrap: break-word` is min-content-NEUTRAL: a long
+     unbroken token still can't spill out of its cell, but columns keep their natural width and
+     a wide table genuinely overflows and scrolls. `white-space: pre-wrap` stays — CSV cells
+     can carry embedded newlines. */
+  overflow-wrap: break-word; word-break: normal;
 }
 .csv-table thead th { background: var(--panel-2); color: #fff; font-weight: 600; position: sticky; top: 0; }
 .csv-table tbody tr:nth-child(even) td { background: rgba(255,255,255,.02); }
