@@ -2453,6 +2453,57 @@
         ta('.modal-title keeps newlines (white-space: pre-line)', ws, 'pre-line');
       }
 
+      // ---- D-B3: a wide table in a note/rich block SCROLLS, prose still wraps ---------
+      // `overflow-wrap: anywhere` (the prose rule on .code-view / .rich-surface) is an
+      // INHERITED property, so it reached <th>/<td> and fed its break opportunities into
+      // MIN-CONTENT sizing — every column collapsed to one character, the auto table layout
+      // therefore always shrank to fit, and the overflow-x:auto on those tables was
+      // unreachable (measured: 20 columns → 47px-wide, 245px-TALL cells). Cells now reset to
+      // the min-content-neutral `break-word`; prose keeps `anywhere`. Both halves are
+      // asserted on real geometry against the real stylesheet — the wrapping half is the
+      // TRAP (a 400-char token must still wrap inside the block, TC-hscroll-11).
+      {
+        const link = document.createElement('link');
+        link.rel = 'stylesheet'; link.href = 'style.css';
+        await new Promise((resolve) => { link.onload = resolve; link.onerror = resolve; document.head.appendChild(link); });
+        const host = document.createElement('div');
+        host.style.cssText = 'position:absolute;left:-10000px;top:0;width:1000px';
+        document.body.appendChild(host);
+        const tableHtml = (cols) => {
+          let head = '', row = '';
+          // SINGLE-TOKEN cell text on purpose: a token can only be split by a
+          // character-level break, so any wrapping here IS the collapsed-min-content defect
+          // (normal word wrapping between two words would be legitimate at min-content width).
+          for (let i = 1; i <= cols; i++) { head += '<th>Heading' + i + '</th>'; row += '<td>value' + i + '</td>'; }
+          return '<table><thead><tr>' + head + '</tr></thead><tbody><tr>' + row + '</tr></tbody></table>';
+        };
+        // A crushed column wraps its one-word header over many lines, so CELL HEIGHT is the
+        // crisp, font-metric-independent signature of the defect (one line ≈ 30px).
+        const probeTable = (shell, cols) => {
+          host.innerHTML = shell(tableHtml(cols));
+          const tbl = host.querySelector('table'), cell = host.querySelector('th');
+          return { tall: cell.offsetHeight > 45, scrolls: tbl.scrollWidth > tbl.clientWidth };
+        };
+        const noteShell = (inner) => '<div class="block note viewing"><div class="code-view">' + inner + '</div></div>';
+        const richShell = (inner) => '<div class="block rich viewing"><div class="rich-surface">' + inner + '</div></div>';
+        ta('a 10-column note table keeps its columns on one line', probeTable(noteShell, 10).tall, false);
+        ta('a 20-column note table keeps its columns on one line AND scrolls',
+           probeTable(noteShell, 20), { tall: false, scrolls: true });
+        ta('a 10-column rich table keeps its columns on one line', probeTable(richShell, 10).tall, false);
+        ta('a 20-column rich table keeps its columns on one line AND scrolls',
+           probeTable(richShell, 20), { tall: false, scrolls: true });
+        // …and the deliberate prose wrapping is untouched: a 400-char unbroken token wraps
+        // inside the block rather than overflowing it.
+        const probeProse = (shell, sel) => {
+          host.innerHTML = shell('<p>' + 'x'.repeat(400) + '</p>');
+          const box = host.querySelector(sel);
+          return box.scrollWidth <= box.clientWidth + 1;
+        };
+        ta('note prose still wraps a 400-char token inside the block', probeProse(noteShell, '.code-view'), true);
+        ta('rich prose still wraps a 400-char token inside the block', probeProse(richShell, '.rich-surface'), true);
+        host.remove(); link.remove();
+      }
+
       // importPages negatives: malformed / wrong-shape input fails gracefully —
       // error surfaced via toast, no crash, nothing imported. The hidden file
       // input is captured via a createElement shim; its click() is stubbed so no
@@ -2484,6 +2535,215 @@
         } finally {
           document.createElement = _create; HTMLInputElement.prototype.click = _click;
           window.toast = _toast; window.loadTree = _load;
+        }
+      }
+
+      // ---- D-B1: the import POSITIVE round-trip (restoring an export must WORK) --------
+      // Coverage here was negatives-only, which is exactly why this shipped broken since the
+      // initial release. `create_folder`'s parent used to be derived by string surgery —
+      // `acc.slice(0, acc.lastIndexOf('/'))` — and on the FIRST path segment `acc` has no
+      // '/', so lastIndexOf returned -1 and slice(0,-1) DROPPED THE LAST CHARACTER: "Notes"
+      // was created under a parent named "Note" (only 1-char names accidentally worked). The
+      // bogus parent was then materialised by api.php's recursive mkdir, the later
+      // create_page legitimately failed, and the failure was swallowed behind a success
+      // toast — a full-library JSON restore into an EMPTY data root silently lost every
+      // foldered page. Driven through the REAL importPages against a stub that MODELS
+      // api.php's parent guards, so a wrong parent shows up as a lost page.
+      {
+        const _create = document.createElement, _click = HTMLInputElement.prototype.click,
+              _toast = window.toast, _load = window.loadTree, _api = window.api;
+        try {
+          let lastInput = null; const toasts = []; let calls = [];
+          document.createElement = function (tag, ...rest) {
+            const el = _create.call(document, tag, ...rest);
+            if (String(tag).toLowerCase() === 'input') lastInput = el;
+            return el;
+          };
+          HTMLInputElement.prototype.click = function () {};
+          window.toast = (m) => { toasts.push(String(m)); };
+          window.loadTree = async () => {};
+          const runImport = async (bundle, name) => {
+            toasts.length = 0; calls = [];
+            importPages();
+            Object.defineProperty(lastInput, 'files', { value: [new File([JSON.stringify(bundle)], name)], configurable: true });
+            await lastInput.onchange();
+          };
+          // A server model, not a yes-man: every create/save checks that its parent folder
+          // was actually created (api.php returns 404 'parent folder does not exist').
+          const dirs = new Set(['']);
+          window.api = async (action, body) => {
+            calls.push([action, body && (body.parent !== undefined ? body.parent : body.path), body && body.name]);
+            if (action === 'create_folder') {
+              if (!dirs.has(body.parent)) return { error: 'parent folder does not exist' };
+              dirs.add(body.parent ? body.parent + '/' + body.name : body.name);
+              return { ok: true };
+            }
+            if (action === 'create_page') return dirs.has(body.parent) ? { ok: true } : { error: 'parent folder does not exist' };
+            if (action === 'save_page') {
+              const dir = body.path.includes('/') ? body.path.slice(0, body.path.lastIndexOf('/')) : '';
+              return dirs.has(dir) ? { ok: true, mtime: 1 } : { error: 'parent folder does not exist' };
+            }
+            return { ok: true };
+          };
+          await runImport({
+            'AtRoot.json': { title: 'AtRoot', sections: [] },
+            'Notes/Recipe.json': { title: 'Recipe', sections: [] },
+            'QA Kinds/Deep/Leaf.json': { title: 'Leaf', sections: [] },
+            'A/B/C/Three.json': { title: 'Three', sections: [] },
+          }, 'bundle.json');
+          const folders = calls.filter(c => c[0] === 'create_folder').map(c => c[1] + '|' + c[2]);
+          ta('a depth-1 folder is created under the ROOT, with its FULL name',
+             folders.filter(f => /\|Notes$/.test(f)), ['|Notes']);
+          ta('…including a multi-character, multi-word name', folders.filter(f => /\|QA Kinds$/.test(f)), ['|QA Kinds']);
+          ta('depth-2 and depth-3 folders are created under their REAL parents',
+             folders.filter(f => /\|(Deep|B|C)$/.test(f)), ['QA Kinds|Deep', 'A|B', 'A/B|C']);
+          ta('…and that is the COMPLETE set of folder creates (no invented parents)',
+             folders, ['|Notes', '|QA Kinds', 'QA Kinds|Deep', '|A', 'A|B', 'A/B|C']);
+          ta('EVERY page in the bundle lands, at its full path',
+             calls.filter(c => c[0] === 'save_page').map(c => c[1]).sort(),
+             ['A/B/C/Three.json', 'AtRoot.json', 'Notes/Recipe.json', 'QA Kinds/Deep/Leaf.json']);
+          ta('…and the toast counts them all, reporting no failures', toasts, ['Imported 4 pages']);
+
+          // A page that FAILS must be counted and surfaced. A success toast over partial
+          // data loss on the documented backup path is the core defect.
+          window.api = async (action) => (action === 'create_page' ? { error: 'nope' } : { ok: true });
+          await runImport({ 'One.json': { sections: [] }, 'Two.json': { sections: [] } }, 'f.json');
+          ta('every-page-failed is REPORTED, never a bare success toast', toasts, ['Imported 0 pages, 2 failed']);
+
+          let saves = 0;
+          window.api = async (action) => (action === 'save_page' && ++saves === 1 ? { error: 'boom' } : { ok: true });
+          await runImport({ 'One.json': { sections: [] }, 'Two.json': { sections: [] } }, 'p.json');
+          ta('a PARTIAL import reports both the wins and the losses', toasts, ['Imported 1 page, 1 failed']);
+        } finally {
+          document.createElement = _create; HTMLInputElement.prototype.click = _click;
+          window.toast = _toast; window.loadTree = _load; window.api = _api;
+        }
+      }
+
+      // ---- D-B2: offline tree-row Duplicate works on a PRIMED (unopened) page ----------
+      // The miss-vs-hit discriminator was `d._mtime == null` — but cacheOnSuccess DELETES
+      // _mtime before mirroring AND the offlineApi miss placeholder carries _mtime:null, so a
+      // genuine cache HIT was byte-indistinguishable from a miss: the ❐ action on a tree row
+      // was dead offline for every page not currently open, defeating primeOfflineCache /
+      // "Download for offline". The guard now asks the MIRROR (pageGet). Driven through the
+      // real duplicatePageFromTree → real api() → real offlineApi → real IndexedDB.
+      {
+        const _toast = window.toast, _load = window.loadTree, _reveal = window.revealTreeRow,
+              _fetch = window.apiFetch, _setOff = window.setOffline, _renderTree = window.renderTree,
+              _colPath = window.setColumnPathTo, _saveExp = window.saveExpanded,
+              _tabs = openPages.slice(), _tree = treeData, _wasOffline = offlineState;
+        const DF = RUN + 'dupoff', PRIMED = DF + '/Primed.json', COLD = DF + '/Cold.json',
+              COPY = DF + '/Primed copy.json';
+        try {
+          const toasts = [];
+          window.toast = (m) => toasts.push(String(m));
+          window.loadTree = async () => {}; window.revealTreeRow = () => {};
+          window.renderTree = () => {}; window.setColumnPathTo = () => {}; window.saveExpanded = () => {};
+          window.setOffline = () => {};                                  // no badge, no probe loop
+          window.apiFetch = async () => { throw new Error('backend unreachable'); };
+          offlineState = true;
+          treeData = [{ type: 'folder', name: DF, path: DF, project: false, children: [
+            { type: 'page', name: 'Primed', path: PRIMED, tags: [], langs: [] },
+            { type: 'page', name: 'Cold', path: COLD, tags: [], langs: [] },
+          ] }];
+          openPages.length = 0; syncQueue.length = 0;
+          // Exactly the shape primeOfflineCache/cacheOnSuccess store: NO _mtime key at all.
+          await pageSet(PRIMED, { title: 'Primed', sections: [{ title: 'S', collapsed: false, tags: [], blocks: [{ type: 'sql', label: '', code: 'PRIMED-CONTENT' }], subsections: [] }] });
+          await pageDel(COLD); await pageDel(COPY);
+
+          await duplicatePageFromTree({ type: 'page', name: 'Primed', path: PRIMED });
+          ta('a PRIMED but unopened page DUPLICATES offline (a cache hit is not a miss)', toasts, ['Page duplicated']);
+          const saved = syncQueue.filter(o => o.action === 'save_page' && o.body && o.body.path === COPY);
+          ta('…the copy is queued under a deduped name', saved.length, 1);
+          ta('…carrying the PRIMED content, not a blank page',
+             saved.length ? saved[0].body.data.sections[0].blocks[0].code : null, 'PRIMED-CONTENT');
+
+          // …and the guard is still a guard: an UNPRIMED page must NOT persist a blank copy.
+          toasts.length = 0; syncQueue.length = 0;
+          await duplicatePageFromTree({ type: 'page', name: 'Cold', path: COLD });
+          ta('an UNPRIMED page is still refused offline (no blank copy written)',
+             [toasts, syncQueue.length], [['Open this page before duplicating it offline'], 0]);
+        } finally {
+          window.toast = _toast; window.loadTree = _load; window.revealTreeRow = _reveal;
+          window.apiFetch = _fetch; window.setOffline = _setOff; window.renderTree = _renderTree;
+          window.setColumnPathTo = _colPath; window.saveExpanded = _saveExp;
+          offlineState = _wasOffline; treeData = _tree;
+          openPages.length = 0; openPages.push(..._tabs);
+          syncQueue.length = 0; await saveQueue();
+          expandedFolders.delete(DF);
+          await pageDel(PRIMED); await pageDel(COLD); await pageDel(COPY);
+        }
+      }
+
+      // ---- F-1: a block Save announces 'Saved' ONCE, and only once it LANDED ------------
+      // The five block-Save handlers fired their own synchronous toast('Saved') beside an
+      // un-awaited savePage(): on the healthy path that announced TWICE through the
+      // aria-live channel, and on a rejected save the false "Saved" appeared FIRST and was
+      // only contradicted a whole request-window later. savePage is now the single announcer.
+      {
+        const _cpp = currentPagePath, _cpd = currentPageData, _api = window.api, _toast = window.toast;
+        const _tabs = openPages.slice();
+        const pageEl = document.getElementById('page');
+        try {
+          const SPB = RUN + 'f1/B.json';
+          const toasts = [];
+          window.toast = (m) => toasts.push(String(m));
+          const seed = () => {
+            const b = { type: 'bash', label: '', code: 'echo one' };
+            currentPagePath = SPB;
+            currentPageData = { title: 'B', sections: [{ title: 's', collapsed: false, tags: [], blocks: [b], subsections: [] }] };
+            openPages.length = 0;
+            openPages.push({ path: SPB, title: 'B', data: currentPageData, filter: '', baseMtime: 5 });
+            blockBackups.set(b, b.code);                    // render straight into edit mode
+            const el = renderBlock(b, currentPageData.sections[0].blocks, 0);
+            pageEl.appendChild(el);
+            pageDirty.clear(); pageDirty.add(SPB); toasts.length = 0; syncQueue.length = 0;
+            return { b, el };
+          };
+          const settle = async () => { for (let i = 0; i < 6; i++) await Promise.resolve(); await new Promise(r => setTimeout(r, 0)); };
+
+          // (a) healthy save → exactly ONE 'Saved', and not before the api call resolved.
+          let s = seed();
+          let resolveSave;
+          window.api = async (a) => (a === 'save_page' ? new Promise(r => { resolveSave = () => r({ ok: true, mtime: 9 }); }) : { ok: true });
+          s.el.querySelector('.block-save').click();
+          await settle();
+          ta('a block Save does NOT announce before the write resolves', toasts.filter(m => /^Saved/.test(m)), []);
+          resolveSave(); await settle();
+          ta('a block Save announces Saved exactly ONCE (was twice)', toasts.filter(m => /^Saved/.test(m)), ['Saved']);
+          blockBackups.delete(s.b); pageEl.innerHTML = '';
+
+          // (b) a REJECTED save must never announce success from the block handler either.
+          s = seed();
+          window.api = async () => ({ error: 'parent folder does not exist' });
+          s.el.querySelector('.block-save').click();
+          await settle(); await settle();
+          ta('a REJECTED block Save never announces Saved', toasts.some(m => /^Saved/.test(m)), false);
+          for (const d of (await dlList()).filter(x => x.body && x.body.path === SPB)) await dlRemove(d.id);
+          blockBackups.delete(s.b); pageEl.innerHTML = '';
+
+          // (c) an offline-QUEUED write is durable but is not on the server yet — say so
+          // rather than borrowing the plain "Saved".
+          s = seed();
+          window.api = async () => ({ ok: true, offline: true, mtime: null });
+          s.el.querySelector('.block-save').click();
+          await settle();
+          ta('an offline-queued save says so instead of claiming a server write',
+             toasts.filter(m => /^Saved/.test(m)), ['Saved offline — will sync']);
+          blockBackups.delete(s.b); pageEl.innerHTML = '';
+
+          // (d) drift guard: NO render path may re-introduce its own toast('Saved') beside
+          // the un-awaited savePage() — savePage is the single announcer (cf. the CI
+          // edit-session wiring census; this has no other observable signature per-kind).
+          ta('no render path announces Saved itself (savePage is the single announcer)',
+             [renderBlock, renderRichBlock, renderCsvBlock, renderJsonBlock, renderHtmlBlock]
+               .filter(f => f.toString().includes("toast('Saved')")).length, 0);
+        } finally {
+          pageEl.innerHTML = '';
+          currentPagePath = _cpp; currentPageData = _cpd; window.api = _api; window.toast = _toast;
+          openPages.length = 0; openPages.push(..._tabs);
+          pageDirty.clear(); syncQueue.length = 0; cleanPageSnapshot = null;
+          if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
         }
       }
 
@@ -2688,7 +2948,7 @@
           seed('OFFLINE-EDIT');
           window.api = async () => ({ ok: true, offline: true, mtime: null });
           await savePage();
-          ta('an offline-queued save still reports Saved', toasts, ['Saved']);
+          ta('an offline-queued save reports a QUEUED save, not a server write', toasts, ['Saved offline — will sync']);
           ta('an offline-queued save clears dirty and drops baseMtime',
              [pageDirty.has(SP), openPages[0].baseMtime], [false, null]);
           ta('an offline-queued save parks nothing', (await dlFor()).length, 0);

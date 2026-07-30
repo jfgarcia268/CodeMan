@@ -406,9 +406,14 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   `create_page` + `save_page` writes queue and **replay FIFO** on reconnect (create before save).
 - TC-dup-09 (N, offline): tree-row duplicate of a page that is **not open and not in the offline
   cache** (a true miss) is **refused with a toast** ("Open this page before duplicating it offline")
-  rather than silently persisting a blank copy — the offline `get_page` placeholder (`_mtime:null`)
-  is indistinguishable from a real empty page. Open/primed and header-menu (live-buffer) dups are
-  unaffected.
+  rather than silently persisting a blank copy — the offline `get_page` placeholder is
+  indistinguishable from a real empty page. Open/primed and header-menu (live-buffer) dups are
+  unaffected. **[auto: tests.html]**
+- TC-dup-10 (P, offline): tree-row duplicate of a page that IS in the offline cache but was **never
+  opened** (i.e. cached by "Download for offline" / `primeOfflineCache`) **succeeds** — the copy is
+  queued carrying the primed content, not a blank page. The hit/miss discriminator is the MIRROR
+  (`pageGet`), never the response's `_mtime`: `cacheOnSuccess` strips `_mtime` before mirroring, so a
+  hit and the miss placeholder are byte-identical and the old test refused both. **[auto: tests.html]**
 - TC-dup-08 (E): the **❐** glyph (U+2750) renders as an icon (no tofu/□) on Windows AND macOS across
   the tree row, section ⋯ menu, block ⋯ menu, and page header ⋯ menu.
 
@@ -445,6 +450,15 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   no-space run) **wraps** and stays inside the block (`overflow-wrap:anywhere` on `.block.note .code-view`)
   — it does not overflow/clip or grow a horizontal scrollbar. Fenced code + tables in the same note still
   scroll. (Prose wraps; only code/tables scroll.)
+- TC-hscroll-12 (P): a **WIDE table** in a note block **and** in a rich block (10 and 20 columns)
+  keeps each column at its natural width (single-line headers) and **scrolls horizontally** once the
+  columns no longer fit — it must NOT shrink to fit by collapsing every cell to ~1 character. Measured
+  post-fix at 1440px: 20 columns → 80×31px cells, `table.scrollWidth 1711 > clientWidth 939`
+  (pre-fix: 45×70px, `939 = 939`, no scrollbar until 30 columns). Cause: `overflow-wrap:anywhere` is
+  inherited, and `anywhere` feeds min-content sizing; cells now reset to the min-content-neutral
+  `break-word`. **The reset is cell-scoped — TC-hscroll-11's prose wrapping must still hold** (verify
+  both in the same pass). Also verify at ≤768px (`body.is-mobile`): the tables scroll, cells stay
+  single-line. **[auto: tests.html geometry probe against the real style.css]**
 
 ### TC-csv — CSV / table block
 - TC-csv-01 (P): add a CSV block; enter `name,age\nAda,36` → view mode renders a table with the
@@ -671,9 +685,19 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   hidden`) with a dirty page the server rejects → queued, then parked, never dropped. Regression
   boundaries that must stay green: a healthy save still toasts "Saved" exactly once and clears
   `pageDirty`; a conflict still prompts, force-resends and snapshots the other version to History
-  (TC-data-03); an offline-queued save still reports "Saved" and drops `baseMtime`.
+  (TC-data-03); an offline-queued save still clears dirty and drops `baseMtime`.
   **[auto: tests.html rejected-save (terminal park · transient queue · supersede · conflict
   unchanged · conflict-force rejected · offline unchanged · healthy save)]**
+- TC-data-11 (A/N): **a block Save announces "Saved" exactly once, and only after the write landed.**
+  `savePage()` is the single announcer; the five block-Save handlers must NOT toast it themselves
+  (they used to, beside an un-awaited `savePage()` — so a healthy save announced **twice** through the
+  `aria-live` channel and a rejected one showed a **false "Saved" first**, contradicted a whole
+  request-window later). Verify in each session-bearing kind (code/note, rich, csv, json, html-entry):
+  Save → exactly one "Saved". Then make the write fail (delete the parent folder from another
+  device / throttle to a 4xx) → **no "Saved" at any point**, only the "Save failed …" toast. An
+  **offline** save reads **"Saved offline — will sync"** (a queued write is durable but is not on the
+  server yet). **[auto: tests.html F-1 (pre-resolve silence · once · rejected · offline wording ·
+  per-render-path drift census)]**
 
 ### TC-prod — Productivity
 - TC-prod-01 (P): Command palette ⌘K — jump to page (substring match), path-subtitle disambiguation;
@@ -694,6 +718,19 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
 - TC-io-02 (P/N): JSON import round-trips byte-identical; malformed / non-CodeMan JSON fails
   gracefully (no tree corruption); traversal names server-rejected.
   **[auto-ish: tests.html importPages negatives + tests-api rename/safePath guards]**
+- TC-io-03 (P, **disaster recovery**): `All pages → JSON` exported from a foldered library, then
+  imported into an **EMPTY** data root, restores **every** page under its **correct** folder name at
+  depth 1, 2 and 3 (incl. multi-word names like `QA Kinds`) with content identical to the source. No
+  truncated folder (`Note/` for `Notes/`, `D/` for `DZ/`) is created. This is the case the old parent
+  derivation broke — re-importing into the *same* library masked it because the top-level folders
+  already existed. **[auto: tests.html importPages positive round-trip]**
+- TC-io-04 (N): a page the server refuses (create_folder / create_page / save_page error) is
+  **counted and reported** — the toast reads `Imported N pages, M failed`, never a bare success over
+  partial data loss. **[auto: tests.html]**
+- TC-io-05 (N, server): `create_folder` with a **non-existent parent** returns
+  `404 {"error":"parent folder does not exist"}` and materialises **nothing** — it no longer
+  recursive-mkdirs an invented parent chain inside the data root. A legitimate nested folder (parent
+  created first) still succeeds. **[auto: tests-api.sh]**
 
 ### TC-offline — Offline + Service Worker
 - TC-offline-01 (P): SW registers (secure context incl. localhost) + precaches the shell.

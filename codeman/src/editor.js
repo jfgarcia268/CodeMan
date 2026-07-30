@@ -174,9 +174,13 @@ async function duplicatePageFromTree(node) {
     const d = await api('get_page', undefined, 'path=' + encodeURIComponent(node.path));
     // Offline + cache miss → offlineApi returns an empty placeholder ({sections:[], _mtime:null})
     // that's indistinguishable from a real empty page. Refuse rather than silently persist a blank
-    // copy of a page whose real content we can't see — open or prime it first. (Online, _mtime is
-    // always set; the open-tab branch above uses the live buffer and is unaffected.)
-    if (offlineState && (!d || d._mtime == null)) { toast('Open this page before duplicating it offline'); return; }
+    // copy of a page whose real content we can't see — open or prime it first.
+    // Ask the MIRROR (pageGet) rather than testing the RESPONSE: the old `d._mtime == null` test
+    // could never say "hit", because cacheOnSuccess strips _mtime before mirroring and the miss
+    // placeholder also carries _mtime:null — so a genuine cache HIT looked exactly like a miss and
+    // tree-row Duplicate was dead offline for EVERY page not currently open, defeating
+    // primeOfflineCache / "Download for offline". (Online this is skipped entirely.)
+    if (offlineState && !(await pageGet(node.path))) { toast('Open this page before duplicating it offline'); return; }
     sections = (d && d.sections) || [];
   }
   const create = await api('create_page', { parent, name: newName });
@@ -3144,8 +3148,7 @@ function renderRichBlock(block, parentArray, idx) {
     el.classList.add('viewing');
     surface.setAttribute('contenteditable', 'false');
     surface.innerHTML = sanitizeRichHtml(block.code || '') || '<p><br></p>';
-    savePage();
-    toast('Saved');
+    savePage();   // announces 'Saved' itself, once the write is CONFIRMED
   });
   saveBtn.className = 'block-save';
   if (isMobile) { saveBtn.textContent = '✓'; saveBtn.title = 'Save'; }
@@ -3331,8 +3334,7 @@ function renderCsvBlock(block, parentArray, idx) {
     blockBackups.delete(block);
     el.classList.add('viewing');
     renderTable();
-    savePage();
-    toast('Saved');
+    savePage();   // announces 'Saved' itself, once the write is CONFIRMED
   });
   saveBtn.className = 'block-save';
   if (isMobile) { saveBtn.textContent = '✓'; saveBtn.title = 'Save'; }
@@ -3587,8 +3589,7 @@ function renderJsonBlock(block, parentArray, idx) {
     blockBackups.delete(block);
     el.classList.add('viewing');
     renderTree();
-    savePage();
-    toast('Saved');
+    savePage();   // announces 'Saved' itself, once the write is CONFIRMED
   });
   saveBtn.className = 'block-save';
   if (isMobile) { saveBtn.textContent = '✓'; saveBtn.title = 'Save'; }
@@ -4040,8 +4041,7 @@ function renderHtmlBlock(block, parentArray, idx) {
     blockBackups.delete(block);
     el.classList.add('viewing');
     refreshAfterMutation();
-    savePage();
-    toast('Saved');
+    savePage();   // announces 'Saved' itself, once the write is CONFIRMED
   });
   saveBtn.className = 'block-save';
   if (isMobile) { saveBtn.textContent = '✓'; saveBtn.title = 'Save'; }
@@ -4497,8 +4497,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     renderVarsPanel();          // refresh block-level var fields for added/removed _V_…_V_
     refreshSectionVars();       // …and the section variables panel, if section-owned
     updatePreview();
-    savePage();
-    toast('Saved');
+    savePage();   // announces 'Saved' itself, once the write is CONFIRMED
   });
   saveBtn.className = 'block-save';
   if (isMobile) { saveBtn.textContent = '✓'; saveBtn.title = 'Save'; }
@@ -5110,7 +5109,14 @@ async function savePage() {
     // the finally-block re-save clears it once THAT save lands, closing any window where
     // an unload could skip a genuinely-dirty page.
     if (!savePending) pageDirty.delete(savedPath);
-    toast('Saved');
+    // savePage is the SINGLE 'Saved' announcer, and it only speaks AFTER the write is
+    // confirmed. The five block-Save handlers used to fire their own synchronous
+    // toast('Saved') beside an un-awaited savePage(): on the healthy path that announced
+    // twice through the aria-live channel, and on a rejected save it announced success a
+    // full request-window BEFORE handleSaveError contradicted it — the exact false-success
+    // the rejected-save fix exists to remove. A queued OFFLINE write is durable but is not
+    // on the server yet, so it says so rather than borrowing "Saved".
+    toast(res && res.offline ? 'Saved offline — will sync' : 'Saved');
   } finally {
     saveInFlight = false;
     // Flush any edits that arrived while the request was outstanding; baseMtime

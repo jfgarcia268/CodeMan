@@ -1514,6 +1514,17 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 }
 .block.note .code-view th, .block.note .code-view td {
   border: 1px solid var(--border-2); padding: 5px 10px;
+  /* Table cells must NOT inherit the prose `overflow-wrap: anywhere` set on .code-view.
+     `anywhere` feeds its break opportunities into MIN-CONTENT sizing, which collapsed every
+     column to one character — so the auto table layout always shrank to fit and the
+     overflow-x:auto above was unreachable (measured at 1440px: 20 columns → 45px-wide, 70px-tall
+     cells with scrollWidth == clientWidth; a scrollbar only appeared at 30 columns, by which point
+     every column was already one character).
+     `break-word` keeps a long unbroken token from spilling out of its cell but is
+     min-content-NEUTRAL, so columns keep their natural width and a wide table overflows and
+     scrolls — the .csv-table recipe. Prose keeps `anywhere` (a 400-char token must still wrap
+     inside the block): the reset is scoped to cells ONLY. */
+  overflow-wrap: break-word; word-break: normal;
 }
 .block.note .code-view th { background: var(--surface, #2d2d30); font-weight: 600; color: #fff; }
 .code-view a { color: #4ea0e0; text-decoration: none; }
@@ -1588,6 +1599,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .block.rich .rich-surface table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
 .block.rich .rich-surface th, .block.rich .rich-surface td {
   border: 1px solid var(--border-2); padding: 4px 9px; text-align: left; vertical-align: top;
+  /* Same cell-scoped reset as the note view — `.rich-surface`'s prose `overflow-wrap: anywhere`
+     inherits into cells and collapses each column's min-content to one character, making the
+     overflow-x:auto above unreachable. See the note-table comment for the full rationale. */
+  overflow-wrap: break-word; word-break: normal;
 }
 .block.rich .rich-surface thead th { background: var(--panel-2); color: #fff; font-weight: 600; }
 .block.rich .rich-surface caption { color: var(--text-dim); font-size: 12px; padding: 3px; }

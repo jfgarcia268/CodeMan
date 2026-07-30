@@ -135,6 +135,34 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
   put the cursor and refused with "add a blank line or place the cursor" — even though you just had.
   It now splits exactly at the cursor. (Blocks containing a blank line still split on the gaps, and
   view mode / cursor at the very start or end still correctly report there's nothing to split.)
+- **A full-library JSON backup could not be restored — and said it had worked.** Importing an
+  `All pages → JSON` export into an empty library (the disaster-recovery case the export exists for)
+  **silently dropped every page that lived in a folder**, keeping only the pages at the top level. The
+  folder names were built wrongly — the last character of each first-level folder was cut off, so
+  `Notes/Recipe` was filed under a folder called `Note`, and the page itself was then never written —
+  and the failures were hidden behind an "Imported N pages" success message. A 14-page backup restored
+  **2** pages. If you have ever restored a backup into a fresh/empty CodeMan and pages seemed to be
+  missing, this was why; re-import the same export file and everything now lands. Import also now
+  **reports failures** ("Imported 8 pages, 3 failed") instead of claiming success over partial data
+  loss, and the server refuses to invent a folder whose parent doesn't exist rather than quietly
+  creating a bogus one. Re-importing into an existing library was never affected, which is why this
+  went unnoticed.
+- **"Download for offline" now actually lets you duplicate a page while offline.** With the server
+  unreachable, the `❐` on a page row in the sidebar refused with "Open this page before duplicating it
+  offline" for *every* page that wasn't already open in a tab — even ones you had just downloaded for
+  offline use. Downloaded pages now duplicate normally, with their real content; only a page CodeMan
+  genuinely has no offline copy of is still refused.
+- **Wide tables in Note and Rich Text blocks now scroll instead of being crushed.** A table with more
+  columns than fit squeezed every column down to about one character wide and stacked the text
+  vertically (a 20-column table rendered as 47px-wide, 245px-tall cells) rather than letting the table
+  scroll sideways. Columns now keep a sensible width and the table scrolls horizontally, on desktop and
+  on phones. Long unbroken words in ordinary note/rich prose still wrap inside the block as before.
+- **"Saved" is no longer announced before the save has happened.** Saving a block reported "Saved"
+  immediately and then again when the write completed (announced twice to screen readers) — and if the
+  server refused the write, the false "Saved" appeared first and was only corrected a moment later.
+  The message now appears once, after the save has actually landed, and never appears at all when the
+  save is refused. A save made while offline now reads **"Saved offline — will sync"** so a queued
+  change isn't mistaken for one that reached the server.
 
 ### Security
 - The HTML preview runs in an iframe with `sandbox="allow-scripts"` and **no** `allow-same-origin` —

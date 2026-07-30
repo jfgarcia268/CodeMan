@@ -749,6 +749,7 @@ function openReplace() {
       for (const tab of openPages) {
         if (!changed.has(tab.path)) continue;
         const d = await api('get_page', undefined, 'path=' + encodeURIComponent(tab.path));
+        if (!d || d.error) continue;   // a reachable-but-wrong response is not content (cf. applyRename)
         const m = d._mtime != null ? d._mtime : null; delete d._mtime;
         tab.data = d; tab.baseMtime = m;
         if (tab.path === activePath) currentPageData = d;
@@ -1092,23 +1093,39 @@ function importPages() {
     const items = (parsed && parsed.sections) // single page
       ? { [nameFromPath(file.name)]: parsed }
       : parsed; // assume bundle of { path: data }
-    let n = 0;
+    let n = 0, failed = 0;
     for (const [rel, data] of Object.entries(items)) {
-      if (!data || !Array.isArray(data.sections)) continue;
+      if (!data || !Array.isArray(data.sections)) continue;   // not a page shape — nothing to import
       const clean = rel.replace(/\.json$/, '');
       const parts = clean.split('/');
       const name = parts.pop();
       const parent = parts.join('/');
-      // build any missing parent folders
-      let acc = '';
-      for (const seg of parts) { acc = acc ? acc + '/' + seg : seg; await api('create_folder', { parent: acc.slice(0, acc.lastIndexOf('/')) || '', name: seg }); }
+      // Build any missing parent folders top-down, tracking the parent EXPLICITLY (`up`)
+      // instead of deriving it from the accumulated path by string surgery. The old form
+      // (`parent: acc.slice(0, acc.lastIndexOf('/')) || ''`) had no '/' in `acc` on the FIRST
+      // segment, so lastIndexOf returned -1 and slice(0,-1) dropped the last character:
+      // "Notes" was created under a parent named "Note". api.php's create_folder happily
+      // materialised that non-existent parent, the later create_page {parent:'Notes'} failed,
+      // and the failure was swallowed — a restore into an EMPTY data root silently lost every
+      // foldered page. Invisible when re-importing into the same library (the real top-level
+      // folders already exist), which is why it survived so long.
+      let up = '', built = true;
+      for (const seg of parts) {
+        const mk = await api('create_folder', { parent: up, name: seg });
+        if (mk && mk.error) { built = false; break; }
+        up = up ? up + '/' + seg : seg;
+      }
+      if (!built) { failed++; continue; }
       const res = await api('create_page', { parent, name });
-      if (res && res.error) continue;
-      await api('save_page', { path: (parent ? parent + '/' : '') + name + '.json', data });
+      if (res && res.error) { failed++; continue; }
+      // A failed save must be REPORTED, not swallowed: a success toast over partial data
+      // loss is the whole defect — this is the documented backup/restore path.
+      const saved = await api('save_page', { path: (parent ? parent + '/' : '') + name + '.json', data });
+      if (saved && saved.error) { failed++; continue; }
       n++;
     }
     await loadTree();
-    toast('Imported ' + n + ' page' + (n === 1 ? '' : 's'));
+    toast('Imported ' + n + ' page' + (n === 1 ? '' : 's') + (failed ? ', ' + failed + ' failed' : ''));
   };
   inp.click();
 }

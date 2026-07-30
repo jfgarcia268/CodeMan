@@ -31,7 +31,7 @@ import { chromium } from 'playwright';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = process.env.CODEMAN_ROOT || path.resolve(__dirname, '..', '..');
 const PORT = Number(process.env.CODEMAN_TEST_PORT || 8123);
-const FLOOR = 694;          // = tests.html's EXACT assertion total (equality-checked)
+const FLOOR = 717;          // = tests.html's EXACT assertion total (equality-checked)
 const TIMEOUT_MS = 60000;
 
 function fail(msg) { console.error('✗ ' + msg); process.exit(1); }

@@ -101,6 +101,17 @@ r=$(post save_page '{"path":"Box/Pg.json","data":{"title":"Pg","sections":[]}}')
 r=$(post save_page '{"path":"Ghost/Pg.json","data":{"title":"x","sections":[]}}'); eqs "save_page missing parent → 404" "$(code "$r")" "404"
 has "save_page missing parent → clean JSON error" "$(body "$r")" '"error"'
 
+# create_folder's parent must exist too. The recursive mkdir used to MATERIALISE whatever
+# parent it was handed and still report ok:true — so importPages' off-by-one parent
+# derivation littered the root with bogus folders instead of failing, and any client bug or
+# crafted request could create arbitrary nested structure inside the data root.
+r=$(post create_folder '{"name":"X","parent":"no/such/place"}');   eqs "create_folder missing parent → 404" "$(code "$r")" "404"
+has "create_folder missing parent → clean JSON error" "$(body "$r")" '"error":"parent folder does not exist"'
+test ! -e "$DATA/no" && ok "create_folder missing parent materialised nothing" || bad "create_folder missing parent materialised nothing" "$DATA/no exists"
+# …but a legitimate nested folder (parent created first) still works, one level at a time.
+r=$(post create_folder '{"name":"Deep","parent":"Box"}');          eqs "create_folder nested under an existing parent → 200" "$(code "$r")" "200"
+test -d "$DATA/Box/Deep" && ok "create_folder nested folder was created" || bad "create_folder nested folder was created" "missing"
+
 # --- safePath confinement (no traversal escapes the data root) -------------
 post save_page '{"path":"../../ESCAPE_SENTINEL.json","data":{"title":"e","sections":[]}}' >/dev/null
 hasnt "save_page traversal did not write a sibling of the data dir" "$(ls "$(dirname "$DATA")" 2>/dev/null)" "ESCAPE_SENTINEL.json"

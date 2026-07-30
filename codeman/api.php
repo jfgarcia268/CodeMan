@@ -745,6 +745,12 @@ switch ($action) {
         $path = safePath($base, $parent . '/' . $name);
         $parentDir = safePath($base, $parent);
         if ($path === null || $parentDir === null) jsonError('invalid path');
+        // The parent must already exist — same guard as create_page/save_page. Without it the
+        // recursive mkdir silently MATERIALISED whatever parent it was handed and still reported
+        // ok:true, so a client bug (or a crafted request) could litter the confined data root
+        // with arbitrary nested folders; it also hid importPages' bad parent derivation, which
+        // then lost pages. Reject instead of inventing structure the caller never asked for.
+        if (!is_dir($parentDir)) jsonError('parent folder does not exist', 404);
         if (!is_dir($path)) mkdir($path, 0777, true);
         prependOrder($parentDir, $name); // new folder at top
         echo json_encode(['ok' => true]);
