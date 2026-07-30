@@ -119,6 +119,18 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
   failed. It now recognises the bad reply as a failure, shows your offline copy instead, tells you so,
   and starts retrying in the background. The Trash and History panels likewise say "Could not load…"
   rather than claiming they're empty.
+- **A save the server rejected reported success and lost the edit.** If the server refused a save —
+  most easily by another device deleting the page's folder while you had it open, but also on a bad
+  path or a server hiccup that produced a broken reply — CodeMan showed "Saved", marked the page as
+  up to date, and the edit then existed nowhere: it was gone after a reload, with nothing to recover
+  it from. A rejected save now says so, naming the server's reason, and the edit is **kept**: a
+  passing hiccup is queued and retried automatically, a real refusal is parked in **Unsynced changes**
+  (the red badge, bottom-right — also reachable from the sidebar `⋯` menu and the command palette),
+  where you can inspect it, retry it once the problem is fixed, export it, or discard it. It survives
+  a reload. The same blind spot on the "Overwrite" answer to a save-conflict prompt, and on the save
+  CodeMan makes when you leave the tab, is fixed too.
+- A page saved by hand or imported without any sections is now kept in the offline copy, so it still
+  opens when the server is unreachable instead of coming up empty with no explanation.
 - **Splitting a block at the cursor works again.** `Split` in a block's `⋯` menu ignored where you had
   put the cursor and refused with "add a blank line or place the cursor" — even though you just had.
   It now splits exactly at the cursor. (Blocks containing a blank line still split on the gaps, and

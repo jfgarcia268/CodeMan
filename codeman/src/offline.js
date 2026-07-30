@@ -454,7 +454,15 @@ async function cacheOnSuccess(action, body, query, data) {
     if (data && data.error) return;                       // an error body is not content
     if (action === 'tree') { if (Array.isArray(data)) await kvSet('tree', data); }
     else if (action === 'col_sorts') { if (data && typeof data === 'object' && !Array.isArray(data)) await kvSet('colsorts', data); }
-    else if (action === 'get_page') { const p = (body && body.path) || qparam(query, 'path'); if (p && data && Array.isArray(data.sections)) { const copy = Object.assign({}, data); delete copy._mtime; await pageSet(p, copy); } }
+    // get_page is deliberately the LOOSE check: guard strictness is proportional to blast
+    // radius. A non-array `tree` CRASHES navigation, so that one stays strict — but an
+    // unusual-yet-VALID page (a hand-written / imported `{title:"X"}` with no sections) is
+    // not an error response, and demanding sections made it permanently uncacheable:
+    // primeOfflineCache skipped it and it rendered blank offline with no warning. The
+    // guard's job is to reject ERROR bodies (done above, plus the plain-object test here,
+    // which also rejects a malformed array/scalar 200); the render path already tolerates
+    // a missing `sections` (openPage defaults it to []).
+    else if (action === 'get_page') { const p = (body && body.path) || qparam(query, 'path'); if (p && data && typeof data === 'object' && !Array.isArray(data)) { const copy = Object.assign({}, data); delete copy._mtime; await pageSet(p, copy); } }
     else if (action === 'save_page' && body) { const copy = Object.assign({}, body.data); delete copy._mtime; await pageSet(body.path, copy); }
     else if (action === 'delete' && body) await pageDel(body.path);
   } catch (e) {}

@@ -2571,11 +2571,142 @@
           await api('get_page', undefined, 'path=' + encodeURIComponent(RUN + 'mirror/P.json'));
           ta('an error get_page response is not mirrored as a page',
              await pageGet(RUN + 'mirror/P.json'), undefined);
+          window.fetch = () => res(200, '[]');                             // 200, wrong shape
+          await api('get_page', undefined, 'path=' + encodeURIComponent(RUN + 'mirror/Arr.json'));
+          ta('an array-shaped get_page response is not mirrored as a page',
+             await pageGet(RUN + 'mirror/Arr.json'), undefined);
+          // RV-2: guard strictness is proportional to blast radius. An odd-but-VALID page
+          // (hand-written / imported, no `sections` array) is NOT an error body — demanding
+          // sections made it permanently uncacheable, so primeOfflineCache skipped it and it
+          // rendered BLANK offline with no warning. It must still be mirrored.
+          window.fetch = () => res(200, '{"title":"NoSect"}');
+          await api('get_page', undefined, 'path=' + encodeURIComponent(RUN + 'mirror/NoSect.json'));
+          ta('a page with no sections array IS still mirrored (usable offline)',
+             await pageGet(RUN + 'mirror/NoSect.json'), { title: 'NoSect' });
+          await pageDel(RUN + 'mirror/NoSect.json');
           window.fetch = () => res(200, '[]');                            // a real array still caches
           await api('tree');
           ta('a VALID tree response still updates the kv mirror', await kvGet('tree'), []);
         } finally {
           window.fetch = _fetch; window.setOffline = _setOffline; window.renderTree = _renderTree;
+        }
+      }
+
+      // ---- RV-1: a save the SERVER REJECTED must never report success, and the edit
+      // must survive a reload ---------------------------------------------------------
+      // apiFetch DELIBERATELY resolves a reachable server's 4xx (a 4xx is a real response,
+      // not "offline"), so savePage's missing `res.error` branch let an error body fall
+      // through to `pageDirty.delete()` + toast('Saved'): measured live — another device
+      // deletes the parent folder, the client says "Saved", and after a reload the edit
+      // exists NOWHERE. Driven through the REAL savePage/handleSaveConflict against a
+      // stubbed api (not the helper), because the missing branch WAS the bug.
+      {
+        const _api = window.api, _toast = window.toast, _confirm = window.showConfirm;
+        const _cpp = currentPagePath, _cpd = currentPageData, _tabs = openPages.slice();
+        const toasts = [];
+        try {
+          window.toast = (m) => { toasts.push(String(m)); };
+          const SP = RUN + 'reject/P.json';
+          const mkPage = (marker) => ({ title: 'P', sections: [{ title: 'S', blocks: [{ type: 'sql', code: marker }], subsections: [] }] });
+          const seed = (marker) => {
+            currentPagePath = SP; currentPageData = mkPage(marker);
+            openPages.length = 0;
+            openPages.push({ path: SP, title: 'P', data: currentPageData, filter: '', baseMtime: 111 });
+            pageDirty.clear(); pageDirty.add(SP); toasts.length = 0; syncQueue.length = 0;
+          };
+          const dlFor = async () => (await dlList()).filter(d => d.action === 'save_page' && d.body && d.body.path === SP);
+          // Read a parked/queued op's block text without throwing when it isn't there, so
+          // EVERY assertion below reports individually instead of the first missing entry
+          // aborting the block (it is the revert→RED signal that has to stay readable).
+          const codeOf = (o) => { try { return o.body.data.sections[0].blocks[0].code; } catch (e) { return null; } };
+
+          // (a) terminal 4xx — the measured repro (parent folder deleted elsewhere)
+          seed('KEEPME-CRITICALEDIT');
+          window.api = async () => ({ error: 'parent folder does not exist' });
+          await savePage();
+          ta('a REJECTED save never toasts Saved', toasts.some(m => /^Saved/.test(m)), false);
+          ta('a rejected save surfaces the server reason', toasts.some(m => /parent folder does not exist/.test(m)), true);
+          let dl = await dlFor();
+          ta('a rejected save is PARKED as a dead-letter (survives a reload)', dl.length, 1);
+          ta('the parked entry carries the EDIT, not the pre-edit content',
+             codeOf(dl[0]), 'KEEPME-CRITICALEDIT');
+          ta('the parked entry is forced (a replay must not re-conflict)', !!(dl[0] && dl[0].body && dl[0].body.force), true);
+          ta('a terminal rejection is classified terminal (not retried forever)', dl[0] && dl[0].kind, 'terminal');
+          ta('a terminal rejection does NOT also sit in the retry queue', syncQueue.length, 0);
+          ta('the page leaves pageDirty ONLY because the edit is durably parked', pageDirty.has(SP), false);
+
+          // a repeated failure on the SAME page supersedes OUR OWN entry (each is a full
+          // page snapshot, so the newest wins) instead of stacking one per autosave burst
+          currentPageData.sections[0].blocks[0].code = 'KEEPME-SECOND';
+          pageDirty.add(SP);
+          await savePage();
+          dl = await dlFor();
+          ta('a repeated rejection supersedes our own parked entry (one per page)', dl.length, 1);
+          ta('…keeping the NEWEST content', codeOf(dl[0]), 'KEEPME-SECOND');
+          for (const d of dl) await dlRemove(d.id);
+
+          // (b) transient (a malformed 200 body — core.js tags it _transient) → the write
+          // QUEUE, whose policy retries 3× across flush cycles and only THEN parks it.
+          seed('KEEPME-TRANSIENT');
+          window.api = async () => ({ error: 'malformed server response (200)', _transient: true });
+          await savePage();
+          ta('a transient rejection never toasts Saved', toasts.some(m => /^Saved/.test(m)), false);
+          ta('a transient rejection goes to the retry queue',
+             syncQueue.filter(o => o.action === 'save_page' && o.body.path === SP).length, 1);
+          ta('a transient rejection carries the edit', codeOf(syncQueue[0]), 'KEEPME-TRANSIENT');
+          ta('a transient rejection is NOT parked straight as a dead-letter', (await dlFor()).length, 0);
+          syncQueue.length = 0; await saveQueue();
+
+          // (c) the CONFLICT branch is UNCHANGED: still prompts, still resends forced
+          seed('CONFLICT-MINE');
+          let sent = [];
+          window.showConfirm = async () => true;               // "Overwrite"
+          window.api = async (a, b) => { sent.push(b); return sent.length === 1 ? { conflict: true, mtime: 777 } : { ok: true, mtime: 888 }; };
+          await savePage();
+          ta('a conflict still prompts and resends FORCED at the disk mtime',
+             [sent.length, !!(sent[1] && sent[1].force), sent[1] && sent[1].baseMtime], [2, true, 777]);
+          ta('an overwritten conflict reports the overwrite', toasts, ['Saved (overwrote disk version)']);
+          ta('an overwritten conflict clears dirty + adopts the new mtime',
+             [pageDirty.has(SP), openPages[0].baseMtime], [false, 888]);
+          ta('an overwritten conflict parks nothing', (await dlFor()).length, 0);
+
+          // …and a conflict-force the server STILL rejects is parked, not announced as an
+          // overwrite (the same blind spot, on the adjacent code path).
+          seed('CONFLICT-REJECTED');
+          sent = [];
+          window.api = async (a, b) => { sent.push(b); return sent.length === 1 ? { conflict: true, mtime: 777 } : { error: 'parent folder does not exist' }; };
+          await savePage();
+          ta('a rejected conflict-force never claims an overwrite', toasts.some(m => /^Saved/.test(m)), false);
+          dl = await dlFor();
+          ta('a rejected conflict-force is parked', dl.length, 1);
+          ta('…with the user\'s version', codeOf(dl[0]), 'CONFLICT-REJECTED');
+          for (const d of dl) await dlRemove(d.id);
+          window.showConfirm = _confirm;
+
+          // (d) the OFFLINE branch is UNCHANGED: a queued write is durable → clears dirty,
+          // and baseMtime is dropped (a ghost write must not false-conflict later).
+          seed('OFFLINE-EDIT');
+          window.api = async () => ({ ok: true, offline: true, mtime: null });
+          await savePage();
+          ta('an offline-queued save still reports Saved', toasts, ['Saved']);
+          ta('an offline-queued save clears dirty and drops baseMtime',
+             [pageDirty.has(SP), openPages[0].baseMtime], [false, null]);
+          ta('an offline-queued save parks nothing', (await dlFor()).length, 0);
+
+          // (e) a HEALTHY save is untouched: exactly one 'Saved', dirty cleared, mtime kept
+          seed('HAPPY-PATH');
+          window.api = async () => ({ ok: true, mtime: 222 });
+          await savePage();
+          ta('a healthy save toasts Saved exactly once', toasts, ['Saved']);
+          ta('a healthy save clears dirty and adopts the mtime',
+             [pageDirty.has(SP), openPages[0].baseMtime], [false, 222]);
+          ta('a healthy save parks nothing', (await dlFor()).length, 0);
+        } finally {
+          window.api = _api; window.toast = _toast; window.showConfirm = _confirm;
+          currentPagePath = _cpp; currentPageData = _cpd;
+          openPages.length = 0; openPages.push(..._tabs);
+          pageDirty.clear(); syncQueue.length = 0;
+          if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
         }
       }
 

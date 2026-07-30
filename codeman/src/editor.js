@@ -5029,6 +5029,52 @@ function afterEditSession() {
   if (currentPagePath && pageDirty.has(currentPagePath)) saveTimer = setTimeout(savePage, 500);
 }
 
+// Dead-letters WE parked for a rejected save, keyed by page path → dl id. A repeated
+// failure on the same page supersedes our own entry instead of stacking one full-page
+// snapshot per autosave burst (each entry carries the whole page — 1 MB for an
+// html-project page). Only ids this session created are ever replaced: a dead-letter
+// parked by flushQueue is a DIFFERENT op (its own content) and is never touched.
+const saveDeadLetters = new Map();
+
+// A save the SERVER REJECTED. apiFetch deliberately RESOLVES for a reachable server's
+// 4xx (a 4xx is a real response, not "offline" — see the apiFetch gotcha) and for a
+// malformed 200 (core.js tags it `_transient`), so an error body used to fall straight
+// through to `pageDirty.delete()` + toast('Saved'): the user was told the write
+// succeeded, the page went clean, and after a reload the edit existed NOWHERE. Route it
+// into the same anti-silent-loss machinery flushQueue uses:
+//   • `_transient` (unparseable body — usually a passing server hiccup) → the write
+//     QUEUE, whose existing policy retries it 3× across flush cycles then parks it;
+//   • terminal 4xx (invalid path / missing parent folder / missing CSRF header) → parked
+//     STRAIGHT as a dead-letter: it can never succeed as-is, so retrying would only churn.
+// Either way the edit lands in IndexedDB, so it SURVIVES A RELOAD and is reviewable in
+// the dead-letter panel (the red badge / sidebar ⋯ / command palette). Only once it is
+// durably captured elsewhere may the page leave pageDirty — the same rule the offline
+// branch already uses. If even parking fails (IndexedDB unavailable/full) the page stays
+// DIRTY so a later flush retries. NEVER reports success.
+async function handleSaveError(path, res, data) {
+  const reason = (res && res.error) || 'save rejected';
+  // Park EXACTLY the content the rejected request carried (each caller passes the same
+  // object it sent), forced — a replay must not re-conflict on a stale baseMtime.
+  const op = { action: 'save_page', body: { path, data: data || currentPageData, force: true } };
+  try {
+    if (res && res._transient) {
+      await enqueue(op);
+      toast('Save failed: ' + reason + ' — queued to retry');
+    } else {
+      const prev = saveDeadLetters.get(path);
+      const entry = await dlAdd(op, reason, 'terminal');
+      if (entry && entry.id) saveDeadLetters.set(path, entry.id);
+      if (prev) await dlRemove(prev);      // our own superseded snapshot of this page
+      toast('Save failed: ' + reason + ' — kept in unsynced changes');
+    }
+    // An edit that arrived mid-save (savePending) is NOT captured by the op above, so
+    // stay dirty and let the finally-block re-save carry it (mirrors the success path).
+    if (!savePending) pageDirty.delete(path);
+  } catch (e) {
+    toast('Save failed: ' + reason);       // page stays dirty → a later flush retries
+  }
+}
+
 async function savePage() {
   if (!currentPagePath) return;
   // Serialize saves: overlapping autosaves would each read the same stale
@@ -5044,6 +5090,9 @@ async function savePage() {
     const baseMtime = tab ? tab.baseMtime : null;
     const res = await api('save_page', { path: savedPath, data: currentPageData, baseMtime });
     if (res && res.conflict) { await handleSaveConflict(savedPath, res.mtime); return; }
+    // The server REJECTED the write (4xx body, or a malformed 200) — park/queue it so
+    // the edit is recoverable, and never toast 'Saved'. See handleSaveError.
+    if (res && res.error) { await handleSaveError(savedPath, res, currentPageData); return; }
     if (res && res.offline) {
       // Queued offline: we don't know whether the request actually reached the
       // server before it dropped (a NAS timeout can write the file yet lose the
@@ -5080,6 +5129,11 @@ async function handleSaveConflict(path, diskMtime) {
   );
   if (overwrite) {
     const res = await api('save_page', { path, data: tab ? tab.data : currentPageData, baseMtime: diskMtime, force: true });
+    // Same blind spot as savePage's main path: a FORCED resend the server still rejects
+    // (the folder was deleted meanwhile, a bad path, a missing CSRF header) resolves like
+    // a success. Park it instead of announcing an overwrite that never happened — this is
+    // exactly what flushQueue does with a conflict-force that still errors.
+    if (res && res.error) { await handleSaveError(path, res, tab ? tab.data : currentPageData); return; }
     if (tab && res && res.mtime != null) tab.baseMtime = res.mtime;
     pageDirty.delete(path);
     toast('Saved (overwrote disk version)');
@@ -5120,7 +5174,13 @@ function flushSave(opts) {
     const requeue = () => { try { enqueue({ action: 'save_page', body: { path, data, force: true } }); } catch (e) {} };
     try {
       const p = fetch('api.php?action=save_page', { method: 'POST', keepalive: true, headers: apiHeaders(), body });
-      if (p && p.catch) p.catch(requeue);
+      // A REFUSED fetch rejects → requeue. But a fetch that RESOLVES with a 4xx is a
+      // rejected write too (deleted parent folder, bad path, missing CSRF header) and was
+      // just as silently dropped, so requeue on !ok as well: the queue replays it and, if
+      // the server rejects it again, flushQueue parks it as a reviewable dead-letter.
+      // Best-effort by nature — on visibilitychange→hidden (the PRIMARY trigger) the
+      // document is still alive so this handler runs; on beforeunload it may not.
+      if (p && p.then) p.then(r => { if (r && !r.ok) requeue(); }, requeue);
     } catch (e) { requeue(); }
     // No usable response on unload → drop the cached baseMtime so returning to the tab
     // and typing one char doesn't false-conflict against our own keepalive write.
@@ -5129,7 +5189,13 @@ function flushSave(opts) {
     return;
   }
   api('save_page', { path, data, force: true })
-    .then(res => { if (tab && res && res.mtime != null) tab.baseMtime = res.mtime; pageDirty.delete(path); });
+    .then(res => {
+      // Same blind spot as savePage: an error body resolves like a success. Park it and
+      // keep the page dirty rather than clearing the flag on a write that never landed.
+      if (res && res.error) return handleSaveError(path, res, data);
+      if (tab && res && res.mtime != null) tab.baseMtime = res.mtime;
+      pageDirty.delete(path);
+    });
 }
 
 // Persist a dirty page if the tab is hidden/closed. visibilitychange→hidden is the

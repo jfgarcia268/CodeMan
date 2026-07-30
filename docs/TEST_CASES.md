@@ -15,10 +15,10 @@ and reports against this matrix); UI/usability passes are run by the
 
 1. **Automated suites first** (fast, deterministic):
    - **Client units** — open `codeman/tests.html` in a browser. Expect the summary
-     **"N passed, 0 failed"** (currently 535). `window.__testResult = {pass, fail, done}` for
+     **"N passed, 0 failed"** (currently 694). `window.__testResult = {pass, fail, done}` for
      scripting (`done` flips true after the async offline tests finish).
    - **Server API** — `bash codeman/tests-api.sh` (spins a throwaway `php -S` against a temp data
-     dir; exit 0 = all green; currently 164). Override port: `bash codeman/tests-api.sh 8099` —
+     dir; exit 0 = all green; currently 168). Override port: `bash codeman/tests-api.sh 8099` —
      a taken port is skipped automatically (bounded upward hunt), so parallel runs stay green.
    - **CI enforces both** on every push/PR: `.github/workflows/tests.yml` runs `tests-api.sh`
      (`api-tests` job), tests.html headless via Playwright + `php -S`
@@ -657,6 +657,23 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   that exists only in history never reaches `list_tags` (even after `rebuild_index`), and
   `replace_content` leaves history snapshots byte-identical — the recovery net is never rewritten.
   **[auto: tests-api contentFileIterator]**
+- TC-data-10 (A/N, critical): **a save the SERVER REJECTED must never report success, and the edit
+  must survive a reload.** Open `F/P.json`, then from another device/tab delete its folder
+  (`POST api.php?action=delete {"path":"F"}`). Edit a block, Save. Expect: **NO "Saved" toast** — a
+  "Save failed: parent folder does not exist — kept in unsynced changes" toast, the bottom-right badge
+  in its **red** dead-letter state ("⚠ 1 change could not sync — review"), and the edit parked in the
+  **Unsynced changes** panel (`Save · F/P.json`, Inspect shows the edited block text). **Reload the
+  page** → the parked entry is still there. Recreate the folder → **Retry** in the panel → the edit
+  lands on the server and the panel empties. Same for a malformed 200 body (a stray PHP notice before
+  the JSON): it goes to the **retry queue** (3 attempts, then parks) rather than parking immediately.
+  Also cover: answering **Overwrite** to a save-conflict prompt when the forced resend is *also*
+  rejected → parked, no "Saved (overwrote disk version)"; and leaving the tab (`visibilitychange →
+  hidden`) with a dirty page the server rejects → queued, then parked, never dropped. Regression
+  boundaries that must stay green: a healthy save still toasts "Saved" exactly once and clears
+  `pageDirty`; a conflict still prompts, force-resends and snapshots the other version to History
+  (TC-data-03); an offline-queued save still reports "Saved" and drops `baseMtime`.
+  **[auto: tests.html rejected-save (terminal park · transient queue · supersede · conflict
+  unchanged · conflict-force rejected · offline unchanged · healthy save)]**
 
 ### TC-prod — Productivity
 - TC-prod-01 (P): Command palette ⌘K — jump to page (substring match), path-subtitle disambiguation;
@@ -706,6 +723,12 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   transient-exhausted / **conflict-force-transient retried then parked** / conflict-force-terminal,
   retry re-enqueue, `__codemanAdoptInto` queue-merge) is **[auto: tests.html dead-letter reducers]**;
   the panel UI + badge keyboard/severity stay manual.
+
+- TC-offline-07 (E): **an unusual-but-VALID page is still mirrored offline.** A hand-written or
+  imported page with no `sections` array (`{"title":"NoSect"}`) is cached on open and by
+  `⋯ → Prime offline cache`, so it still opens with the backend down (title + header, no throw) —
+  the mirror's shape guard rejects **error bodies**, not odd content. A `get_page` that returns an
+  error body (or an array/scalar) is still NOT mirrored. **[auto: tests.html cacheOnSuccess guards]**
 
 - TC-offline-06 (N): **replay survives the safePath reject tightening.** The offline queue replays
   `enqueueReconstruct` bodies (`create_project {name,parent}`, `create_folder {parent,name}`,
