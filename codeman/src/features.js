@@ -1066,19 +1066,85 @@ function exportCurrentPage(fmt) {
   toast('Exported ' + base);
 }
 
-// What an "All pages → JSON" bundle does and does not carry. The bundle is
-// { path: pageData } — page CONTENT only — so everything the library's SHAPE lives in
-// (the .project markers, .order.json, .colsort.json, .trash and .history) is absent.
-// Stated in full at export, because that is the moment a user forms the belief that
-// they have a backup (the offline-only desktop nudge in init.js sends them straight
-// here), and abbreviated at import, where it explains what they're looking at.
+// What an "All pages → JSON" bundle does and does not carry. Stated in full at export,
+// because that is the moment a user forms the belief that they have a backup (the
+// offline-only desktop nudge in init.js sends them straight here), and abbreviated at
+// import, where it explains what they're looking at. Three strings, ONE story:
+//   NOTE        — export, always: pages AND the library's shape restore; trash and
+//                 history do not.
+//   SHORT       — import of a bundle with NO sidecar (an old file): pages only.
+//   SHORT_SHAPE — import of a bundle WITH the sidecar: shape came too.
 const BUNDLE_SCOPE_NOTE = 'Every page restores exactly as it is now.\n'
-  + 'A JSON bundle carries page content only — project markers, manual folder order, '
-  + 'column sort, trash and version history are not included.';
+  + "The bundle also carries the library's shape — project markers, manual folder order, "
+  + 'column sort and favourites — so restoring into an empty library rebuilds it.\n'
+  + 'Trash and version history are not included.';
 const BUNDLE_SCOPE_SHORT = 'a JSON bundle carries page content only, not project markers, '
   + 'manual order, trash or history';
+const BUNDLE_SCOPE_SHORT_SHAPE = 'trash and version history are not included';
 
-// Export every page as one JSON bundle ({ path: pageData }).
+// The sidecar key. Deliberately NOT *.json: every page key in a bundle ends in .json,
+// so a non-.json key is unambiguously not a page — which is also what makes an OLD
+// client skip it for free (its `!Array.isArray(data.sections)` guard) without counting
+// a failure. No path separators and no leading '.', so it can never collide with a
+// safeName-legal page path.
+const LIBRARY_META_KEY = '__codeman_meta';
+
+// PURE over its arguments (no globals) so tests.html can drive it with a synthetic
+// tree, and ZERO network I/O — everything it needs is already in memory: treeData
+// already carries `project` per folder and already arrives in the server's effective
+// (persisted) order, colSort and favorites are live module globals.
+// Never throws (the parseCsv/parseJsonSafe/bundleHtmlProject contract): on any
+// surprise it returns null and the caller ships the pages without a sidecar.
+function buildLibraryMeta(nodes, colSortMap, favSet, appVersion, nowIso) {
+  try {
+    const folders = [], pagePaths = new Set();
+    (function walk(list) {
+      (list || []).forEach((n) => {
+        if (!n) return;
+        if (n.type === 'folder') {
+          const kids = n.children || [];
+          const e = { path: n.path };
+          if (n.project) e.project = true;                       // omitted when false
+          // Recorded ONLY where it differs from buildTree's default — a folder the
+          // user never dragged must not gain an .order.json on restore.
+          if (!isDefaultChildOrder(kids)) e.order = childOrderKeys(kids);
+          folders.push(e);
+          walk(kids);
+        } else if (n.type === 'page') pagePaths.add(n.path);
+      });
+    })(nodes);
+    // Enumerated folder paths + '' (the root) — the only keys a colsort may name.
+    const known = new Set(folders.map((f) => f.path)); known.add('');
+    const colSortOut = {};
+    Object.keys(colSortMap || {}).forEach((k) => {
+      const p = colSortMap[k];
+      if (!known.has(k) || !p || !['name', 'lang', 'kind'].includes(p.field)) return;
+      colSortOut[k] = { field: p.field, dir: p.dir === 'desc' ? 'desc' : 'asc' };
+    });
+    const meta = {
+      format: 'codeman-library',   // self-identifying; import REQUIRES this exact value
+      v: 1,                        // sidecar schema version (NOT a bundle version)
+      app: String(appVersion || ''),
+      exportedAt: String(nowIso || ''),
+      // Provenance/audit ONLY — never control flow. Nothing may "validate" against it.
+      counts: { pages: pagePaths.size, folders: folders.length },
+      folders,
+      colSort: colSortOut,
+      // Per-browser state, fenced off from the data-root shape. Sorted for a stable
+      // diff; recentCopies deliberately stays out (ephemeral noise, not curation).
+      client: { favorites: [...(favSet || [])].filter((p) => pagePaths.has(p)).sort() },
+    };
+    // The root has no folder entry, so its order is its own field — omitted entirely
+    // when the root is already in the default order.
+    if (!isDefaultChildOrder(nodes || [])) meta.rootOrder = childOrderKeys(nodes || []);
+    return meta;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Export every page as one JSON bundle ({ path: pageData }) plus the optional
+// library-shape sidecar.
 async function exportAll() {
   toast('Bundling…');
   const paths = [...collectPagePaths(treeData, new Set())];
@@ -1088,11 +1154,70 @@ async function exportAll() {
     delete d._mtime;
     bundle[p] = d;
   }
+  // A sidecar failure must NEVER cost the user their page bundle — the pages are the
+  // irreplaceable part. On any trouble, omit the key and say so in the wording.
+  let meta = null;
+  try {
+    meta = buildLibraryMeta(treeData, colSort, favorites, (self.CODEMAN_VERSION || ''), new Date().toISOString());
+  } catch (e) { meta = null; }
+  if (meta) bundle[LIBRARY_META_KEY] = meta;
   download('codeman-export-' + paths.length + '-pages.json', JSON.stringify(bundle, null, 2), 'application/json');
   // showAlert, not toast: this one must not be missed. A transient toast that says
   // "Exported N pages" is what let a bundle be mistaken for a full backup. Acknowledge
   // -only (one button) — there is nothing to decide, the file is already downloaded.
-  await showAlert('Exported ' + paths.length + ' page' + (paths.length === 1 ? '' : 's') + '.\n\n' + BUNDLE_SCOPE_NOTE);
+  await showAlert('Exported ' + paths.length + ' page' + (paths.length === 1 ? '' : 's') + '.\n\n'
+    + (meta ? BUNDLE_SCOPE_NOTE
+            : 'Every page restores exactly as it is now.\n'
+              + "The library's shape could not be read, so this bundle carries page content only — "
+              + 'project markers, manual folder order, column sort, trash and version history '
+              + 'are not included.'));
+}
+
+// Read the optional library-shape sidecar out of a parsed bundle. NEVER THROWS (the
+// parseCsv/parseJsonSafe contract) — returns a NORMALISED meta, or null when there is
+// no sidecar or it is unreadable, in which case the import degrades to exactly today's
+// pages-only behaviour. Located by EXACT key match, then validated on `format`; there
+// is deliberately no version sniff, so an unrecognised future `v` is simply ignored.
+// Per-FOLDER-ENTRY validation is deliberately NOT done here: a bad entry must be
+// COUNTED and reported by the import (D-B1), not silently dropped.
+function readLibraryMeta(parsed) {
+  try {
+    const m = parsed && parsed[LIBRARY_META_KEY];
+    if (!m || typeof m !== 'object' || Array.isArray(m)) return null;
+    if (m.format !== 'codeman-library') return null;
+    if (!Array.isArray(m.folders)) return null;
+    const strs = (a) => (Array.isArray(a) ? a.filter((s) => typeof s === 'string') : null);
+    const folders = m.folders.map((f) => (f && typeof f === 'object' && !Array.isArray(f)
+      // `path` is passed through UNCHANGED (not coerced) so a non-string is rejected
+      // and counted by safeSidecarPath rather than becoming the string "undefined".
+      ? { path: f.path, project: !!f.project, order: strs(f.order) }
+      : { path: null, project: false, order: null }));
+    const colSortIn = (m.colSort && typeof m.colSort === 'object' && !Array.isArray(m.colSort)) ? m.colSort : {};
+    const colSort = {};
+    Object.keys(colSortIn).forEach((k) => {
+      const p = colSortIn[k];
+      if (!p || typeof p !== 'object' || !['name', 'lang', 'kind'].includes(p.field)) return;
+      colSort[k] = { field: p.field, dir: p.dir === 'desc' ? 'desc' : 'asc' };
+    });
+    const favs = (m.client && typeof m.client === 'object') ? strs(m.client.favorites) : null;
+    return { folders, colSort, rootOrder: strs(m.rootOrder), favorites: favs || [] };
+  } catch (e) {
+    return null;
+  }
+}
+
+// Client-side path guard for anything a sidecar names, so the server's safeName /
+// safePath rejections are never exercised as an error path. Mirrors safeName per
+// segment: no empty segment, no '.'/'..', no leading '.', no path separator inside a
+// segment. Returns the cleaned path, or null.
+function safeSidecarPath(p) {
+  if (typeof p !== 'string') return null;
+  const segs = p.replace(/^\/+|\/+$/g, '').split('/');
+  if (!segs.length) return null;
+  for (const s of segs) {
+    if (!s || s === '.' || s === '..' || s[0] === '.' || s.includes('\\')) return null;
+  }
+  return segs.join('/');
 }
 
 // Import a single page JSON, or a bundle ({path: data}), creating pages.
@@ -1109,7 +1234,61 @@ function importPages() {
     const items = isBundle
       ? parsed
       : { [nameFromPath(file.name)]: parsed };
-    let n = 0, failed = 0;
+
+    /* ---- Phase 0 — the optional library-shape sidecar ----------------------------
+       `hasSidecar` separates "an old bundle, nothing to restore" (say nothing) from
+       "a sidecar is present but unreadable" (say so). */
+    const hasSidecar = isBundle && parsed[LIBRARY_META_KEY] !== undefined;
+    const meta = isBundle ? readLibraryMeta(parsed) : null;
+    if (isBundle) delete items[LIBRARY_META_KEY]; // belt-and-braces: the shape guard below skips it anyway
+
+    /* ---- Phase 1 — snapshot, BEFORE any write -----------------------------------
+       `known` is the "created by this import" oracle. There is no server signal for it
+       — create_folder/create_project both return {ok:true} whether or not the directory
+       already existed — so the pre-import client snapshot is the only discriminator
+       available, and it is the right one: it is the same treeData the user is looking
+       at. Everything the layout phase touches is gated on it, which is what makes
+       "import into a non-empty library never disturbs existing folders" true. */
+    const wasEmpty = !treeData.length;
+    const preFolders = collectFolderPaths(treeData, []);
+    const known = new Set(preFolders.map((f) => f.path));
+    const knownProjects = new Set(preFolders.filter((f) => f.project).map((f) => f.path));
+    const created = new Set();
+    let n = 0, failed = 0, folderFailed = 0, shapeFailed = 0, shapeSkipped = 0, layoutOps = 0;
+
+    /* ---- Phase 2 — folders, BEFORE pages ---------------------------------------- */
+    if (meta) {
+      // Sorted by segment count so parents always precede children even if the file
+      // was hand-edited (the array is already top-down; the sort is the defence).
+      const entries = meta.folders.slice()
+        .sort((a, b) => String(a.path || '').split('/').length - String(b.path || '').split('/').length);
+      for (const f of entries) {
+        const p = safeSidecarPath(f.path);
+        if (!p) { shapeFailed++; continue; }
+        // Already there ⇒ touch NOTHING. Not even create_folder: api.php's
+        // create_folder calls prependOrder UNCONDITIONALLY (:795-796), so re-creating a
+        // folder that exists jumps it to the top of its parent's order — which is how
+        // today's import silently reshuffles a merging user's sidebar. And never
+        // upgrade an existing plain folder to a project: that changes nesting legality
+        // for its whole subtree and could strand an existing child project.
+        if (known.has(p)) { shapeSkipped++; continue; }
+        const parts = p.split('/'); const name = parts.pop(); const parent = parts.join('/');
+        if (parent && !known.has(parent)) { shapeFailed++; continue; }
+        let asProject = !!f.project;
+        if (asProject && parent && !knownProjects.has(parent)) {
+          // A project may only live at the root or inside another project. Create it as
+          // a PLAIN folder rather than SEND create_project with a plain-folder parent —
+          // the server guard must never be exercised as an error path.
+          asProject = false; shapeFailed++;
+        }
+        const res = await api(asProject ? 'create_project' : 'create_folder', { parent, name });
+        if (res && res.error) { folderFailed++; continue; }
+        known.add(p); created.add(p);
+        if (asProject) knownProjects.add(p);
+      }
+    }
+
+    /* ---- Phase 3 — pages -------------------------------------------------------- */
     for (const [rel, data] of Object.entries(items)) {
       if (!data || !Array.isArray(data.sections)) continue;   // not a page shape — nothing to import
       const clean = rel.replace(/\.json$/, '');
@@ -1125,28 +1304,114 @@ function importPages() {
       // and the failure was swallowed — a restore into an EMPTY data root silently lost every
       // foldered page. Invisible when re-importing into the same library (the real top-level
       // folders already exist), which is why it survived so long.
+      // …and SKIP the create for a segment already known to exist. create_folder
+      // prependOrders UNCONDITIONALLY, so the old unconditional call re-jumped every
+      // existing ancestor to the top of its parent's order once PER PAGE. Skipping is
+      // also what keeps `created` an honest "this import made it" set.
       let up = '', built = true;
       for (const seg of parts) {
-        const mk = await api('create_folder', { parent: up, name: seg });
-        if (mk && mk.error) { built = false; break; }
-        up = up ? up + '/' + seg : seg;
+        const next = up ? up + '/' + seg : seg;
+        if (!known.has(next)) {
+          const mk = await api('create_folder', { parent: up, name: seg });
+          if (mk && mk.error) { built = false; break; }
+          known.add(next); created.add(next);
+        }
+        up = next;
       }
       if (!built) { failed++; continue; }
-      const res = await api('create_page', { parent, name });
-      if (res && res.error) { failed++; continue; }
+      let res = await api('create_page', { parent, name });
+      if (res && res.error) {
+        // `known` is a pre-import snapshot, so it can be STALE (another device deleted
+        // the folder meanwhile). Rebuild this page's whole chain once, ignoring `known`,
+        // then retry once — a second failure counts exactly as it did before.
+        if (parts.length && /parent folder does not exist/i.test(String(res.error))) {
+          let up2 = '';
+          for (const seg of parts) {
+            const mk = await api('create_folder', { parent: up2, name: seg });
+            if (mk && mk.error) break;
+            up2 = up2 ? up2 + '/' + seg : seg;
+            known.add(up2); created.add(up2);
+          }
+          res = await api('create_page', { parent, name });
+        }
+        if (res && res.error) { failed++; continue; }
+      }
       // A failed save must be REPORTED, not swallowed: a success toast over partial data
       // loss is the whole defect — this is the documented backup/restore path.
       const saved = await api('save_page', { path: (parent ? parent + '/' : '') + name + '.json', data });
       if (saved && saved.error) { failed++; continue; }
       n++;
     }
+
+    /* ---- Phase 4 — layout, AFTER every page has landed --------------------------
+       `reorder` is meaningless before the pages exist, because the order array names
+       them. Targets = the folders THIS import created, plus the root when the library
+       was empty: the root is never "created", yet restoring into an empty data root
+       cannot put top-level items in order without it — and an empty library is exactly
+       the case where none of the user's own structure can be disturbed. */
+    if (meta) {
+      const targets = new Set(created);
+      if (wasEmpty) targets.add('');
+      const orderFor = new Map();
+      meta.folders.forEach((f) => { const p = safeSidecarPath(f.path); if (p && f.order) orderFor.set(p, f.order); });
+      if (meta.rootOrder) orderFor.set('', meta.rootOrder);
+      // A folder that gained a created SUB-folder carries prependOrder's reverse-creation
+      // artifact in its .order.json, so it needs clearing even with no recorded order.
+      const gainedSubfolder = new Set();
+      created.forEach((p) => gainedSubfolder.add(p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : ''));
+      for (const target of targets) {
+        // Recorded order ⇒ restore it. No recorded order but a created sub-folder ⇒
+        // send [], which is behaviourally identical to no .order.json at all (pinned in
+        // tests-api.sh) and clears the artifact. Otherwise send NOTHING — so a leaf
+        // folder holding only pages gains no .order.json whatsoever (create_page never
+        // prependOrders, so there is nothing there to clear).
+        let order = null;
+        if (orderFor.has(target)) order = orderFor.get(target);
+        else if (gainedSubfolder.has(target)) order = [];
+        else continue;
+        const res2 = await api('reorder', { parent: target, order });
+        if (res2 && res2.error) shapeFailed++; else layoutOps++;  // {ok:true,offline:true} is not a failure
+      }
+      for (const key of Object.keys(meta.colSort)) {
+        if (!targets.has(key)) continue;
+        const res2 = await api('set_col_sort', { parent: key, field: meta.colSort[key].field, dir: meta.colSort[key].dir });
+        if (res2 && res2.error) shapeFailed++; else layoutOps++;
+      }
+
+      /* ---- Phase 5 — favourites -------------------------------------------------
+         MERGED (union) into favorites, never replaced — import is a merge tool — and
+         filtered to pages actually in this bundle, so a restore can't resurrect stars
+         for pages that do not exist. */
+      let starred = 0;
+      const bundleKeys = new Set(Object.keys(items));
+      meta.favorites.forEach((p) => { if (bundleKeys.has(p) && !favorites.has(p)) { favorites.add(p); starred++; } });
+      if (starred) saveFavorites();
+    }
+
+    /* ---- Phase 6 — refresh and report -------------------------------------------
+       loadTree() re-reads the whole tree, which is the refresh-after-bulk-mutation
+       obligation. No open tab's currentPageData is touched by the layout phase (it
+       writes directory metadata only — .project/.order.json/.colsort.json), so the
+       tag-manager-style open-tab reconciliation is deliberately NOT needed here. */
     await loadTree();
-    // Name what a bundle didn't carry, so a restored library reading as plain folders
-    // with no history is understood as the bundle's scope rather than a failed restore.
-    // Bundle-only and only when something actually landed: a single-page import (This
-    // page → JSON) has no library shape to lose, and "0 pages" is a different message.
-    const note = (isBundle && n) ? ' — ' + BUNDLE_SCOPE_SHORT + '.' : '';
-    toast('Imported ' + n + ' page' + (n === 1 ? '' : 's') + (failed ? ', ' + failed + ' failed' : '') + note);
+    // Name what a bundle did and did not carry, so a restored library is understood as
+    // the bundle's scope rather than a failed restore. Bundle-only and only when
+    // something actually landed: a single-page import (This page → JSON) has no library
+    // shape to lose, and "0 pages" is a different message.
+    let msg = 'Imported ' + n + ' page' + (n === 1 ? '' : 's') + (failed ? ', ' + failed + ' failed' : '');
+    if (meta) {
+      msg += ' · restored ' + created.size + ' folder' + (created.size === 1 ? '' : 's')
+           + ', ' + layoutOps + ' layout setting' + (layoutOps === 1 ? '' : 's');
+      const bad = shapeFailed + folderFailed;
+      if (bad) msg += ', ' + bad + ' shape item' + (bad === 1 ? '' : 's') + ' failed';
+      // The honesty obligation of "layout applies only to folders this import created":
+      // this clause is what tells a merging user WHY their sidebar did not change.
+      if (shapeSkipped) msg += ' · ' + shapeSkipped + ' existing folder' + (shapeSkipped === 1 ? '' : 's') + ' left as-is';
+    } else if (hasSidecar) {
+      msg += ' · library shape could not be read';
+    }
+    const note = (isBundle && n) ? ' — ' + (meta ? BUNDLE_SCOPE_SHORT_SHAPE : BUNDLE_SCOPE_SHORT) + '.' : '';
+    toast(msg + note);
   };
   inp.click();
 }

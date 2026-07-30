@@ -35,8 +35,22 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
   the preview keeps one variant (preferring the element's own `src`, then `1x`/the smallest) and says
   which ones it dropped. **All uploaded variants are still stored and still listed** — the collapse
   only affects what the preview renders.
+- **A JSON backup now restores your library's shape, not just its pages.** `Export ▸ All pages →
+  JSON` writes the shape alongside the page content: which folders are **projects** (including
+  projects nested inside projects), the **manual order** you arranged by dragging, per-column
+  **sort** preferences, and your **favourites**. Importing into an empty library rebuilds all of it —
+  no manual repair. Trash and version history are still not included, and the export and import
+  messages say exactly that.
+- **A JSON backup no longer loses empty folders.** The bundle used to work out folders from page
+  paths alone, so a folder with no pages under it appeared nowhere in the file and simply vanished
+  on restore. Every folder is now listed explicitly.
 
 ### Changed
+- **Importing into a library you already have leaves it alone.** Layout is applied only to folders
+  the import itself creates: an existing folder keeps its order, its column sort and its
+  project marker, and — new — it no longer jumps to the top of its parent just because the import
+  mentioned it. The toast says how many existing folders were left as they were, so an unchanged
+  sidebar reads as intentional rather than as a failed import.
 - Converting a block **away** from an HTML project now asks first when the project holds other
   files, naming them, and reminds you the change can be undone from page History.
 - **Uploading into an HTML project keeps everything.** A second, non-replacing `Upload…` now merges:

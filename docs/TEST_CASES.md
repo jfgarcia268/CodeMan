@@ -772,7 +772,50 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   modal), a **single-page** import toasts a bare `Imported 1 page`, and a bundle that imported
   nothing keeps its `Imported 0 pages, M failed` wording. Mobile (375px): the toast wraps inside the
   viewport (it is `max-width`-capped) and the modal fits. **[auto: tests.html export scope-note +
-  import caveat (bundle · single page · zero pages)]**
+  import caveat (bundle · single page · zero pages)]** *(The bundle now also carries the library's
+  shape — see TC-io-07 — so the export modal and the import toast say what it DOES carry as well as
+  what it doesn't; trash and version history remain the only omissions.)*
+- TC-io-07 (P, **disaster recovery**): **the library's SHAPE round-trips.** The bundle carries a
+  `__codeman_meta` sidecar key alongside the page keys. Build a library with ≥2 projects (one nested
+  inside the other), ≥1 folder whose children were **dragged** into a non-alphabetical order, ≥1
+  **empty** folder (no descendant pages — it appears in no page key), ≥1 active column `⇅` sort, and
+  ≥1 favourited page. **Export ▸ All pages → JSON**, then import into a **genuinely empty**
+  `CODEMAN_DATA`. Expect, with **no manual repair**: both projects are projects (`.project` present,
+  the nested one inside its parent project), the dragged order is the **user's** — not alphabetical
+  and not `prependOrder`'s reverse-creation artifact — the empty folder exists, `.colsort.json`
+  matches, and the starred page is starred again. Inspect `.project` / `.order.json` /
+  `.colsort.json` on disk, not just the sidebar. **[auto: tests.html round-trip through the real
+  importPages]**
+- TC-io-08 (P, **no artifact**): a folder that never had a manual order must not GAIN an
+  `.order.json` from a restore — a materialised order file changes how a *future* sibling sorts. A
+  leaf folder holding only pages ends with **no** `.order.json` at all; a folder polluted only by
+  `prependOrder` (because the import created a sub-folder inside it) ends with `[]`, which
+  `buildTree` treats as identical to no file. **[auto: tests.html + tests-api.sh `reorder {order:[]}`
+  equivalence]**
+- TC-io-09 (P/N, **compatibility, both directions**): an **old** (sidecar-less) bundle imported by
+  the new client lands every page and reports pages-only honestly (no "restored N folders" claim);
+  a **new** bundle imported by a **pre-change** client lands every page with **zero failures** — the
+  sidecar isn't page-shaped, so the existing skip drops it silently and it is never materialised as a
+  folder or page. **[auto: tests.html forward/backward compat; live: pre-change worktree]**
+- TC-io-10 (P, **merge restraint**): import into a **non-empty** library applies layout **only** to
+  folders the import itself created. An existing folder keeps its own `.order.json`, its column sort
+  and its project-vs-plain marker byte-for-byte; it does **not** jump to the top of its parent (the
+  old import called `create_folder` for every path segment of every page, and `create_folder`
+  prependOrders unconditionally); and the toast says `· N existing folder(s) left as-is` so an
+  unchanged sidebar is explained rather than looking like a failure. **[auto: tests.html merge
+  restraint]**
+- TC-io-11 (A, **offline-only desktop**): export then import end to end with no server reachable —
+  the shape restores from the IndexedDB mirror (empty folders included), and the write queue grows by
+  **fewer** ops than before the change (the per-page-segment `create_folder` storm is gone). Check the
+  badge count and that a later reconnect flushes cleanly.
+- TC-io-12 (N, **hostile sidecar**): hand-edit a bundle's `__codeman_meta` to contain a traversal
+  path (`../escape`), a dotfile path (`.history`), a non-string path, a project whose parent is a
+  **plain** folder, and a junk `colSort` field. Each is rejected **client-side** (no request is sent;
+  `create_project` is never called with a plain-folder parent — it is downgraded to `create_folder`),
+  each is **counted** in the toast's `N shape item(s) failed`, and nothing in the data root is
+  corrupted. A sidecar with the wrong `format`, a non-array `folders`, or a non-object value degrades
+  to a pages-only import reporting `· library shape could not be read` — never a throw.
+  **[auto: tests.html]**
 
 ### TC-offline — Offline + Service Worker
 - TC-offline-01 (P): SW registers (secure context incl. localhost) + precaches the shell.

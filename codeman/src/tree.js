@@ -237,6 +237,97 @@ function sortMillerChildren(children, pref) {
   return out;
 }
 
+/* ---------- buildTree's DEFAULT child order, reproduced client-side ----------
+   api.php's buildTree (:373-384) is the single authority on how a folder's children
+   are ordered: folders before pages, then the .order.json index (unlisted entries
+   last, PHP_INT_MAX), then strcasecmp(name). The library-shape sidecar
+   (buildLibraryMeta, features.js) records a folder's order ONLY where it differs from
+   that default, so a folder the user never dragged does not gain an .order.json
+   artifact on restore — which means the comparator below has to match the server's
+   EXACTLY. The direction of an error matters: a false "non-default" verdict writes an
+   order array that reproduces the same visible order (harmless), while a false
+   "default" verdict DROPS the user's manual order (data loss). Every tier exists to
+   make the second impossible. The two comparators live in different languages and
+   cannot call each other, so they are pinned to one shared hard-coded oracle asserted
+   independently in tests.html AND tests-api.sh (plus a CI grep that the oracle string
+   appears in both). */
+
+// The order KEY buildTree matches on (api.php:378-379): a folder's name, or
+// "<page>.json" for a page.
+function orderKey(n) {
+  if (!n) return '';
+  return n.type === 'folder' ? String(n.name || '') : String(n.name || '') + '.json';
+}
+
+// PHP's strcasecmp folds ASCII A-Z only (locale-independent since PHP 8.2).
+// JS toLowerCase() folds UNICODE too — 'İ' → 'i̇', 'Σ' → 'σ' — which would diverge
+// from the server on exactly the names that are hardest to notice. ASCII only.
+function asciiFold(s) {
+  return String(s == null ? '' : s).replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
+}
+
+// Lexicographic compare of two UTF-8 byte arrays (shorter-is-less on a prefix) —
+// what PHP's byte-wise strcasecmp/strcmp do. JS string '<' is UTF-16 CODE-UNIT
+// order, which differs from byte order for supplementary-plane characters, so the
+// bytes are compared explicitly rather than the strings.
+function cmpUtf8(ba, bb) {
+  const n = Math.min(ba.length, bb.length);
+  for (let i = 0; i < n; i++) if (ba[i] !== bb[i]) return ba[i] < bb[i] ? -1 : 1;
+  return ba.length === bb.length ? 0 : (ba.length < bb.length ? -1 : 1);
+}
+
+// Decorate a child once so TextEncoder runs O(n), not O(n log n).
+// t: type tier (folders first) · f: ASCII-folded name bytes (= strcasecmp) ·
+// r: raw name bytes (= scandir's SCANDIR_SORT_ASCENDING, which PHP 8's STABLE usort
+// preserves for a strcasecmp tie) · i: original index, so the sort is a total order.
+// Tier 3 only fires for two siblings differing solely in case — impossible on a
+// case-insensitive volume (macOS/APFS) and unspecified on PHP < 8.0's unstable usort;
+// it is here to make the JS side total, not to chase that case.
+function decorateChild(n, i) {
+  const enc = new TextEncoder();
+  const name = String((n && n.name) || '');
+  return { n, i, t: n && n.type === 'folder' ? 0 : 1, f: enc.encode(asciiFold(name)), r: enc.encode(name) };
+}
+function compareDecorated(a, b) {
+  return (a.t - b.t) || cmpUtf8(a.f, b.f) || cmpUtf8(a.r, b.r) || (a.i - b.i);
+}
+
+// PURE. The order keys a folder's children would have with NO .order.json at all.
+function defaultChildOrder(children) {
+  return (children || []).map(decorateChild).sort(compareDecorated).map((d) => orderKey(d.n));
+}
+
+// PURE. The order keys the children are ACTUALLY in (treeData order = the server's
+// effective order — verified live: it is the persisted order, not the Miller view).
+function childOrderKeys(children) {
+  return (children || []).map(orderKey);
+}
+
+// PURE. True when the children are already in buildTree's default order, i.e. this
+// folder needs no `order` in the sidecar and no .order.json on restore.
+function isDefaultChildOrder(children) {
+  const a = childOrderKeys(children), b = defaultChildOrder(children);
+  return a.length === b.length && a.every((k, i) => k === b[i]);
+}
+
+// Sort a cached folder's children IN PLACE exactly as buildTree does for a given
+// .order.json array: type tier first, then the order index with unlisted entries LAST
+// (PHP_INT_MAX), then the default order. Shared with offline.js's cached `reorder` so
+// an offline reorder — including the `order: []` "back to default" signal a sidecar
+// import sends — means the same thing locally as on the server.
+function sortChildrenLikeBuildTree(list, order) {
+  const idx = new Map();
+  (order || []).forEach((k, i) => { if (!idx.has(k)) idx.set(k, i); });
+  const dec = (list || []).map((n, i) => {
+    const d = decorateChild(n, i);
+    d.o = idx.has(orderKey(n)) ? idx.get(orderKey(n)) : Infinity;
+    return d;
+  });
+  dec.sort((a, b) => (a.t - b.t) || (a.o === b.o ? 0 : a.o < b.o ? -1 : 1) || compareDecorated(a, b));
+  dec.forEach((d, i) => { list[i] = d.n; });
+  return list;
+}
+
 // Persist a column's sort choice (field='manual' clears it → back to default order).
 // Optimistic: update the in-memory map + re-render now, then write to the server.
 function setColSort(parentPath, field, dir) {

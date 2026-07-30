@@ -767,8 +767,13 @@ async function mutateTreeCache(action, body) {
     await rekeyCachedPaths(pairs);
   } else if (action === 'reorder') {
     const list = childrenOf(body.parent || ''); if (!list || !Array.isArray(body.order)) return;
-    const key = (n) => n.type === 'folder' ? n.name : n.name + '.json';
-    list.sort((a, b) => body.order.indexOf(key(a)) - body.order.indexOf(key(b)));
+    // Route through the SAME comparator the server uses (tree.js). The old
+    // indexOf-difference sort modelled neither of buildTree's outer tiers: no
+    // folders-before-pages, and an entry absent from `order` scored indexOf === -1 so
+    // it sorted FIRST where the server sorts it LAST. Latent while every reorder came
+    // from a drag (which always sends the full list) — load-bearing now that a
+    // library-shape import sends `order: []` to mean "back to the default order".
+    sortChildrenLikeBuildTree(list, body.order);
   }
   await kvSet('tree', tree);
   // In-place mutation above → route through setTreeData so the folder-aggregate memos

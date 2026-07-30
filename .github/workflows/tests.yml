@@ -210,6 +210,35 @@ jobs:
             echo 'afterEditSession calls scheduleSave() — that re-marks the page dirty. Arm saveTimer directly.'
             exit 1
           fi
+      - name: the default-child-order oracle is identical in both suites
+        run: |
+          # tree.js's defaultChildOrder must reproduce api.php buildTree's fallback
+          # ordering EXACTLY, because the library-shape export OMITS a folder's `order`
+          # whenever the two agree — so a divergence silently DROPS the user's manual
+          # order on the next restore. The two comparators are in different languages and
+          # cannot call each other, so both are pinned to ONE hard-coded oracle:
+          # tests.html asserts it against defaultChildOrder, tests-api.sh asserts it
+          # against the REAL buildTree. Editing one copy and not the other leaves BOTH
+          # suites self-consistently green — exactly the silent-drift shape this repo
+          # greps for. Extracted from each file (no third copy to drift) and compared.
+          html_oracle=$(sed -n "s/.*SORT_ORACLE_JSON = '\(.*\)';.*/\1/p" codeman/tests.html | head -1)
+          sh_oracle=$(sed -n "s/^SORT_ORACLE_JSON='\(.*\)'.*/\1/p" codeman/tests-api.sh | head -1)
+          if [ -z "$html_oracle" ]; then
+            echo 'SORT_ORACLE_JSON not found in codeman/tests.html — the comparator parity proof is gone'
+            exit 1
+          fi
+          if [ -z "$sh_oracle" ]; then
+            echo 'SORT_ORACLE_JSON not found in codeman/tests-api.sh — the comparator parity proof is gone'
+            exit 1
+          fi
+          if [ "$html_oracle" != "$sh_oracle" ]; then
+            echo 'The default-child-order oracle DIVERGED between the two suites:'
+            echo "  tests.html   : $html_oracle"
+            echo "  tests-api.sh : $sh_oracle"
+            echo 'Both must pin the same order, or defaultChildOrder can drift from buildTree unseen.'
+            exit 1
+          fi
+          echo "default-child-order oracle matches in both suites: $html_oracle"
       - name: no html-block mutation calls renderPage (it would kill the live iframe)
         run: |
           # renderPage() rewrites #page wholesale (`#page.innerHTML = ''`), which destroys a

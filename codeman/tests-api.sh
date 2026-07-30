@@ -561,6 +561,66 @@ eqs "tree returns the folder's children in the stored order" "$ordnames" "CAB"
 r=$(post reorder '{"parent":"../escape","order":["x"]}')
 has "reorder traversal parent → invalid path" "$(body "$r")" '"error":"invalid path"'
 
+# An EMPTY order array must be behaviourally identical to having no .order.json at all.
+# There is no action that DELETES an order file, so the library-shape import sends [] to
+# clear the reverse-creation artifact prependOrder leaves in a folder it created. If []
+# meant anything else, that clear would itself be a corruption.
+r=$(post reorder '{"parent":"Ord","order":[]}')
+eqs "reorder with an empty order → 200" "$(code "$r")" "200"
+eqs "…persists an empty .order.json" "$(cat "$DATA/Ord/.order.json" 2>/dev/null)" "[]"
+otree=$(curl -sG "$BASE" --data-urlencode "action=tree")
+ordnames=$(printf '%s' "$otree" | tr '{' '\n' | grep -o '"name":"[ABC]"' | sed 's/.*:"//; s/"//' | tr -d '\n')
+eqs "…and the tree comes back in the DEFAULT order (== no order file)" "$ordnames" "ABC"
+rm -f "$DATA/Ord/.order.json"
+otree=$(curl -sG "$BASE" --data-urlencode "action=tree")
+ordnames=$(printf '%s' "$otree" | tr '{' '\n' | grep -o '"name":"[ABC]"' | sed 's/.*:"//; s/"//' | tr -d '\n')
+eqs "…exactly as with NO .order.json on disk" "$ordnames" "ABC"
+
+# SERVER-BEHAVIOUR PIN: create_folder calls prependOrder UNCONDITIONALLY, so re-creating a
+# folder that already exists jumps it to the top of its parent's order. That is why the
+# client-side import SKIPS create_folder for folders it knows already exist — this pins the
+# behaviour being worked around, so a future server change is caught here rather than
+# silently making the client's skip redundant (or, worse, the wrong fix).
+post create_folder '{"name":"OrdA","parent":"Ord"}' >/dev/null
+post create_folder '{"name":"OrdB","parent":"Ord"}' >/dev/null
+has "create_folder prepends a NEW folder to its parent's order" "$(cat "$DATA/Ord/.order.json")" '["OrdB","OrdA"]'
+post create_folder '{"name":"OrdA","parent":"Ord"}' >/dev/null
+has "create_folder on an EXISTING folder still prependOrders it (the client must skip it)" \
+    "$(cat "$DATA/Ord/.order.json")" '["OrdA","OrdB"]'
+rm -rf "$DATA/Ord/OrdA" "$DATA/Ord/OrdB"; rm -f "$DATA/Ord/.order.json"
+
+# create_project under a PLAIN folder is refused (the client validates first and downgrades
+# to create_folder, so this path should never be reached from the app — pinned regardless).
+post create_folder '{"name":"PlainP","parent":""}' >/dev/null
+r=$(post create_project '{"name":"Nope","parent":"PlainP"}')
+has "create_project under a plain folder → refused" "$(body "$r")" '"error":"projects can only be created'
+test ! -e "$DATA/PlainP/Nope" && ok "…and nothing was created" || bad "create_project under a plain folder created nothing" "PlainP/Nope exists"
+
+# --- buildTree's DEFAULT child order: the cross-language comparator oracle ---------
+# tree.js's defaultChildOrder must reproduce this EXACTLY — the library-shape export omits
+# a folder's `order` whenever the two agree, so a divergence silently DROPS the user's
+# manual order on the next restore. The two comparators are in different languages and
+# cannot call each other, so both are pinned to this ONE literal, which also appears in
+# codeman/tests.html; a CI invariant fails the build if the two copies ever diverge.
+# The corpus is created DIRECTLY ON DISK (not via create_folder, whose prependOrder would
+# install an order file and defeat the point), so this is buildTree's real fallback.
+SORT_ORACLE_JSON='["10x","2x","_under","a b","a-b","a_b","Alpha","alpha2","beta","ZZ","Ångström","9lives.json","alpha.json","Beta.json","Zed.json","Émile.json"]'
+mkdir -p "$DATA/Sortcase"
+for d in "Alpha" "beta" "alpha2" "ZZ" "_under" "10x" "2x" "a b" "a-b" "a_b" "Ångström"; do mkdir -p "$DATA/Sortcase/$d"; done
+for p in "Beta" "alpha" "Zed" "Émile" "9lives"; do
+  printf '%s' '{"title":"x","sections":[]}' > "$DATA/Sortcase/$p.json"
+done
+got=$(curl -sG "$BASE" --data-urlencode "action=tree" | php -r '
+$t = json_decode(stream_get_contents(STDIN), true);
+$s = null; foreach ($t as $x) if ($x["type"] === "folder" && $x["name"] === "Sortcase") $s = $x;
+if (!$s) { echo "NO Sortcase NODE"; exit; }
+echo json_encode(array_map(function ($i) {
+  return $i["type"] === "folder" ? $i["name"] : $i["name"] . ".json";
+}, $s["children"]), JSON_UNESCAPED_UNICODE);
+')
+eqs "buildTree default order matches the shared comparator oracle" "$got" "$SORT_ORACLE_JSON"
+rm -rf "$DATA/Sortcase"
+
 # --- col_sorts / set_col_sort (per-column sort prefs, one root-level .colsort.json) --
 r=$(post set_col_sort '{"parent":"","field":"name","dir":"desc"}')
 eqs "set_col_sort root → 200" "$(code "$r")" "200"

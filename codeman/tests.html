@@ -2678,31 +2678,435 @@
       // already downloaded), not a toast.
       {
         const _api = window.api, _dl = window.download, _toast = window.toast,
-              _alert = window.showAlert, _cpp = window.collectPagePaths;
+              _alert = window.showAlert, _cpp = window.collectPagePaths, _tree = treeData;
         try {
-          const toasts = [], alerts = []; let dl = null;
+          const toasts = [], alerts = []; let dl = null, payload = null;
           window.api = async () => ({ title: 'P', sections: [], _mtime: 7 });
-          window.download = (name) => { dl = name; };
+          window.download = (name, text) => { dl = name; payload = text; };
           window.toast = (m) => toasts.push(String(m));
           window.showAlert = async (m) => { alerts.push(String(m)); };
           window.collectPagePaths = () => new Set(['A.json', 'B/C.json']);
+          setTreeData([{ type: 'page', name: 'A', path: 'A.json' },
+                       { type: 'folder', name: 'B', path: 'B', children: [{ type: 'page', name: 'C', path: 'B/C.json' }] }]);
           await exportAll();
           ta('exportAll still downloads the bundle', [dl], ['codeman-export-2-pages.json']);
           t('exactly one acknowledgement, and it is the modal', alerts.length, 1);
           t('…which announces the count', /^Exported 2 pages\./.test(alerts[0] || ''), true);
           t('…and no toast repeats an unqualified success claim',
             toasts.filter(m => /^Exported/.test(m)).length, 0);
-          for (const bit of ['project markers', 'manual folder order', 'column sort', 'trash', 'version history'])
-            t('export names what a bundle does NOT carry: ' + bit, (alerts[0] || '').includes(bit), true);
+          // The bundle now carries the library's SHAPE as well as its pages, so the note
+          // says so — and names the two things it still does NOT carry.
+          for (const bit of ['project markers', 'manual folder order', 'column sort', 'favourites'])
+            t('export names what a bundle DOES carry: ' + bit, (alerts[0] || '').includes(bit), true);
+          t('export names what it does NOT carry: trash and version history',
+            (alerts[0] || '').includes('Trash and version history are not included'), true);
           t('…while staying accurate that page CONTENT is complete',
             (alerts[0] || '').includes('Every page restores exactly as it is now'), true);
           // .modal-title is white-space:pre-line, so the note must be newline-separated
           // (a single run-on paragraph is how this gets skimmed past).
           t('the note is multi-line, which .modal-title (pre-line) renders as such',
             (alerts[0] || '').split('\n').length >= 3, true);
+          // …and the sidecar is actually IN the downloaded file, under a non-.json key
+          // (which is what makes an old client skip it without counting a failure).
+          const shipped = JSON.parse(payload || '{}');
+          t('the bundle carries the library-shape sidecar', !!shipped.__codeman_meta, true);
+          t('…self-identifying by format, so import never has to sniff a version',
+            shipped.__codeman_meta && shipped.__codeman_meta.format, 'codeman-library');
+          t('…under a key that is NOT a page key', '__codeman_meta'.endsWith('.json'), false);
+          ta('…alongside every page key, unchanged', Object.keys(shipped).sort(),
+             ['A.json', 'B/C.json', '__codeman_meta']);
+          // A sidecar failure must never cost the user their pages — the pages are the
+          // irreplaceable half. Force the builder to fail and the bundle still ships.
+          const _blm = window.buildLibraryMeta;
+          try {
+            window.buildLibraryMeta = () => { throw new Error('boom'); };
+            dl = null; payload = null; alerts.length = 0;
+            await exportAll();
+            ta('a sidecar failure still downloads the pages', [dl], ['codeman-export-2-pages.json']);
+            t('…with no sidecar key', JSON.parse(payload || '{}').__codeman_meta === undefined, true);
+            t('…and the note says the shape is missing, not that pages are',
+              (alerts[0] || '').includes("library's shape could not be read"), true);
+          } finally { window.buildLibraryMeta = _blm; }
         } finally {
           window.api = _api; window.download = _dl; window.toast = _toast;
-          window.showAlert = _alert; window.collectPagePaths = _cpp;
+          window.showAlert = _alert; window.collectPagePaths = _cpp; setTreeData(_tree);
+        }
+      }
+
+      /* ---- The library-shape sidecar: comparator, builder, reader, importer ------------
+         The JSON bundle is the app's only self-service backup and it used to discard the
+         library's SHAPE — which folders are projects, the manual child order the user
+         arranged by dragging, per-column sort, favourites — and to drop EMPTY folders
+         entirely (it derived folders from page paths, so a folder with no descendant page
+         appeared in no bundle key). All of it silent, and one (order) actively corrupting:
+         a restore replaced the user's order with a confident, deterministic, wrong one. */
+      {
+        /* --- the cross-language comparator parity proof ---------------------------------
+           defaultChildOrder (tree.js) must reproduce api.php buildTree's fallback ordering
+           EXACTLY, because the export omits a folder's `order` whenever the two agree. A
+           false "non-default" verdict is harmless (it writes an order that reproduces the
+           same visible order); a false "default" verdict DROPS the user's manual order.
+           The two comparators are in different languages and cannot call each other, so
+           both are pinned to ONE hard-coded oracle: this exact literal also appears in
+           tests-api.sh, where it is asserted against the REAL buildTree over the same names
+           created directly on disk — and a CI invariant fails the build if the two copies
+           ever diverge (editing one alone leaves both suites self-consistently green).
+           Corpus notes: ZZ's position alone discriminates case-insensitive folding from
+           case-sensitive byte order; Ångström/Émile exercise the non-ASCII byte path; 10x
+           vs 2x exercises digit ordering; the folder/page mix exercises the type tier. */
+        const SORT_ORACLE_JSON = '["10x","2x","_under","a b","a-b","a_b","Alpha","alpha2","beta","ZZ","Ångström","9lives.json","alpha.json","Beta.json","Zed.json","Émile.json"]';
+        const SORT_ORACLE = JSON.parse(SORT_ORACLE_JSON);
+        const corpus = []
+          .concat(['Alpha', 'beta', 'alpha2', 'ZZ', '_under', '10x', '2x', 'a b', 'a-b', 'a_b', 'Ångström']
+            .map(name => ({ type: 'folder', name, path: name })))
+          .concat(['Beta', 'alpha', 'Zed', 'Émile', '9lives']
+            .map(name => ({ type: 'page', name, path: name + '.json' })));
+        ta('defaultChildOrder reproduces buildTree exactly (the shared oracle)',
+           defaultChildOrder(corpus), SORT_ORACLE);
+
+        t('orderKey: a folder is its bare name', orderKey({ type: 'folder', name: 'Work' }), 'Work');
+        t('orderKey: a page carries the .json suffix buildTree matches on',
+          orderKey({ type: 'page', name: 'Work' }), 'Work.json');
+        // PHP's strcasecmp folds ASCII only; JS toLowerCase() folds Unicode too, which is
+        // the silent divergence this exists to prevent.
+        t('asciiFold folds A-Z', asciiFold('AbC'), 'abc');
+        t('asciiFold leaves the dotted capital I alone (toLowerCase would not)',
+          asciiFold('İ'), 'İ');
+        t('asciiFold leaves capital sigma alone (toLowerCase would not)', asciiFold('Σ'), 'Σ');
+        const enc = new TextEncoder();
+        t('cmpUtf8: a prefix sorts first', cmpUtf8(enc.encode('alpha'), enc.encode('alpha2')), -1);
+        t('cmpUtf8: equal bytes compare equal', cmpUtf8(enc.encode('a b'), enc.encode('a b')), 0);
+        t('cmpUtf8 is BYTE order, so a multi-byte char sorts after every ASCII one',
+          cmpUtf8(enc.encode('Ångström'), enc.encode('zz')), 1);
+        ta('defaultChildOrder of an empty list', defaultChildOrder([]), []);
+        ta('defaultChildOrder of a single child', defaultChildOrder([{ type: 'page', name: 'X' }]), ['X.json']);
+        ta('defaultChildOrder of folders only',
+           defaultChildOrder([{ type: 'folder', name: 'b' }, { type: 'folder', name: 'A' }]), ['A', 'b']);
+        ta('defaultChildOrder of pages only',
+           defaultChildOrder([{ type: 'page', name: 'b' }, { type: 'page', name: 'A' }]), ['A.json', 'b.json']);
+        // A page can never precede a folder, whatever the order file says.
+        t('isDefaultChildOrder: alphabetical, folders first → default',
+          isDefaultChildOrder([{ type: 'folder', name: 'A' }, { type: 'page', name: 'B' }]), true);
+        t('isDefaultChildOrder: a dragged (non-alphabetical) order → NOT default',
+          isDefaultChildOrder([{ type: 'page', name: 'B' }, { type: 'page', name: 'A' }]), false);
+        t('isDefaultChildOrder: a page dragged above a folder → NOT default',
+          isDefaultChildOrder([{ type: 'page', name: 'A' }, { type: 'folder', name: 'B' }]), false);
+        t('isDefaultChildOrder: nothing to order → default', isDefaultChildOrder([]), true);
+
+        /* --- F4: the offline cached reorder must model buildTree too --------------------
+           mutateTreeCache sorted by `body.order.indexOf(key) - indexOf(key)`, which models
+           NEITHER outer tier: no folders-before-pages, and an entry absent from `order`
+           scored -1 so it sorted FIRST where the server sorts it LAST. Latent while every
+           reorder came from a drag (always the full list) — load-bearing now that a
+           sidecar import sends a partial list, and `order: []` to mean "back to default". */
+        const cached = [{ type: 'page', name: 'zeta', path: 'F/zeta.json' },
+                        { type: 'folder', name: 'Sub', path: 'F/Sub' },
+                        { type: 'page', name: 'alpha', path: 'F/alpha.json' }];
+        ta('a PARTIAL order puts unlisted entries LAST and folders first (as buildTree does)',
+           sortChildrenLikeBuildTree(cached.slice(), ['zeta.json']).map(orderKey),
+           ['Sub', 'zeta.json', 'alpha.json']);
+        ta('order:[] is the DEFAULT order, not an arbitrary one',
+           sortChildrenLikeBuildTree(cached.slice(), []).map(orderKey),
+           ['Sub', 'alpha.json', 'zeta.json']);
+        // …and the same, driven through the REAL offline caller (coverage of a pure
+        // helper is not coverage of its wiring — that lesson is in CLAUDE.md).
+        {
+          const _rt = window.renderTree, _tree0 = treeData, kvBefore = await kvGet('tree');
+          try {
+            window.renderTree = () => {};
+            await kvSet('tree', [{ type: 'folder', name: 'F', path: 'F', children: cached.map(n => Object.assign({}, n)) }]);
+            await mutateTreeCache('reorder', { parent: 'F', order: ['zeta.json'] });
+            const after = (await kvGet('tree'))[0].children.map(orderKey);
+            ta('mutateTreeCache sorts the cached tree exactly as buildTree would',
+               after, ['Sub', 'zeta.json', 'alpha.json']);
+          } finally {
+            window.renderTree = _rt;
+            if (kvBefore === undefined) await kvDel('tree'); else await kvSet('tree', kvBefore);
+            setTreeData(_tree0);
+          }
+        }
+
+        /* --- safeSidecarPath: the client-side guard ------------------------------------
+           A bundle is untrusted input the user may have received from someone else. This
+           mirrors safeName per segment so the server's safeName/safePath rejections are
+           never exercised as an error path. */
+        t('safeSidecarPath accepts a plain multi-word nested path',
+          safeSidecarPath('QA Kinds/Deep One'), 'QA Kinds/Deep One');
+        t('safeSidecarPath trims edge slashes', safeSidecarPath('/Work/'), 'Work');
+        t('safeSidecarPath rejects ..', safeSidecarPath('Work/../../etc'), null);
+        t('safeSidecarPath rejects .', safeSidecarPath('Work/./x'), null);
+        t('safeSidecarPath rejects a dotfile segment', safeSidecarPath('Work/.history'), null);
+        t('safeSidecarPath rejects a leading-dot root', safeSidecarPath('.trash'), null);
+        t('safeSidecarPath rejects an empty segment', safeSidecarPath('Work//x'), null);
+        t('safeSidecarPath rejects a backslash', safeSidecarPath('Work\\x'), null);
+        t('safeSidecarPath rejects the empty path', safeSidecarPath(''), null);
+        t('safeSidecarPath rejects a non-string', safeSidecarPath(42), null);
+        t('safeSidecarPath rejects null', safeSidecarPath(null), null);
+
+        /* --- buildLibraryMeta: PURE, zero network I/O ----------------------------------
+           Everything it needs is already in memory at export time: treeData carries
+           `project` per folder and arrives in the server's PERSISTED order (verified live
+           against an active Miller column sort — treeData is not the sorted view). */
+        const lib = [
+          { type: 'folder', name: 'Work', path: 'Work', project: true, children: [
+            { type: 'folder', name: 'Salesforce', path: 'Work/Salesforce', project: true, children: [
+              { type: 'folder', name: 'Apex', path: 'Work/Salesforce/Apex', children: [] },  // EMPTY: in no page key
+              { type: 'page', name: 'Runbook', path: 'Work/Salesforce/Runbook.json' },
+              { type: 'page', name: 'Notes', path: 'Work/Salesforce/Notes.json' },            // dragged: Notes after Runbook
+            ] },
+          ] },
+          { type: 'folder', name: 'Personal', path: 'Personal', children: [
+            { type: 'page', name: 'Trip', path: 'Personal/Trip.json' },
+          ] },
+          { type: 'page', name: 'Scratch', path: 'Scratch.json' },
+        ];
+        const libColSort = { '': { field: 'kind', dir: 'asc' }, 'Work': { field: 'name', dir: 'desc' },
+                             'Ghost': { field: 'name', dir: 'asc' },                 // folder no longer exists
+                             'Work/Salesforce': { field: 'bogus', dir: 'asc' } };    // not in the field allowlist
+        const libFavs = new Set(['Work/Salesforce/Runbook.json', 'Nope.json']);
+        const meta = buildLibraryMeta(lib, libColSort, libFavs, '9.9.9', '2026-07-30T00:00:00.000Z');
+        t('buildLibraryMeta stamps a self-identifying format', meta.format, 'codeman-library');
+        t('…and a schema version', meta.v, 1);
+        t('…and the app version, as provenance', meta.app, '9.9.9');
+        ta('…and counts, for audit only (never control flow)', meta.counts, { pages: 4, folders: 4 });
+        ta('EVERY folder is enumerated — including the empty one no page path mentions',
+           meta.folders.map(f => f.path), ['Work', 'Work/Salesforce', 'Work/Salesforce/Apex', 'Personal']);
+        ta('…parents always before their children', meta.folders.map(f => f.path.split('/').length), [1, 2, 3, 1]);
+        ta('project flags are carried, and omitted when false',
+           meta.folders.map(f => f.project === true), [true, true, false, false]);
+        ta('a DRAGGED folder carries its order', meta.folders.find(f => f.path === 'Work/Salesforce').order,
+           ['Apex', 'Runbook.json', 'Notes.json']);
+        t('a DEFAULT-ordered folder carries none (no .order.json artifact on restore)',
+          meta.folders.find(f => f.path === 'Personal').order, undefined);
+        t('…nor does an empty folder', meta.folders.find(f => f.path === 'Work/Salesforce/Apex').order, undefined);
+        ta('a dragged ROOT is carried in its own field', meta.rootOrder, ['Work', 'Personal', 'Scratch.json']);
+        ta('colSort is filtered to enumerated folders and the allowlisted fields',
+           Object.keys(meta.colSort).sort(), ['', 'Work']);
+        ta('…preserving field and direction', meta.colSort['Work'], { field: 'name', dir: 'desc' });
+        ta('favourites ride in a SEPARATE client block, filtered to pages in the tree',
+           meta.client.favorites, ['Work/Salesforce/Runbook.json']);
+        t('…and recentCopies stays out', meta.client.recentCopies, undefined);
+        const defaultRoot = buildLibraryMeta(
+          [{ type: 'folder', name: 'A', path: 'A', children: [] }, { type: 'page', name: 'B', path: 'B.json' }], {}, new Set(), '', '');
+        t('a DEFAULT-ordered root omits rootOrder entirely', defaultRoot.rootOrder, undefined);
+        const emptyMeta = buildLibraryMeta([], {}, new Set(), '', '');
+        ta('an empty library still produces a valid sidecar',
+           [emptyMeta.format, emptyMeta.folders.length, emptyMeta.rootOrder], ['codeman-library', 0, undefined]);
+        t('buildLibraryMeta never throws — a hostile node degrades to null', buildLibraryMeta(7, {}, {}, '', ''), null);
+
+        /* --- readLibraryMeta: tolerant, never throws ------------------------------------ */
+        t('readLibraryMeta reads a valid sidecar', !!readLibraryMeta({ __codeman_meta: meta }), true);
+        t('…and normalises its folder entries',
+          readLibraryMeta({ __codeman_meta: meta }).folders.length, 4);
+        t('no sidecar at all → null (an old bundle imports exactly as today)',
+          readLibraryMeta({ 'A.json': { sections: [] } }), null);
+        t('wrong format → null', readLibraryMeta({ __codeman_meta: { format: 'nope', folders: [] } }), null);
+        t('folders not an array → null', readLibraryMeta({ __codeman_meta: { format: 'codeman-library', folders: 'x' } }), null);
+        t('a non-object sidecar → null', readLibraryMeta({ __codeman_meta: 'hello' }), null);
+        t('an array sidecar → null', readLibraryMeta({ __codeman_meta: [] }), null);
+        t('a null sidecar → null', readLibraryMeta({ __codeman_meta: null }), null);
+        t('a null bundle → null, no throw', readLibraryMeta(null), null);
+        // A junk folder entry survives to the import, where it is COUNTED (D-B1) rather
+        // than silently dropped here.
+        ta('a junk folder entry is kept for counting, with a rejectable path',
+           readLibraryMeta({ __codeman_meta: { format: 'codeman-library', folders: [7] } }).folders,
+           [{ path: null, project: false, order: null }]);
+        ta('a junk colsort field is dropped',
+           Object.keys(readLibraryMeta({ __codeman_meta: { format: 'codeman-library', folders: [], colSort: { X: { field: 'evil' } } } }).colSort), []);
+
+        /* --- AC#5: forward compatibility, by construction -------------------------------
+           A NEW bundle imported by the PRE-CHANGE client: the page loop's shape guard is
+           transcribed literally here, so this asserts the old code's behaviour, not ours. */
+        const legacySkips = v => !v || !Array.isArray(v.sections);
+        const newBundle = { 'A.json': { title: 'A', sections: [] }, __codeman_meta: meta };
+        t('an OLD client skips the sidecar (no sections array) without counting a failure',
+          legacySkips(newBundle.__codeman_meta), true);
+        t('…while still importing every real page', legacySkips(newBundle['A.json']), false);
+        t('…and the key can never be mistaken for a page', '__codeman_meta'.endsWith('.json'), false);
+
+        /* --- wiring: the REAL importPages against a server model ------------------------ */
+        const _create = document.createElement, _click = HTMLInputElement.prototype.click,
+              _toast = window.toast, _load = window.loadTree, _api = window.api,
+              _tree = treeData, _save = window.saveFavorites, _favs = new Set(favorites);
+        try {
+          let lastInput = null; const toasts = []; let calls = [];
+          document.createElement = function (tag, ...rest) {
+            const el = _create.call(document, tag, ...rest);
+            if (String(tag).toLowerCase() === 'input') lastInput = el;
+            return el;
+          };
+          HTMLInputElement.prototype.click = function () {};
+          window.toast = (m) => { toasts.push(String(m)); };
+          window.loadTree = async () => {};
+          window.saveFavorites = () => {};
+          let dirs = new Set(['']), projects = new Set(['']);
+          // A server MODEL, not a yes-man: it enforces api.php's parent guards, incl.
+          // create_project's "root or inside another project" rule — so a client that
+          // sends an illegal create_project is caught here rather than passing silently.
+          const makeApi = (over) => async (action, body) => {
+            calls.push([action, body]);
+            if (over && over[action]) return over[action](body);
+            if (action === 'create_folder' || action === 'create_project') {
+              if (!dirs.has(body.parent)) return { error: 'parent folder does not exist' };
+              if (action === 'create_project' && body.parent !== '' && !projects.has(body.parent)) {
+                return { error: 'projects can only be created at the top level or inside another project' };
+              }
+              const p = body.parent ? body.parent + '/' + body.name : body.name;
+              dirs.add(p); if (action === 'create_project') projects.add(p);
+              return { ok: true };
+            }
+            if (action === 'create_page') return dirs.has(body.parent) ? { ok: true } : { error: 'parent folder does not exist' };
+            if (action === 'save_page') {
+              const d = body.path.includes('/') ? body.path.slice(0, body.path.lastIndexOf('/')) : '';
+              return dirs.has(d) ? { ok: true, mtime: 1 } : { error: 'parent folder does not exist' };
+            }
+            return { ok: true };
+          };
+          const runImport = async (bundle, seedTree, over) => {
+            toasts.length = 0; calls = [];
+            dirs = new Set(['']); projects = new Set(['']);
+            (seedTree || []).forEach(function seed(nodes) {
+              (Array.isArray(nodes) ? nodes : [nodes]).forEach(n => {
+                if (n.type !== 'folder') return;
+                dirs.add(n.path); if (n.project) projects.add(n.path);
+                seed(n.children || []);
+              });
+            });
+            setTreeData(seedTree || []);
+            window.api = makeApi(over);
+            importPages();
+            Object.defineProperty(lastInput, 'files', { value: [new File([JSON.stringify(bundle)], 'b.json')], configurable: true });
+            await lastInput.onchange();
+          };
+          const of = (a) => calls.filter(c => c[0] === a);
+          const pages = {
+            'Work/Salesforce/Runbook.json': { title: 'Runbook', sections: [] },
+            'Work/Salesforce/Notes.json': { title: 'Notes', sections: [] },
+            'Personal/Trip.json': { title: 'Trip', sections: [] },
+            'Scratch.json': { title: 'Scratch', sections: [] },
+          };
+          const shaped = Object.assign({}, pages, { __codeman_meta: meta });
+
+          // ---- 1. The round trip into an EMPTY library (the headline, AC#1/#2) --------
+          favorites.clear();
+          await runImport(shaped, []);
+          ta('folders are created parent-first, each with the right KIND',
+             calls.filter(c => /^create_(folder|project)$/.test(c[0]))
+               .map(c => c[0].replace('create_', '') + ' ' + (c[1].parent ? c[1].parent + '/' : '') + c[1].name),
+             ['project Work', 'folder Personal', 'project Work/Salesforce', 'folder Work/Salesforce/Apex']);
+          t('the EMPTY folder — in no page key — is created', dirs.has('Work/Salesforce/Apex'), true);
+          ta('every page still lands, at its full path',
+             of('save_page').map(c => c[1].path).sort(), Object.keys(pages).sort());
+          ta("the user's dragged orders are restored, and only those",
+             of('reorder').map(c => c[1].parent + ' → ' + JSON.stringify(c[1].order)),
+             ['Work → []',
+              'Work/Salesforce → ["Apex","Runbook.json","Notes.json"]',
+              ' → ["Work","Personal","Scratch.json"]']);
+          ta('column sorts are restored', of('set_col_sort').map(c => c[1].parent + '=' + c[1].field + '/' + c[1].dir),
+             ['=kind/asc', 'Work=name/desc']);
+          ta('favourites are restored, filtered to pages in the bundle', [...favorites], ['Work/Salesforce/Runbook.json']);
+          ta('…and the toast reports the whole restore', toasts,
+             ['Imported 4 pages · restored 4 folders, 5 layout settings — ' + BUNDLE_SCOPE_SHORT_SHAPE + '.']);
+
+          // ---- 2. No spurious .order.json (AC#3) -------------------------------------
+          // `Personal` was created and has only pages in default order: it must gain NO
+          // order file at all. (Delete the isDefaultChildOrder guard in buildLibraryMeta
+          // and this goes red — the sidecar then records an order for every folder.)
+          ta('a folder that was never dragged gets NO reorder call',
+             of('reorder').filter(c => c[1].parent === 'Personal'), []);
+          // ---- 3. …but prependOrder's artifact IS cleared ----------------------------
+          // `Work` has no recorded order, yet creating Work/Salesforce inside it left a
+          // reverse-creation order file behind. `[]` is behaviourally identical to no
+          // order file (pinned in tests-api.sh), so it clears without inventing one.
+          ta('a folder polluted only by prependOrder is reset to the DEFAULT order',
+             of('reorder').filter(c => c[1].parent === 'Work').map(c => c[1].order), [[]]);
+
+          // ---- 4. Merge restraint (decision 2, AC#10) --------------------------------
+          // Importing into a NON-empty library must not reshape what is already there.
+          const existing = [{ type: 'folder', name: 'Work', path: 'Work', project: true, children: [
+            { type: 'folder', name: 'Salesforce', path: 'Work/Salesforce', project: true, children: [] } ] }];
+          favorites.clear();
+          await runImport(shaped, existing);
+          ta('an EXISTING folder gets no create_folder — create_folder prependOrders '
+             + 'unconditionally, so re-creating it would jump it to the top of its parent',
+             calls.filter(c => /^create_(folder|project)$/.test(c[0]) && /^Work(\/|$)/.test((c[1].parent ? c[1].parent + '/' : '') + c[1].name))
+               .map(c => (c[1].parent ? c[1].parent + '/' : '') + c[1].name), ['Work/Salesforce/Apex']);
+          ta("…and its order is left alone, even though the sidecar records one",
+             of('reorder').filter(c => /^Work/.test(c[1].parent)), []);
+          ta('…as is the root, which this import did not create', of('reorder').filter(c => c[1].parent === ''), []);
+          ta('…and no column sort is applied to anything pre-existing', of('set_col_sort'), []);
+          t('…and the toast SAYS SO, so an unchanged sidebar is explained',
+            toasts[0].includes('2 existing folders left as-is'), true);
+          ta('…while the pages themselves still all import', of('save_page').map(c => c[1].path).sort(),
+             Object.keys(pages).sort());
+
+          // ---- 5. AC#9: a project may never be SENT with a plain-folder parent -------
+          // Hand-corrupted sidecar: a project nested inside a plain folder. The server
+          // guard must never be exercised as an error path — downgrade client-side.
+          const hostile = Object.assign({}, meta, { folders: [
+            { path: 'Plain' },
+            { path: 'Plain/Proj', project: true },
+          ], rootOrder: null, colSort: {}, client: { favorites: [] } });
+          await runImport({ __codeman_meta: hostile }, []);
+          ta('a project under a plain folder is created as a plain FOLDER instead',
+             calls.filter(c => /^create_(folder|project)$/.test(c[0]))
+               .map(c => c[0] + ' ' + (c[1].parent ? c[1].parent + '/' : '') + c[1].name),
+             ['create_folder Plain', 'create_folder Plain/Proj']);
+          t('…and the downgrade is REPORTED, not swallowed', toasts[0].includes('1 shape item failed'), true);
+
+          // ---- 6. Hostile paths are rejected client-side and counted -----------------
+          const traversal = Object.assign({}, meta, { folders: [
+            { path: '../escape' }, { path: '.history' }, { path: 42 }, { path: 'Fine' },
+          ], rootOrder: null, colSort: {}, client: { favorites: [] } });
+          await runImport({ __codeman_meta: traversal }, []);
+          ta('a traversal / dotfile / non-string folder path is never SENT',
+             calls.filter(c => /^create_/.test(c[0])).map(c => c[1].name), ['Fine']);
+          t('…and all three are counted', toasts[0].includes('3 shape items failed'), true);
+
+          // ---- 7. A layout failure is counted, and the pages still count -------------
+          await runImport(shaped, [], { reorder: () => ({ error: 'nope' }) });
+          t('a rejected reorder is REPORTED', toasts[0].includes('3 shape items failed'), true);
+          t('…and the pages that landed are still counted', /^Imported 4 pages/.test(toasts[0]), true);
+
+          // ---- 8. A malformed sidecar degrades to pages-only, and says so ------------
+          await runImport(Object.assign({}, pages, { __codeman_meta: { format: 'v2', folders: [] } }), []);
+          t('an unreadable sidecar says so', toasts[0].includes('library shape could not be read'), true);
+          ta('…and sends no layout calls at all', of('reorder').concat(of('set_col_sort')), []);
+          t('…while every page still imports', /^Imported 4 pages/.test(toasts[0]), true);
+          t('…under the honest pages-only caveat', toasts[0].endsWith(BUNDLE_SCOPE_SHORT + '.'), true);
+
+          // ---- 9. AC#4: an OLD, sidecar-less bundle imports exactly as today ---------
+          await runImport(pages, []);
+          ta('an old bundle sends ZERO layout calls',
+             of('reorder').concat(of('set_col_sort')).concat(of('create_project')), []);
+          ta('…and reports exactly what it did before', toasts, ['Imported 4 pages — ' + BUNDLE_SCOPE_SHORT + '.']);
+          ta('…still creating the folders the page paths imply',
+             of('create_folder').map(c => (c[1].parent ? c[1].parent + '/' : '') + c[1].name),
+             ['Work', 'Work/Salesforce', 'Personal']);
+
+          // ---- 10. A stale `known` snapshot must not lose a page ---------------------
+          // `known` comes from the pre-import tree, so another device deleting a folder
+          // meanwhile would make the import skip a create it actually needed. One rebuild
+          // + one retry; a second failure counts exactly as before.
+          let firstPage = true;
+          await runImport({ 'Gone/P.json': { sections: [] } },
+            [{ type: 'folder', name: 'Gone', path: 'Gone', children: [] }],
+            { create_page: (b) => { if (firstPage) { firstPage = false; return { error: 'parent folder does not exist' }; } return dirs.has(b.parent) ? { ok: true } : { error: 'parent folder does not exist' }; } });
+          ta('a stale snapshot is repaired by rebuilding the chain once',
+             of('create_folder').map(c => c[1].name), ['Gone']);
+          ta('…and the page lands rather than being lost', toasts, ['Imported 1 page — ' + BUNDLE_SCOPE_SHORT + '.']);
+
+          // ---- 11. Sidecar only, no pages -------------------------------------------
+          await runImport({ __codeman_meta: meta }, []);
+          t('a bundle with only a sidecar still restores the shape',
+            /^Imported 0 pages · restored 4 folders/.test(toasts[0]), true);
+          t('…and gets no page-scope caveat (0 pages is a different message)',
+            /—/.test(toasts[0]), false);
+        } finally {
+          document.createElement = _create; HTMLInputElement.prototype.click = _click;
+          window.toast = _toast; window.loadTree = _load; window.api = _api;
+          window.saveFavorites = _save; setTreeData(_tree);
+          favorites.clear(); _favs.forEach(f => favorites.add(f));
         }
       }
 
