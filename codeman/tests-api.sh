@@ -112,6 +112,27 @@ test ! -e "$DATA/no" && ok "create_folder missing parent materialised nothing" |
 r=$(post create_folder '{"name":"Deep","parent":"Box"}');          eqs "create_folder nested under an existing parent → 200" "$(code "$r")" "200"
 test -d "$DATA/Box/Deep" && ok "create_folder nested folder was created" || bad "create_folder nested folder was created" "missing"
 
+# create_folder / create_project with an OVER-LONG (>255 byte) name. safeName caps the segment
+# at the FS per-name limit; before, the name reached an UNCHECKED mkdir() that failed with a raw
+# "File name too long" PHP warning — leaked into the body (invalid JSON, no "error" key) AND still
+# ran prependOrder(), polluting the parent's .order.json with a phantom name for a dir that never
+# existed. Assert: clean JSON error, no warning leak, no dir created, no order pollution.
+LONGNAME=$(printf 'a%.0s' $(seq 1 300))
+r=$(post create_folder "{\"name\":\"$LONGNAME\",\"parent\":\"Box\"}")
+has "create_folder >255-byte name → clean JSON error" "$(body "$r")" '"error"'
+hasnt "create_folder >255-byte name → no PHP warning leaked" "$(body "$r")" "Warning"
+test ! -e "$DATA/Box/$LONGNAME" && ok "create_folder >255-byte name created no directory" || bad "create_folder >255-byte name created no directory" "dir exists"
+hasnt "create_folder >255-byte name did NOT pollute .order.json" "$(cat "$DATA/Box/.order.json" 2>/dev/null)" "aaaa"
+r=$(post create_project "{\"name\":\"$LONGNAME\",\"parent\":\"\"}")
+has "create_project >255-byte name → clean JSON error" "$(body "$r")" '"error"'
+hasnt "create_project >255-byte name → no PHP warning leaked" "$(body "$r")" "Warning"
+test ! -e "$DATA/$LONGNAME" && ok "create_project >255-byte name created no directory" || bad "create_project >255-byte name created no directory" "dir exists"
+hasnt "create_project >255-byte name did NOT pollute root .order.json" "$(cat "$DATA/.order.json" 2>/dev/null)" "aaaa"
+# A valid LONG-but-≤255 name must still succeed — don't over-reject at the boundary.
+OKNAME=$(printf 'b%.0s' $(seq 1 255))
+r=$(post create_folder "{\"name\":\"$OKNAME\",\"parent\":\"Box\"}"); eqs "create_folder 255-byte name → 200" "$(code "$r")" "200"
+test -d "$DATA/Box/$OKNAME" && ok "create_folder 255-byte name was created" || bad "create_folder 255-byte name was created" "missing"
+
 # --- safePath confinement (no traversal escapes the data root) -------------
 post save_page '{"path":"../../ESCAPE_SENTINEL.json","data":{"title":"e","sections":[]}}' >/dev/null
 hasnt "save_page traversal did not write a sibling of the data dir" "$(ls "$(dirname "$DATA")" 2>/dev/null)" "ESCAPE_SENTINEL.json"

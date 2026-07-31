@@ -84,6 +84,12 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
   Checklist blocks are unaffected — they have no Edit/Cancel and still save immediately.
 
 ### Fixed
+- **An over-long folder or project name is now rejected cleanly instead of corrupting the folder's
+  order.** Creating a folder or project with a name longer than the filesystem allows (over 255
+  bytes) used to fail silently on disk yet report success — and it added that never-created name to
+  the top of its parent's manual sort order, quietly reshuffling the sidebar. Such a name is now
+  refused with a clear error, nothing is written, and the order is left untouched; the create box in
+  the sidebar also stops you typing a name that long in the first place.
 - **Restoring a backup no longer leaves a history version that would empty the page.** After
   importing an `All pages → JSON` bundle, every restored page's History showed exactly one saved
   version — and that version was empty. Clicking **Restore** on it (the only version there, presented
@@ -210,6 +216,10 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
   change isn't mistaken for one that reached the server.
 
 ### Security
+- **An over-long folder/project name no longer leaks a server file path in the response.** The failed
+  create used to emit a raw PHP filesystem warning (which included an absolute server path) into the
+  API response body; the create is now validated up front and the warning is suppressed, so no path
+  is disclosed.
 - The HTML preview runs in an iframe with `sandbox="allow-scripts"` and **no** `allow-same-origin` —
   the previewed project gets an opaque origin, so it cannot read CodeMan's page, cookies or storage,
   and the app's Content-Security-Policy blocks it from reaching the network. `alert()`/`confirm()`

@@ -80,6 +80,13 @@ function safeName($n) {
     if ($n === '' || $n === '.' || $n === '..') return null;
     if (strpbrk($n, "/\\") !== false) return null; // no path separators
     if ($n[0] === '.') return null;                 // no hidden files
+    // A single path segment can't exceed the filesystem's per-name limit (255 bytes on
+    // ext4/APFS/most). Without this cap an over-long name reached mkdir()/file_put_contents,
+    // which failed with a raw "File name too long" PHP warning — and create_folder/
+    // create_project used to ignore mkdir's return, so they leaked that warning into the
+    // body (invalid JSON) AND prependOrder'd a phantom name for a dir that never existed.
+    // strlen() = BYTE length (multibyte names count each byte, matching the FS limit).
+    if (strlen($n) > 255) return null;
     return $n;
 }
 
@@ -792,7 +799,12 @@ switch ($action) {
         // with arbitrary nested folders; it also hid importPages' bad parent derivation, which
         // then lost pages. Reject instead of inventing structure the caller never asked for.
         if (!is_dir($parentDir)) jsonError('parent folder does not exist', 404);
-        if (!is_dir($path)) mkdir($path, 0777, true);
+        // Check mkdir's result — same discipline as create_page's write check. An unchecked
+        // mkdir() that fails (e.g. a name the FS still can't hold, permissions, disk full)
+        // emitted a raw PHP warning into the body (invalid JSON → the client false-trips
+        // offline) AND still ran prependOrder below, writing a phantom .order.json entry for
+        // a directory that never existed. @-suppress the warning; bail with clean JSON.
+        if (!is_dir($path) && !@mkdir($path, 0777, true)) jsonError('failed to create folder', 500);
         prependOrder($parentDir, $name); // new folder at top
         echo json_encode(['ok' => true]);
         break;
@@ -811,7 +823,10 @@ switch ($action) {
         if ($parent !== '' && !file_exists($parentDir . '/.project')) {
             jsonError('projects can only be created at the top level or inside another project');
         }
-        if (!is_dir($path)) mkdir($path, 0777, true);
+        // Check mkdir's result (same discipline as create_folder/create_page) — a failed,
+        // unchecked mkdir leaked a raw PHP warning into the body and still marked+prependOrder'd
+        // a project directory that never existed.
+        if (!is_dir($path) && !@mkdir($path, 0777, true)) jsonError('failed to create project', 500);
         @file_put_contents($path . '/.project', '');
         prependOrder($parentDir, $name); // new project at top of its parent
         echo json_encode(['ok' => true]);

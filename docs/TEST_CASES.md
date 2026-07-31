@@ -123,6 +123,13 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
 - TC-crud-02 (N): rejected names — `/`, `\`, `..`, leading `.` → "invalid name"; spaces allowed. **[auto: tests-api]**
 - TC-crud-03 (N): create_page/save_page with a **missing parent** → clean `404 {"error":…}`, no PHP
   warning, nothing written; valid parent → 200. **[auto: tests-api]**
+- TC-crud-03b (N): create_folder/create_project with an **over-long name (>255 bytes)** → clean
+  `{"error":…}` (no leaked PHP `mkdir(): File name too long` warning), the directory is **not**
+  created, and the parent's `.order.json` is **not** polluted with the phantom name — `safeName()`
+  caps the segment at 255 bytes AND both handlers now check `mkdir()`'s return (mirroring
+  `create_page`) so a failed create can never `prependOrder`. A valid long-but-≤255-byte name still
+  succeeds (no over-rejection at the boundary). The sidebar create input also carries `maxLength=255`.
+  **[auto: tests-api]**
 - TC-crud-04 (E): inline create — `✓`/`✕` visible; **blur cancels** (not auto-commit).
 - TC-crud-05 (A): rapid double-create / duplicate names are no-ops (create_* skip if present).
 - TC-crud-06 (P): delete is a **soft** delete — the confirm copy says it moves to Trash (restorable
@@ -551,7 +558,8 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
 - TC-html-02 (P): **folder upload** (`index.html` + `style.css` + `app.js` + a PNG) renders live in
   the sandboxed iframe: **CSS applied**, **JS interactive** (a button handler runs), **image
   visible**; a nested `assets/img/logo.png` resolves; the picker's leading root segment is stripped.
-  **[auto (helpers): tests.html stripCommonRoot/bundleHtmlProject]**
+  **[auto (helpers): tests.html stripCommonRoot/bundleHtmlProject; orchestrator: tests.html
+  commitHtmlUpload under-cap strips the common root off the entry AND files]**
 - TC-html-03 (P): **drag-drop** a folder onto the block imports it identically (`.drop-active`
   outline while hovering). A folder with **>100 entries imports completely** (`readEntries` is paged
   — it must be looped until it returns empty).
@@ -563,7 +571,10 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   untouched** (candidate built and checked BEFORE anything is assigned). The modal is an
   **acknowledgement** (`showAlert`) with a SINGLE "OK" button — there is no decision to make, so no
   dead "Cancel" beside it. Enter / Escape / backdrop-click all dismiss it and import nothing.
-  **[auto: tests.html htmlCapCheck]**
+  **[auto: tests.html commitHtmlUpload over-cap byte-identical]** — the "block left completely
+  untouched" invariant is asserted on the REAL orchestrator (`JSON.stringify(block)` pre === post, no
+  `onDone`); `htmlCapCheck` alone only decides ok/not-ok and never exercises the atomicity of the
+  assignment, which is why the old annotation over-claimed.
 - TC-html-06 (P): a >256 KB project shows the **soft-warn** confirm explaining the ×21 history
   growth; proceeding imports normally, cancelling imports nothing.
 - TC-html-07 (A): **a broken project never renders blank** — a missing entry, an unresolvable
@@ -1114,6 +1125,13 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   the `NS + \x1F` prefix and two servers never collide on the same logical key. The dead-letter cascade
   helpers (`dlCreatedPath`/`dlCascadeParent`) and the pre-mutation re-key capture (`collectRepathPairs`)
   are covered here too. **[auto: tests.html computeNS/nsHash/kvKey/pageKey + dl cascade + collectRepathPairs]**
+- TC-transport-06 (A): **offline rename/move re-key APPLIES to cached content + history.** After an
+  offline rename/move, `mutateTreeCache` feeds `collectRepathPairs` (compute) into `rekeyCachedPaths`
+  (apply): the cached page BODY and its per-page `history:<path>` log both move from the old key to
+  the new one and the old keys are deleted — so opening the renamed/moved page offline shows its
+  content and keeps its History instead of a blank page under a name that no longer exists. Driven
+  through the real pair-then-apply pipeline over a folder node. The compute step was covered
+  (TC-transport-05); the apply step had none. **[auto: tests.html rekeyCachedPaths]**
 
 ### TC-colsort — Per-column sort (double layout)
 - TC-colsort-01 (P): Name/Code-type/Kind × asc/desc + Manual order; persists in `.colsort.json`;

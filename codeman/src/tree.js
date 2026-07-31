@@ -1317,6 +1317,7 @@ function buildPendingRow() {
 
   const input = document.createElement('input');
   input.className = 'pending-input';
+  input.maxLength = 255; // FS per-name byte limit; safeName() rejects >255 server-side too (defense in depth)
   input.placeholder = isProject ? 'New project name' : kind === 'folder' ? 'New folder name' : 'New page name';
   let done = false;
   const finish = (commit) => {

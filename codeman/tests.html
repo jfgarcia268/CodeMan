@@ -1606,6 +1606,34 @@
         await kvDel('history:' + HA); await kvDel('history:' + HB);
       }
 
+      // ---- offline rename/move re-key of cached content + local history (GAP-2) -------
+      // collectRepathPairs (tested) computes the {old,neu} pairs; rekeyCachedPaths APPLIES
+      // them — the mutateTreeCache rename/move branches feed one into the other. The apply
+      // step had ZERO coverage, yet it's what moves the cached page BODY and its per-page
+      // history:<path> log onto the new key (old key deleted). Without it an offline
+      // rename shows a blank page under a name that no longer exists AND loses its History.
+      // Drive the real pair-then-apply pipeline over a folder node (mirrors production).
+      {
+        const OF = RUN + 'rk_old', NF = RUN + 'rk_new';
+        const OP = OF + '/Doc.json', NP = NF + '/Doc.json';
+        await pageDel(NP); await kvDel('history:' + NP);
+        await pageSet(OP, { title: 'Doc', sections: [{ title: 'body-v1' }] });
+        await kvSet('history:' + OP, [{ ts: 7, size: 3, data: { title: 'Doc', sections: [{ title: 'body-v0' }] } }]);
+        const rkNode = { type: 'folder', name: 'rk_old', path: OF, children: [
+          { type: 'page', name: 'Doc', path: OP },
+        ] };
+        const rkPairs = collectRepathPairs(rkNode, NF);   // [{OF→NF}, {OP→NP}]
+        await rekeyCachedPaths(rkPairs);
+        const rkPage = await pageGet(NP), rkHist = await kvGet('history:' + NP);
+        // Guarded reads (&& ...) so a SKIPPED rekey fails cleanly here rather than throwing
+        // and aborting the whole async block.
+        ta('rekey moves the cached page body to the new key', rkPage && rkPage.sections[0].title, 'body-v1');
+        ta('rekey drops the old cached page key', await pageGet(OP), undefined);
+        ta('rekey moves the per-page history log to the new key', rkHist && rkHist[0].data.sections[0].title, 'body-v0');
+        ta('rekey drops the old history key', await kvGet('history:' + OP), undefined);
+        await pageDel(NP); await kvDel('history:' + NP);
+      }
+
       // flushQueue replay: FIFO drain, conflict → forced resend, network failure
       // retains the queue. apiFetch/renderTree/toast/updateOfflineBadge/setOffline
       // are swapped for stubs and restored in `finally` (all are rebindable
@@ -2510,6 +2538,59 @@
           window.api = _api; searchQuery = _sq; deepSearch = _ds;
           deepMatches = _dm; deepMatchTotal = _dt;
           renderTree();
+        }
+      }
+
+      // ---- commitHtmlUpload: cap-atomicity + upload-time stripCommonRoot (GAP-1) -------
+      // The pure sub-helpers (htmlCapCheck/stripCommonRoot/bundleHtmlProject/resolveHtmlEntry)
+      // were covered, but the function that ORCHESTRATES them had none — so the two traps
+      // that live HERE were undefended: (1) the WHOLE candidate is built + cap-checked
+      // BEFORE any assignment, so a rejected over-cap upload leaves the block byte-identical;
+      // (2) the common upload root is stripped at commit time. `picked` is the normalized
+      // [{path,file}] descriptor list (file = a File-like with .text()), so this is
+      // unit-testable off the File API. toast/showAlert/showConfirm/scheduleSave stubbed.
+      {
+        const _toast = window.toast, _alert = window.showAlert, _confirm = window.showConfirm,
+              _sched = window.scheduleSave, _cpd = currentPageData;
+        const tf = t => ({ text: async () => t });             // text File-like descriptor
+        try {
+          window.toast = () => {}; window.scheduleSave = () => {};
+          window.showAlert = async () => {}; window.showConfirm = async () => true;
+          currentPageData = null;                              // silence the size warning
+
+          // (a) OVER-CAP → the block is left byte-identical. A pre-populated block + a merge
+          // upload whose single file blows the 512 KB per-file cap: htmlCapCheck fails,
+          // showAlert fires, and NOTHING is assigned. A pre-call snapshot === post-call
+          // snapshot is the atomicity contract (an assign-before-cap-check regression fails).
+          const capBlk = { html: true, type: 'html', entry: 'index.html',
+                           code: '<html><body>orig</body></html>',
+                           files: [{ p: 'a.css', t: 'body{}' }], htmlH: 300 };
+          const before = JSON.stringify(capBlk);
+          let capDone = false;
+          await commitHtmlUpload(capBlk,
+            [{ path: 'up/index.html', file: tf('<html>NEW</html>') },
+             { path: 'up/huge.js', file: tf('x'.repeat(600000)) }],   // 600 KB > 512 KB/file
+            {}, () => { capDone = true; });
+          ta('commitHtmlUpload over-cap leaves the block byte-identical', JSON.stringify(capBlk), before);
+          ta('commitHtmlUpload over-cap does not call onDone', capDone, false);
+
+          // (b) UNDER-CAP → entry/files populated with the common root stripped. The picked
+          // paths share a `up/` root; the stored entry + file paths must NOT carry it (a
+          // dropped stripCommonRoot leaves the entry as 'up/index.html' and fails here).
+          const okBlk = { html: true, type: 'html', entry: '', code: '', files: [] };
+          let okDone = false;
+          await commitHtmlUpload(okBlk,
+            [{ path: 'up/index.html', file: tf('<h1>hi</h1>') },
+             { path: 'up/style.css', file: tf('h1{color:red}') }],
+            { replace: true }, () => { okDone = true; });
+          ta('commitHtmlUpload under-cap strips the common root off the entry', okBlk.entry, 'index.html');
+          ta('commitHtmlUpload under-cap stores the entry source in code', okBlk.code, '<h1>hi</h1>');
+          ta('commitHtmlUpload under-cap strips the common root off files', okBlk.files.map(f => f.p), ['style.css']);
+          ta('commitHtmlUpload under-cap keeps the non-entry file body', okBlk.files.map(f => f.t), ['h1{color:red}']);
+          ta('commitHtmlUpload under-cap calls onDone', okDone, true);
+        } finally {
+          window.toast = _toast; window.showAlert = _alert; window.showConfirm = _confirm;
+          window.scheduleSave = _sched; currentPageData = _cpd;
         }
       }
 
