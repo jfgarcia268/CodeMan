@@ -51,6 +51,12 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
   project marker, and — new — it no longer jumps to the top of its parent just because the import
   mentioned it. The toast says how many existing folders were left as they were, so an unchanged
   sidebar reads as intentional rather than as a failed import.
+- **An import no longer calls a deliberate, harmless adjustment a failure.** When a bundle names a
+  project whose parent is a plain folder — which CodeMan doesn't allow — the folder and all of its
+  pages are still restored, just without the project marker. That used to be reported as
+  `1 shape item failed`, which reads as data loss; it now gets its own clause:
+  `· 1 project restored as a plain folder (a project cannot sit inside a plain folder)`. Genuine
+  failures still count as failures.
 - Converting a block **away** from an HTML project now asks first when the project holds other
   files, naming them, and reminds you the change can be undone from page History.
 - **Uploading into an HTML project keeps everything.** A second, non-replacing `Upload…` now merges:

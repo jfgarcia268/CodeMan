@@ -1919,6 +1919,38 @@
           ta('focus flush writes NOTHING when the block is torn down (delete/convert)', saves, 0);
           if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
 
+          // …nor is a move WITHIN the block a departure (the original toolbar-click gotcha:
+          // clicking Save/Copy blurs the textarea, and flushing there cost a second write),
+          // and nor is stepping into the ⋯ menu — which lives on document.body, so without
+          // the .mini-menu guards merely OPENING the overflow menu burned a history slot.
+          // Both are SYNC guards, and neither had an assertion.
+          saves = 0;
+          const gb = mk('block');
+          const inner = document.createElement('button'); gb.appendChild(inner);
+          wireFocusFlush(gb);
+          pageDirty.clear(); pageDirty.add(EP);
+          gb.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: inner }));
+          await flushTick();
+          ta('focus flush writes NOTHING when focus stays inside the block', saves, 0);
+
+          const menu = document.createElement('div'); menu.className = 'mini-menu';
+          const mItem = document.createElement('button'); menu.appendChild(mItem);
+          document.body.appendChild(menu);
+          gb.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: mItem }));
+          await flushTick();
+          ta('focus flush writes NOTHING when focus moves into the ⋯ menu', saves, 0);
+          gb.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
+          await flushTick();
+          ta('…and nothing while a ⋯ menu is merely OPEN (it owns the interaction)', saves, 0);
+          menu.remove();
+          // …but with the menu gone, the very same departure DOES flush — so the guards
+          // above are proved to be suppressing, not just never reaching the save.
+          gb.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
+          await flushTick();
+          ta('…while the same departure with no menu open flushes once', saves, 1);
+          gb.remove();
+          if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+
           // Pin the predicate against a FUTURE block kind: every kind must render either
           // .viewing (has an edit session) or .checklist (has none). A new kind that does
           // neither would silently suppress autosave forever.
@@ -2753,11 +2785,18 @@
            ever diverge (editing one alone leaves both suites self-consistently green).
            Corpus notes: ZZ's position alone discriminates case-insensitive folding from
            case-sensitive byte order; Ångström/Émile exercise the non-ASCII byte path; 10x
-           vs 2x exercises digit ordering; the folder/page mix exercises the type tier. */
-        const SORT_ORACLE_JSON = '["10x","2x","_under","a b","a-b","a_b","Alpha","alpha2","beta","ZZ","Ångström","9lives.json","alpha.json","Beta.json","Zed.json","Émile.json"]';
+           vs 2x exercises digit ordering; the folder/page mix exercises the type tier.
+           Ｗide (U+FF37) and 😀emoji (U+1F600) are the SUPPLEMENTARY-PLANE pair: byte order
+           puts Ｗide first (0xEF < 0xF0), UTF-16 code-unit order puts the emoji first
+           (0xD83D < 0xFF37). They are the only names here whose relative order tells
+           cmpUtf8 apart from a plain string compare — and the rest of the corpus is BMP,
+           so without them the JS side could regress to `<` in the data-LOSING direction
+           (a false "already default" verdict discards the user's manual order). An
+           emoji-named folder is all it takes. */
+        const SORT_ORACLE_JSON = '["10x","2x","_under","a b","a-b","a_b","Alpha","alpha2","beta","ZZ","Ångström","Ｗide","😀emoji","9lives.json","alpha.json","Beta.json","Zed.json","Émile.json"]';
         const SORT_ORACLE = JSON.parse(SORT_ORACLE_JSON);
         const corpus = []
-          .concat(['Alpha', 'beta', 'alpha2', 'ZZ', '_under', '10x', '2x', 'a b', 'a-b', 'a_b', 'Ångström']
+          .concat(['Alpha', 'beta', 'alpha2', 'ZZ', '_under', '10x', '2x', 'a b', 'a-b', 'a_b', 'Ångström', 'Ｗide', '😀emoji']
             .map(name => ({ type: 'folder', name, path: name })))
           .concat(['Beta', 'alpha', 'Zed', 'Émile', '9lives']
             .map(name => ({ type: 'page', name, path: name + '.json' })));
@@ -2776,8 +2815,17 @@
         const enc = new TextEncoder();
         t('cmpUtf8: a prefix sorts first', cmpUtf8(enc.encode('alpha'), enc.encode('alpha2')), -1);
         t('cmpUtf8: equal bytes compare equal', cmpUtf8(enc.encode('a b'), enc.encode('a b')), 0);
-        t('cmpUtf8 is BYTE order, so a multi-byte char sorts after every ASCII one',
+        t('cmpUtf8: a multi-byte char sorts after every ASCII one',
           cmpUtf8(enc.encode('Ångström'), enc.encode('zz')), 1);
+        // …that one does NOT prove byte order: 'Å' is > 'z' as a UTF-16 code unit too, so a
+        // plain string compare answers it identically. Only a SUPPLEMENTARY-PLANE character
+        // separates the two orderings — U+1F600 is 0xF0… in UTF-8 (after 0xEF…) but 0xD83D
+        // as a UTF-16 lead surrogate (before 0xFF37). The two disagree, and the wrong answer
+        // is the data-losing one.
+        t('cmpUtf8 is BYTE order, not UTF-16 code-unit order (the emoji case)',
+          cmpUtf8(enc.encode('😀emoji'), enc.encode('Ｗide')), 1);
+        t('…and a plain JS string compare would give the OPPOSITE answer',
+          '😀emoji' < 'Ｗide', true);
         ta('defaultChildOrder of an empty list', defaultChildOrder([]), []);
         ta('defaultChildOrder of a single child', defaultChildOrder([{ type: 'page', name: 'X' }]), ['X.json']);
         ta('defaultChildOrder of folders only',
@@ -2902,10 +2950,32 @@
           readLibraryMeta({ 'A.json': { sections: [] } }), null);
         t('wrong format → null', readLibraryMeta({ __codeman_meta: { format: 'nope', folders: [] } }), null);
         t('folders not an array → null', readLibraryMeta({ __codeman_meta: { format: 'codeman-library', folders: 'x' } }), null);
+        // …but THAT one does not prove the guard: delete `if (!Array.isArray(m.folders))`
+        // and `'x'.map` throws, the never-throw catch returns null, and it still passes
+        // (mutation-verified). The Array.isArray check is only observable against an
+        // array-LIKE that survives `.map`, so that is what pins it.
+        t('…and an array-LIKE is rejected too — the guard is Array.isArray, not duck typing',
+          readLibraryMeta({ __codeman_meta: { format: 'codeman-library', folders: { map: () => [{ path: 'X' }] } } }), null);
         t('a non-object sidecar → null', readLibraryMeta({ __codeman_meta: 'hello' }), null);
         t('an array sidecar → null', readLibraryMeta({ __codeman_meta: [] }), null);
+        // Same false-confidence shape: a bare [] has no `format`, so it is rejected by the
+        // format check even with `Array.isArray(m)` deleted. An array CARRYING the right
+        // fields is the only input that tells the two guards apart.
+        const arrayShaped = []; arrayShaped.format = 'codeman-library'; arrayShaped.folders = [];
+        t('…and an ARRAY is rejected by SHAPE, not merely by a missing format field',
+          readLibraryMeta({ __codeman_meta: arrayShaped }), null);
         t('a null sidecar → null', readLibraryMeta({ __codeman_meta: null }), null);
         t('a null bundle → null, no throw', readLibraryMeta(null), null);
+        // The never-throw contract itself (the parseCsv/parseJsonSafe rule): a sidecar that
+        // throws while being READ must degrade to null, never take the import down with it.
+        // Asserted through a sentinel so a removed try/catch fails the assertion instead of
+        // aborting the surrounding block.
+        t('readLibraryMeta NEVER throws — a hostile sidecar degrades to null',
+          (() => {
+            try {
+              return readLibraryMeta({ __codeman_meta: { format: 'codeman-library', get folders() { throw new Error('boom'); } } });
+            } catch (e) { return 'THREW'; }
+          })(), null);
         // A junk folder entry survives to the import, where it is COUNTED (D-B1) rather
         // than silently dropped here.
         ta('a junk folder entry is kept for counting, with a rejectable path',
@@ -3052,7 +3122,12 @@
              calls.filter(c => /^create_(folder|project)$/.test(c[0]))
                .map(c => c[0] + ' ' + (c[1].parent ? c[1].parent + '/' : '') + c[1].name),
              ['create_folder Plain', 'create_folder Plain/Proj']);
-          t('…and the downgrade is REPORTED, not swallowed', toasts[0].includes('1 shape item failed'), true);
+          // …and it is reported as what it IS. Folded into the failure count it read as
+          // "1 shape item failed", which a merging user takes for data loss on the
+          // documented backup path — nothing was lost, only the project marker.
+          t('…and the downgrade is REPORTED, not swallowed',
+            toasts[0].includes('1 project restored as a plain folder'), true);
+          t('…and NOT as a failure, which is what it is not', /shape item/.test(toasts[0]), false);
 
           // ---- 6. Hostile paths are rejected client-side and counted -----------------
           const traversal = Object.assign({}, meta, { folders: [
@@ -3102,6 +3177,39 @@
             /^Imported 0 pages · restored 4 folders/.test(toasts[0]), true);
           t('…and gets no page-scope caveat (0 pages is a different message)',
             /—/.test(toasts[0]), false);
+
+          // ---- 12. A folder the SERVER refused is counted and surfaced ---------------
+          // folderFailed had no assertion at all: the counter existed, the toast clause
+          // existed, and nothing proved the two were wired to each other.
+          await runImport({ __codeman_meta: Object.assign({}, meta, {
+            folders: [{ path: 'Work' }], rootOrder: null, colSort: {}, client: { favorites: [] },
+          }) }, [], { create_folder: () => ({ error: 'disk full' }) });
+          t('a folder the server REFUSED is surfaced, not silently skipped',
+            toasts[0].includes('1 shape item failed'), true);
+          t('…and is never counted as restored', /restored 0 folders/.test(toasts[0]), true);
+          // …and the PAGE loop's own chain build: a refused segment fails that page, counted.
+          // The other two refusal points (create_page, save_page) are pinned above; this is
+          // the fourth, so TC-io-04's [auto:] tag covers every one it names.
+          await runImport({ 'Deep/Nested/P.json': { sections: [] } }, [],
+            { create_folder: () => ({ error: 'disk full' }) });
+          ta('a page whose folder chain cannot be built is counted as failed',
+             toasts, ['Imported 0 pages, 1 failed']);
+
+          // ---- 13. Favourites MERGE, and are filtered to the bundle ------------------
+          // Every fixture above clears `favorites` first, so NEITHER half of Phase 5 was
+          // exercised: a replace-instead-of-merge (losing the user's existing stars) and a
+          // resurrected star for a page the bundle doesn't contain would both ship green.
+          favorites.clear(); favorites.add('Mine/Kept.json');
+          await runImport(Object.assign({}, pages, { __codeman_meta: Object.assign({}, meta, {
+            folders: [], rootOrder: null, colSort: {},
+            client: { favorites: ['Work/Salesforce/Runbook.json', 'Ghost/Gone.json'] },
+          }) }), []);
+          t('a pre-existing favourite SURVIVES an import (merge, never replace)',
+            favorites.has('Mine/Kept.json'), true);
+          t('…a star for a page IN the bundle is restored',
+            favorites.has('Work/Salesforce/Runbook.json'), true);
+          t('…and one for a page the bundle does NOT contain is not resurrected',
+            favorites.has('Ghost/Gone.json'), false);
         } finally {
           document.createElement = _create; HTMLInputElement.prototype.click = _click;
           window.toast = _toast; window.loadTree = _load; window.api = _api;
@@ -3342,6 +3450,132 @@
         }
       }
 
+      // ---- …and the SIBLING call sites in the same paragraph ------------------------
+      // cacheOnSuccess (above) was pinned; the two offline.js sites that call apiFetch('tree')
+      // DIRECTLY — probeBackend's reconnect probe and flushQueue's post-drain reconcile —
+      // were not, and they kvSet('tree', …) themselves, so an unguarded write there poisons
+      // the PERSISTED mirror rather than just the in-memory global. Both shipped with ZERO
+      // assertions. When a fix names N call sites there should be N proofs.
+      {
+        const _fetch = window.fetch, _renderTree = window.renderTree, _toast = window.toast;
+        const _off = offlineState, kvBefore = await kvGet('tree'), _tree0 = treeData;
+        const goodTree = [{ type: 'folder', name: 'Keep', path: 'Keep', children: [] }];
+        const stopProbe = () => { if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; } };
+        try {
+          window.renderTree = () => {}; window.toast = () => {};
+          const res = (status, bodyText) => Promise.resolve({
+            status, ok: status < 400, json: async () => JSON.parse(bodyText),
+          });
+          // --- probeBackend: a reachable-but-malformed tree is NOT a successful reconnect.
+          await kvSet('tree', goodTree); setTreeData(goodTree);
+          offlineState = true;
+          window.fetch = () => res(200, '{"error":"nope"}');
+          const bad = await probeBackend();
+          stopProbe();
+          ta('probeBackend refuses a malformed tree and stays OFFLINE', [bad, offlineState], [false, true]);
+          ta('…leaving the persisted mirror intact', await kvGet('tree'), goodTree);
+          ta('…and the in-memory tree intact', treeData, goodTree);
+          // …while a genuine array still clears the offline state and refreshes the mirror.
+          window.fetch = () => res(200, '[{"type":"folder","name":"Fresh","path":"Fresh","children":[]}]');
+          const good = await probeBackend();
+          stopProbe();
+          ta('probeBackend still reconnects on a VALID tree',
+             [good, offlineState, (await kvGet('tree'))[0].name], [true, false, 'Fresh']);
+
+          // --- flushQueue's reconcile: the queued writes DID land, so the sync still
+          // reports success — only the reconcile is skipped, and the mirror is untouched.
+          await kvSet('tree', goodTree); setTreeData(goodTree);
+          syncQueue.length = 0; syncQueue.push({ action: 'create_folder', body: { parent: '', name: 'X' } });
+          let treeCalls = 0;
+          const toasts2 = [];
+          window.toast = (m) => { toasts2.push(String(m)); };
+          window.fetch = (url) => (String(url).includes('action=tree')
+            ? (treeCalls++, res(200, 'null'))            // malformed reconcile
+            : res(200, '{"ok":true}'));                  // the queued write succeeds
+          await flushQueue();
+          ta('flushQueue drains the op even when the reconcile is malformed', syncQueue.length, 0);
+          ta('…the reconcile was actually attempted', treeCalls, 1);
+          ta('…the persisted mirror is NOT poisoned by it', await kvGet('tree'), goodTree);
+          ta('…and the sync still reports success (the writes landed)', toasts2, ['Synced']);
+        } finally {
+          window.fetch = _fetch; window.renderTree = _renderTree; window.toast = _toast;
+          offlineState = _off; stopProbe();
+          syncQueue.length = 0; await saveQueue();
+          if (kvBefore === undefined) await kvDel('tree'); else await kvSet('tree', kvBefore);
+          setTreeData(_tree0);
+        }
+      }
+
+      // ---- the two array-returning PANELS: a reachable-but-wrong response is a FAILURE,
+      // not an empty state. Deep search, block search and the tags panel were already
+      // Array.isArray-guarded; Trash and History were the unguarded pair named in the same
+      // paragraph, and both fixes shipped with no assertion. "Trash is empty" over a broken
+      // server is precisely the reassuring-empty-state failure this guard exists to remove.
+      {
+        const _api = window.api;
+        try {
+          // Drive the REAL panels and read what the user would see. Closed via the ✕ so
+          // openPanel's document-level keydown listener is removed with the overlay.
+          const panelText = async (open) => {
+            open();
+            const overlay = document.body.lastElementChild;
+            const body = overlay.querySelector('.panel-body');
+            for (let i = 0; i < 200 && /Loading/.test(body.textContent); i++) await new Promise(r => setTimeout(r, 5));
+            const txt = body.textContent;
+            overlay.querySelector('.panel-head button').click();
+            return txt;
+          };
+          window.api = async () => ({ error: 'nope' });
+          t('a malformed list_trash says the trash could not be LOADED, not that it is empty',
+            (await panelText(() => openTrash())).includes('Could not load the trash'), true);
+          t('a malformed list_history says so too, rather than "no versions yet"',
+            (await panelText(() => openHistory(RUN + 'hist/P.json'))).includes('Could not load history'), true);
+          window.api = async () => [];
+          t('…while a genuinely empty trash still reads as empty',
+            (await panelText(() => openTrash())).includes('Trash is empty'), true);
+          t('…and a genuinely version-less page still reads as version-less',
+            (await panelText(() => openHistory(RUN + 'hist/P.json'))).includes('No saved versions yet'), true);
+        } finally { window.api = _api; }
+      }
+
+      // ---- Find & Replace's open-tab reconciliation must SHAPE-GUARD the reply ---------
+      // The loop assigned get_page's reply straight into tab.data, so a reachable-but-wrong
+      // response would install an ERROR BODY as the open tab's page content — and the next
+      // autosave would write that to disk. Same one-line class as applyRename's loop (which
+      // was already guarded); this sibling shipped with no assertion.
+      {
+        const _api = window.api, _toast = window.toast, _confirm = window.showConfirm,
+              _load = window.loadTree, _render = window.renderPage, _tabs = openPages.slice(),
+              _cpp = currentPagePath, _cpd = currentPageData, _active = activePath;
+        try {
+          const FRP = RUN + 'fr/P.json';
+          const original = { title: 'P', sections: [{ title: 'S', blocks: [], subsections: [] }] };
+          window.toast = () => {}; window.loadTree = async () => {}; window.renderPage = () => {};
+          window.showConfirm = async () => true;
+          openPages.length = 0;
+          openPages.push({ path: FRP, title: 'P', data: original, filter: '', baseMtime: 5 });
+          activePath = FRP; currentPagePath = FRP; currentPageData = original;
+          window.api = async (action) => {
+            if (action === 'replace_content') return { totalMatches: 1, pages: [{ path: FRP, matches: 1 }], changedPages: 1 };
+            if (action === 'get_page') return { error: 'invalid path' };
+            return { ok: true };
+          };
+          openReplace();
+          const overlay = document.body.lastElementChild;
+          overlay.querySelector('.fr-input').value = 'x';
+          await [...overlay.querySelectorAll('button')].find(b => b.textContent === 'Replace all').onclick();
+          overlay.querySelector('.panel-head button').click();
+          ta("a malformed get_page never becomes the open tab's content", openPages[0].data, original);
+          ta('…and currentPageData is left pointing at the real page', currentPageData, original);
+          ta('…and the tab keeps its baseMtime rather than adopting a bogus one', openPages[0].baseMtime, 5);
+        } finally {
+          window.api = _api; window.toast = _toast; window.showConfirm = _confirm;
+          window.loadTree = _load; window.renderPage = _render;
+          openPages.length = 0; openPages.push(..._tabs);
+          currentPagePath = _cpp; currentPageData = _cpd; activePath = _active;
+        }
+      }
+
       // ---- RV-1: a save the SERVER REJECTED must never report success, and the edit
       // must survive a reload ---------------------------------------------------------
       // apiFetch DELIBERATELY resolves a reachable server's 4xx (a 4xx is a real response,
@@ -3451,11 +3685,116 @@
           ta('a healthy save clears dirty and adopts the mtime',
              [pageDirty.has(SP), openPages[0].baseMtime], [false, 222]);
           ta('a healthy save parks nothing', (await dlFor()).length, 0);
+
+          // (f) flushSave — the TAB-SWITCH half of the SAME fix, and the shape this repo
+          // keeps re-learning: the primary site was pinned, its siblings in the very same
+          // comment paragraph were not. Deleting flushSave's `res.error` line left the
+          // whole suite green (measured). The loss is identical to (a), only the trigger
+          // differs — switch tabs on a page whose folder was deleted elsewhere and the
+          // edit is gone with no badge, no dead-letter and no page error.
+          // flushSave is fire-and-forget (no promise to await), and parking round-trips
+          // IndexedDB, so poll for the observable rather than guessing a delay.
+          const settle = async (fn) => {
+            for (let i = 0; i < 200; i++) { if (await fn()) return true; await new Promise(r => setTimeout(r, 5)); }
+            return false;
+          };
+          seed('FLUSH-KEEPME');
+          window.api = async () => ({ error: 'parent folder does not exist' });
+          flushSave();
+          await settle(async () => (await dlFor()).length > 0);
+          dl = await dlFor();
+          ta('a REJECTED flushSave parks the edit (the tab-switch half of the fix)', dl.length, 1);
+          ta('…carrying the content flushSave was flushing', codeOf(dl[0]), 'FLUSH-KEEPME');
+          ta('…and never reports success', toasts.some(m => /^Saved/.test(m)), false);
+          for (const d of dl) await dlRemove(d.id);
+
+          seed('FLUSH-OK');
+          window.api = async () => ({ ok: true, mtime: 333 });
+          flushSave();
+          await settle(async () => !pageDirty.has(SP));
+          ta('a healthy flushSave still clears dirty and adopts the mtime',
+             [pageDirty.has(SP), openPages[0].baseMtime], [false, 333]);
+          ta('a healthy flushSave parks nothing', (await dlFor()).length, 0);
+
+          // (g) the parked op must carry the content the REJECTED REQUEST carried — not
+          // whatever currentPageData points at when the response lands. A tab switch is
+          // exactly when those diverge, so `data || currentPageData` is load-bearing,
+          // not a defaulting convenience.
+          seed('FLUSH-MINE');
+          const otherTab = mkPage('OTHER-TAB');
+          window.api = async () => { currentPageData = otherTab; return { error: 'parent folder does not exist' }; };
+          flushSave();
+          await settle(async () => (await dlFor()).length > 0);
+          dl = await dlFor();
+          ta("the parked op carries the REQUEST's page, not the tab we switched to",
+             codeOf(dl[0]), 'FLUSH-MINE');
+          for (const d of dl) await dlRemove(d.id);
+
+          // (h) the UNLOAD path. A keepalive fetch that RESOLVES with a 4xx is a rejected
+          // write too; only a REFUSED fetch used to be requeued, so a deleted parent /
+          // missing CSRF header on visibilitychange→hidden was dropped in silence.
+          const _fetch2 = window.fetch;
+          try {
+            seed('UNLOAD-KEEPME');
+            window.fetch = async () => ({ ok: false, status: 404 });
+            flushSave({ keepalive: true });
+            await settle(async () => syncQueue.length > 0);
+            ta('a keepalive save the server REJECTED is requeued, never dropped',
+               syncQueue.filter(o => o.action === 'save_page' && o.body.path === SP).length, 1);
+            ta('…carrying the edit', codeOf(syncQueue[0]), 'UNLOAD-KEEPME');
+            syncQueue.length = 0; await saveQueue();
+
+            seed('UNLOAD-OK');
+            window.fetch = async () => ({ ok: true, status: 200 });
+            flushSave({ keepalive: true });
+            await new Promise(r => setTimeout(r, 30));
+            ta('a keepalive save the server ACCEPTED queues nothing', syncQueue.length, 0);
+
+            seed('UNLOAD-REFUSED');
+            window.fetch = async () => { throw new Error('network down'); };
+            flushSave({ keepalive: true });
+            await settle(async () => syncQueue.length > 0);
+            ta('a REFUSED keepalive fetch still falls back to the queue', syncQueue.length, 1);
+            syncQueue.length = 0; await saveQueue();
+          } finally { window.fetch = _fetch2; }
+
+          // (i) an edit that arrived MID-SAVE is NOT in the op we just parked, so the page
+          // must stay DIRTY and let the finally-block re-save carry it — the same guard the
+          // success path already has. Observed BETWEEN the two attempts, because the
+          // re-save clears the flag by design.
+          seed('MIDSAVE');
+          let dirtyAtResave = null, apiCalls = 0;
+          window.api = async () => {
+            apiCalls++;
+            if (apiCalls === 1) { savePending = true; return { error: 'parent folder does not exist' }; }
+            dirtyAtResave = pageDirty.has(SP);
+            return { ok: true, mtime: 444 };
+          };
+          await savePage();
+          await settle(async () => dirtyAtResave !== null);
+          ta('a rejection with an edit pending mid-save stays DIRTY for the re-save', dirtyAtResave, true);
+          ta('…and the re-save then clears it', pageDirty.has(SP), false);
+          for (const d of await dlFor()) await dlRemove(d.id);
+
+          // (j) if PARKING ITSELF fails (IndexedDB unavailable / over quota) the edit is
+          // nowhere durable, so the page must stay DIRTY for a later flush to retry. This
+          // is the one branch where clearing pageDirty WOULD be the silent loss again.
+          const _dlAdd = window.dlAdd;
+          try {
+            seed('PARK-THROWS');
+            window.dlAdd = async () => { throw new Error('IndexedDB unavailable'); };
+            window.api = async () => ({ error: 'parent folder does not exist' });
+            await savePage();
+            ta('a save whose PARKING throws leaves the page DIRTY', pageDirty.has(SP), true);
+            ta('…and still never reports success', toasts.some(m => /^Saved/.test(m)), false);
+            ta('…and still tells the user the save failed', toasts.some(m => /^Save failed/.test(m)), true);
+          } finally { window.dlAdd = _dlAdd; }
+          for (const d of await dlFor()) await dlRemove(d.id);
         } finally {
           window.api = _api; window.toast = _toast; window.showConfirm = _confirm;
           currentPagePath = _cpp; currentPageData = _cpd;
           openPages.length = 0; openPages.push(..._tabs);
-          pageDirty.clear(); syncQueue.length = 0;
+          pageDirty.clear(); syncQueue.length = 0; savePending = false;
           if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
         }
       }

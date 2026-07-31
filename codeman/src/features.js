@@ -1255,6 +1255,11 @@ function importPages() {
     const knownProjects = new Set(preFolders.filter((f) => f.project).map((f) => f.path));
     const created = new Set();
     let n = 0, failed = 0, folderFailed = 0, shapeFailed = 0, shapeSkipped = 0, layoutOps = 0;
+    // Counted SEPARATELY from shapeFailed: a project restored as a plain folder is the
+    // merge-restraint rule working as designed, not a failure. Folded into the failure
+    // count it read as "1 shape item failed", which is what a merging user takes for
+    // data loss on the documented backup path — the folder and every page in it landed.
+    let downgraded = 0;
 
     /* ---- Phase 2 — folders, BEFORE pages ---------------------------------------- */
     if (meta) {
@@ -1278,8 +1283,9 @@ function importPages() {
         if (asProject && parent && !knownProjects.has(parent)) {
           // A project may only live at the root or inside another project. Create it as
           // a PLAIN folder rather than SEND create_project with a plain-folder parent —
-          // the server guard must never be exercised as an error path.
-          asProject = false; shapeFailed++;
+          // the server guard must never be exercised as an error path. Reported as a
+          // DOWNGRADE, not a failure: nothing was lost, only the project marker.
+          asProject = false; downgraded++;
         }
         const res = await api(asProject ? 'create_project' : 'create_folder', { parent, name });
         if (res && res.error) { folderFailed++; continue; }
@@ -1404,6 +1410,11 @@ function importPages() {
            + ', ' + layoutOps + ' layout setting' + (layoutOps === 1 ? '' : 's');
       const bad = shapeFailed + folderFailed;
       if (bad) msg += ', ' + bad + ' shape item' + (bad === 1 ? '' : 's') + ' failed';
+      // A deliberate, safe downgrade must be DISTINGUISHABLE from a failure: the folder
+      // and its pages are all there, it just isn't marked as a project (a project cannot
+      // sit inside a plain folder). Said plainly, in its own clause.
+      if (downgraded) msg += ' · ' + downgraded + ' project' + (downgraded === 1 ? '' : 's')
+        + ' restored as a plain folder (a project cannot sit inside a plain folder)';
       // The honesty obligation of "layout applies only to folders this import created":
       // this clause is what tells a merging user WHY their sidebar did not change.
       if (shapeSkipped) msg += ' · ' + shapeSkipped + ' existing folder' + (shapeSkipped === 1 ? '' : 's') + ' left as-is';

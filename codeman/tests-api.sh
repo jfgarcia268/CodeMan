@@ -509,6 +509,15 @@ post save_page '{"path":"Titled.json","data":{"title":"Renamed once","sections":
 post save_page '{"path":"Titled.json","data":{"title":"Renamed twice","sections":[]}}' >/dev/null
 eqs "a title-only page's authored title IS versioned" "$(hcount 'Titled.json')" "1"
 has "…holding the authored title, not the create_page stub" "$(cat "$DATA"/.history/Titled.json/*.json)" '"Renamed once"'
+# (c) FAIL OPEN. isCreatePageStub decodes the PRIOR on-disk content, and anything it
+#     cannot read as an array is NOT a stub — so it gets snapshotted. Un-decodable content
+#     (an external editor, a truncated write, a hand-edited file) is the case with the MOST
+#     to lose: calling it a stub would silently discard the only copy there is. Written
+#     straight to disk, because no API call can produce it. The guard shipped untested.
+printf '%s' 'this is not json at all' > "$DATA/Corrupt.json"
+post save_page '{"path":"Corrupt.json","data":{"title":"Corrupt","sections":[]}}' >/dev/null
+eqs "unreadable prior content is NEVER read as the stub (fail OPEN)" "$(hcount 'Corrupt.json')" "1"
+has "…and the un-decodable bytes are what got snapshotted" "$(cat "$DATA"/.history/Corrupt.json/*.json)" 'not json at all'
 
 # --- contentFileIterator: content scans NEVER descend into dot-dirs ----------------
 # .history/.trash hold ~20 versions per page. A bare RecursiveDirectoryIterator would
@@ -604,9 +613,15 @@ test ! -e "$DATA/PlainP/Nope" && ok "…and nothing was created" || bad "create_
 # codeman/tests.html; a CI invariant fails the build if the two copies ever diverge.
 # The corpus is created DIRECTLY ON DISK (not via create_folder, whose prependOrder would
 # install an order file and defeat the point), so this is buildTree's real fallback.
-SORT_ORACLE_JSON='["10x","2x","_under","a b","a-b","a_b","Alpha","alpha2","beta","ZZ","Ångström","9lives.json","alpha.json","Beta.json","Zed.json","Émile.json"]'
+# Ｗide (U+FF37) and 😀emoji (U+1F600) are the load-bearing pair: byte order puts Ｗide
+# FIRST (0xEF < 0xF0) while UTF-16 code-unit order puts the emoji first (0xD83D < 0xFF37),
+# so they are the only two names in the corpus whose relative order tells cmpUtf8 apart
+# from a plain JS string compare. Without a supplementary-plane name the whole corpus is
+# BMP and the JS side could silently regress to string comparison — in the data-LOSING
+# direction (a false "already default" verdict discards the user's manual order).
+SORT_ORACLE_JSON='["10x","2x","_under","a b","a-b","a_b","Alpha","alpha2","beta","ZZ","Ångström","Ｗide","😀emoji","9lives.json","alpha.json","Beta.json","Zed.json","Émile.json"]'
 mkdir -p "$DATA/Sortcase"
-for d in "Alpha" "beta" "alpha2" "ZZ" "_under" "10x" "2x" "a b" "a-b" "a_b" "Ångström"; do mkdir -p "$DATA/Sortcase/$d"; done
+for d in "Alpha" "beta" "alpha2" "ZZ" "_under" "10x" "2x" "a b" "a-b" "a_b" "Ångström" "Ｗide" "😀emoji"; do mkdir -p "$DATA/Sortcase/$d"; done
 for p in "Beta" "alpha" "Zed" "Émile" "9lives"; do
   printf '%s' '{"title":"x","sections":[]}' > "$DATA/Sortcase/$p.json"
 done

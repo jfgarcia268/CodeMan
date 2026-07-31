@@ -15,10 +15,10 @@ and reports against this matrix); UI/usability passes are run by the
 
 1. **Automated suites first** (fast, deterministic):
    - **Client units** — open `codeman/tests.html` in a browser. Expect the summary
-     **"N passed, 0 failed"** (currently 694). `window.__testResult = {pass, fail, done}` for
+     **"N passed, 0 failed"** (currently **886**). `window.__testResult = {pass, fail, done}` for
      scripting (`done` flips true after the async offline tests finish).
    - **Server API** — `bash codeman/tests-api.sh` (spins a throwaway `php -S` against a temp data
-     dir; exit 0 = all green; currently 168). Override port: `bash codeman/tests-api.sh 8099` —
+     dir; exit 0 = all green; currently **194**). Override port: `bash codeman/tests-api.sh 8099` —
      a taken port is skipped automatically (bounded upward hunt), so parallel runs stay green.
    - **CI enforces both** on every push/PR: `.github/workflows/tests.yml` runs `tests-api.sh`
      (`api-tests` job), tests.html headless via Playwright + `php -S`
@@ -26,11 +26,30 @@ and reports against this matrix); UI/usability passes are run by the
      error**, **or a pass count that isn't EXACTLY the FLOOR** in
      `.github/scripts/run-client-tests.mjs`; the floor is an equality so deleting assertions is
      as visible as adding them — bump it whenever the total moves), and a grep-based
-     `invariants` job (sw.js version single-sourcing, api.php never precached, atomic JSON
-     writes — no `copy()`/`fwrite()`/bare `file_put_contents` anywhere in `api.php`, **no
-     `allow-same-origin` anywhere in `codeman/`**, `index.html` still carrying its CSP meta,
-     single `setTreeData` write point, and CSRF read-only allowlist parity between `api.php`
-     and the desktop proxy).
+     `invariants` job. That job is **12 checks**, each verified to FIRE on an injected
+     violation (list it in full, because "some greps run" is not a spec):
+     1. `sw.js` derives `CACHE_VERSION` from `importScripts('version.js')` — the import must be a
+        **live statement**, not a mention in a comment, and `CACHE_VERSION` must be built from
+        `self.CODEMAN_VERSION`.
+     2. `api.php` is never in the service worker's `SHELL` precache.
+     3. Page JSON writes are atomic — no `copy()`/`fwrite()`/`fputs()`/bare `file_put_contents(`
+        anywhere in `api.php` outside `writeJsonAtomic`'s own temp write and the empty `.project`
+        marker.
+     4. The html-block iframe sandbox is never widened — no `allow-same-origin` anywhere in
+        `codeman/`, and both iframe builders still declare `allow-scripts`.
+     5. `index.html` still ships its CSP `<meta>` (incl. `object-src 'none'` / `base-uri 'none'`).
+     6. `treeData` is written only through `setTreeData()` (memo invalidation + shape guard).
+     7. The rich sanitizer keeps its three declared tables: `RICH_ALLOWED` never names a
+        script-bearing tag, and the scriptable vector format is never reachable from `richImgSrc`.
+     8. The CSRF read-only allowlist matches between `api.php` (`$csrfReadOnly`) and the desktop
+        proxy (`READ_ONLY_ACTIONS`).
+     9. The edit-session wiring census — EXACT call-site counts in `editor.js`:
+        `beforeEditSession()`=5, `afterEditSession()`=10, `wireEscapeRevert(`=`wireFocusFlush(`=6.
+     10. `afterEditSession` never calls `scheduleSave(` (it would re-mark the page dirty).
+     11. The default-child-order oracle (`SORT_ORACLE_JSON`) is byte-identical in `tests.html`
+         and `tests-api.sh` — editing one copy alone leaves both suites self-consistently green.
+     12. No `renderPage()` inside `renderHtmlBlock` outside the convert/delete teardowns (it
+         would silently kill a live iframe).
 2. **Then the manual/driven Core suite below**, against a running dev server
    (`cd codeman && php -S localhost:8090`, data falls back to `structures/`). Drive via the
    browser-preview MCP and/or Chrome MCP. Test **both layouts** (single + double/Miller) and
@@ -86,7 +105,11 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
   response instead of claiming they're empty. **[auto: tests.html — malformed-tree guard (setTreeData
   rejects every non-array shape / loadTree falls back to the mirror / navigation does not throw /
   cacheOnSuccess leaves the kv mirror intact on a malformed, 4xx or null body, and still caches a
-  valid one)]**
+  valid one) · `probeBackend` refuses a malformed tree, stays offline and leaves both the persisted
+  mirror and `treeData` intact (and still reconnects on a valid one) · `flushQueue` drains its ops,
+  skips only the reconcile and still reports `Synced` · the Trash and History panels' "Could not
+  load…" vs genuinely-empty wording]** *(manual half: the live devtools/`echo` interception and the
+  IndexedDB inspection.)*
 
 ### TC-crud — Create / rename / delete (inline rows)
 - TC-crud-01 (P): create project/folder/page targets the selected folder; new items prepend.
@@ -697,8 +720,13 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   boundaries that must stay green: a healthy save still toasts "Saved" exactly once and clears
   `pageDirty`; a conflict still prompts, force-resends and snapshots the other version to History
   (TC-data-03); an offline-queued save still clears dirty and drops `baseMtime`.
-  **[auto: tests.html rejected-save (terminal park · transient queue · supersede · conflict
-  unchanged · conflict-force rejected · offline unchanged · healthy save)]**
+  **[auto: tests.html rejected-save — `savePage`: terminal park · transient queue · supersede ·
+  conflict unchanged · conflict-force rejected · offline unchanged · healthy save; and its two
+  SIBLING call sites, which shipped unpinned: `flushSave`'s non-keepalive path parks a rejected
+  write (deleting that one line left the whole suite green) · the keepalive/unload path requeues on
+  a RESOLVED `!ok`, not only on a refused fetch · the parked op carries the REQUEST's page, not
+  whatever tab we switched to · an edit arriving mid-save keeps the page dirty for the re-save · a
+  park that THROWS leaves the page dirty rather than clearing it]**
 - TC-data-11 (A/N): **a block Save announces "Saved" exactly once, and only after the write landed.**
   `savePage()` is the single announcer; the five block-Save handlers must NOT toast it themselves
   (they used to, beside an un-awaited `savePage()` — so a healthy save announced **twice** through the
@@ -727,6 +755,13 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   which is why the guard lives in `snapshotHistory`, not in the importer.
   **[auto: tests-api create-then-save (zero versions · no destructive version · next save versions ·
   deliberately-emptied · emptied-state-then-versioned · title-only)]**
+- TC-data-13 (A, **fail OPEN**): the stub check reads the PRIOR on-disk content, so it must never
+  treat content it cannot READ as the stub — un-decodable bytes (an external editor, a truncated
+  write, a hand-edited file) are the case with the most to lose, and calling them a stub would
+  discard the only copy there is. Write a non-JSON body straight into `CODEMAN_DATA` over a page,
+  then save that page from the app: History gains **one** version and it holds the un-decodable
+  bytes. Snapshotting noise is cheap; suppressing a snapshot of content a user could have authored
+  is not — never widen this guard. **[auto: tests-api.sh]**
 
 ### TC-prod — Productivity
 - TC-prod-01 (P): Command palette ⌘K — jump to page (substring match), path-subtitle disambiguation;
@@ -741,6 +776,14 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
 - TC-prod-04 (P): Tag manager rename/merge/delete; open tabs re-fetch after the write; mobile rows
   wrap so the usage count isn't clipped. Server side (rename, merge-dedup, empty-`to` delete,
   history-snapshot-first) is **[auto: tests-api rename_tag]**.
+- TC-prod-05 (N): **a bulk content mutation must never install an ERROR BODY as an open tab's
+  page content.** Both reconciliation loops (Find & Replace's `replace_content`, the tag manager's
+  `applyRename`) re-fetch every open tab with `get_page` — a reachable-but-wrong reply is not
+  content and nothing upstream catches it, so an unguarded assignment would put `{error:…}` into
+  `tab.data` and the next autosave would write it to disk. With a page open, make `get_page`
+  answer `{"error":"invalid path"}` (devtools) and run a Replace all that changes that page: the
+  tab keeps its real content and its `baseMtime`, and no error body reaches the editor.
+  **[auto: tests.html — the REAL `openReplace` Replace-all against a stubbed `get_page` error]**
 
 ### TC-io — Export / Import
 - TC-io-01 (P): export HTML (self-contained, title escaped) / Markdown / JSON. **[auto: tests.html pageToHtml/pageToMarkdown]**
@@ -755,7 +798,11 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   already existed. **[auto: tests.html importPages positive round-trip]**
 - TC-io-04 (N): a page the server refuses (create_folder / create_page / save_page error) is
   **counted and reported** — the toast reads `Imported N pages, M failed`, never a bare success over
-  partial data loss. **[auto: tests.html]**
+  partial data loss. **[auto: tests.html — all four refusal points, each asserted on the toast the
+  user reads: a refused `create_page` (every page fails), a refused `save_page` (a PARTIAL import
+  reports both the wins and the losses), a refused `create_folder` in the page loop's chain build
+  (the page is counted failed), and a refused `create_folder` in the sidecar phase (`folderFailed`
+  reaches the toast and the folder is never counted as restored)]**
 - TC-io-05 (N, server): `create_folder` with a **non-existent parent** returns
   `404 {"error":"parent folder does not exist"}` and materialises **nothing** — it no longer
   recursive-mkdirs an invented parent chain inside the data root. A legitimate nested folder (parent
@@ -772,7 +819,9 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   modal), a **single-page** import toasts a bare `Imported 1 page`, and a bundle that imported
   nothing keeps its `Imported 0 pages, M failed` wording. Mobile (375px): the toast wraps inside the
   viewport (it is `max-width`-capped) and the modal fits. **[auto: tests.html export scope-note +
-  import caveat (bundle · single page · zero pages)]** *(The bundle now also carries the library's
+  import caveat (bundle · single page · zero pages) — the WORDING of each toast/modal ONLY; that the
+  file downloads, the modal's multi-line `pre-line` rendering and the 375px wrap are manual]**
+  *(The bundle now also carries the library's
   shape — see TC-io-07 — so the export modal and the import toast say what it DOES carry as well as
   what it doesn't; trash and version history remain the only omissions.)*
 - TC-io-07 (P, **disaster recovery**): **the library's SHAPE round-trips.** The bundle carries a
@@ -784,8 +833,12 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   the nested one inside its parent project), the dragged order is the **user's** — not alphabetical
   and not `prependOrder`'s reverse-creation artifact — the empty folder exists, `.colsort.json`
   matches, and the starred page is starred again. Inspect `.project` / `.order.json` /
-  `.colsort.json` on disk, not just the sidebar. **[auto: tests.html round-trip through the real
-  importPages]**
+  `.colsort.json` on disk, not just the sidebar. **[auto: tests.html — the round trip through the
+  REAL `importPages` against a server model, asserting the exact create kinds/parents, the empty
+  folder, the `reorder`/`set_col_sort` payloads and the favourites merge]** *(manual only, and the
+  half that actually proves recovery: the on-disk inspection of `.project`/`.order.json`/
+  `.colsort.json` after a real export→import against a real `php -S` + empty `CODEMAN_DATA`. The
+  automated half stops at the client's call sequence — it never touches a filesystem.)*
 - TC-io-08 (P, **no artifact**): a folder that never had a manual order must not GAIN an
   `.order.json` from a restore — a materialised order file changes how a *future* sibling sorts. A
   leaf folder holding only pages ends with **no** `.order.json` at all; a folder polluted only by
@@ -802,20 +855,57 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   and its project-vs-plain marker byte-for-byte; it does **not** jump to the top of its parent (the
   old import called `create_folder` for every path segment of every page, and `create_folder`
   prependOrders unconditionally); and the toast says `· N existing folder(s) left as-is` so an
-  unchanged sidebar is explained rather than looking like a failure. **[auto: tests.html merge
-  restraint]**
+  unchanged sidebar is explained rather than looking like a failure. **[auto: tests.html — the
+  create/reorder/set_col_sort calls the import does and does not make, plus the `left as-is`
+  clause]** *(manual only: the byte-for-byte on-disk comparison of the pre-existing folder's
+  `.order.json`/`.colsort.json`/`.project` before and after.)*
 - TC-io-11 (A, **offline-only desktop**): export then import end to end with no server reachable —
-  the shape restores from the IndexedDB mirror (empty folders included), and the write queue grows by
-  **fewer** ops than before the change (the per-page-segment `create_folder` storm is gone). Check the
-  badge count and that a later reconnect flushes cleanly.
+  the shape restores from the IndexedDB mirror (empty folders included), and a later reconnect
+  flushes cleanly. **On the write-queue size, measure — don't assume it shrinks.** The change trades
+  one `create_folder` **per page path segment** for one **per folder** plus the sidecar's layout ops
+  (`reorder`/`set_col_sort`), so the direction depends on the library's shape: measured, **5 pages
+  nested 3 deep went UP, 25 → 36 ops (+44%)** — the layout ops outnumber the segment creates it
+  saved — while **80 pages went DOWN, 320 → 193 (−40%)**. Both are correct; the win is at scale, and
+  the small-library cost buys the shape restore that is the point of the change. Record the badge
+  count for the library under test rather than asserting a direction.
 - TC-io-12 (N, **hostile sidecar**): hand-edit a bundle's `__codeman_meta` to contain a traversal
   path (`../escape`), a dotfile path (`.history`), a non-string path, a project whose parent is a
-  **plain** folder, and a junk `colSort` field. Each is rejected **client-side** (no request is sent;
-  `create_project` is never called with a plain-folder parent — it is downgraded to `create_folder`),
-  each is **counted** in the toast's `N shape item(s) failed`, and nothing in the data root is
-  corrupted. A sidecar with the wrong `format`, a non-array `folders`, or a non-object value degrades
-  to a pages-only import reporting `· library shape could not be read` — never a throw.
-  **[auto: tests.html]**
+  **plain** folder, and a junk `colSort` field. Each is rejected **client-side** (no request is
+  sent), each real rejection is **counted** in the toast's `N shape item(s) failed`, and nothing in
+  the data root is corrupted. The project-under-a-plain-folder case is **not** a failure: it is
+  downgraded to `create_folder` (the server guard must never be exercised as an error path) and
+  reported in its own clause — `· 1 project restored as a plain folder (a project cannot sit inside
+  a plain folder)` — because the folder and all its pages landed, and reporting it as
+  `1 shape item failed` reads to a merging user as data loss on the documented backup path. A
+  sidecar with the wrong `format`, a non-array `folders`, or a non-object value degrades to a
+  pages-only import reporting `· library shape could not be read` — **never a throw**.
+  **[auto: tests.html — every rejection above, the downgrade's own wording (and that it is NOT
+  counted as a failure), and `readLibraryMeta`'s never-throw contract driven with a sidecar that
+  throws while being read. Note the two guards that need a non-JSON input to be observable at all:
+  `folders`-not-an-array is only distinguishable via an array-LIKE with a `.map` (a string falls
+  into the never-throw catch and returns null either way), and the array-sidecar guard only via an
+  array CARRYING `format`/`folders`. Both are asserted that way; the plain-JSON forms are kept
+  beside them but prove nothing on their own.]**
+- TC-io-13 (P/E, **the user's manual order survives a restore**): the sidecar **omits** a folder's
+  `order` whenever `defaultChildOrder` (tree.js) thinks the children are already in `buildTree`'s
+  default order — so a divergence between those two comparators silently **DROPS** a dragged order
+  on the next restore (the error is asymmetric: a false "non-default" is harmless, a false
+  "default" is data loss). They are in different languages and cannot call each other, so both are
+  pinned to one shared oracle corpus. Manual check: build a folder containing a **non-BMP-named**
+  child — an **emoji-named folder** is the whole trigger — alongside ASCII and Latin-1 names, leave
+  the order **untouched**, export, import into an empty root, and confirm the folder gained no
+  `.order.json`; then **drag** one child, re-export/re-import, and confirm the dragged order comes
+  back exactly. **[auto: tests.html `defaultChildOrder` vs the oracle + tests-api.sh the REAL
+  `buildTree` over the same names created directly on disk + CI invariant 11 comparing the two
+  literals. The corpus now carries `Ｗide` (U+FF37) and `😀emoji` (U+1F600): byte order puts `Ｗide`
+  first, UTF-16 code-unit order puts the emoji first, so they are the ONLY pair that catches
+  `cmpUtf8` regressing to a plain JS string compare — every other name in the corpus is BMP, where
+  the two orderings agree.]**
+- TC-io-14 (P/E, **import is a MERGE, and stars are bundle-scoped**): a restore must not clear the
+  favourites the user already has, and must not resurrect a star for a page the bundle doesn't
+  contain. Star a page that is NOT in the bundle, import a bundle whose sidecar stars (a) a page it
+  contains and (b) a page it doesn't. Expect: the pre-existing star survives, (a) is starred, (b)
+  is not. **[auto: tests.html — all three, through the real `importPages`]**
 
 ### TC-offline — Offline + Service Worker
 - TC-offline-01 (P): SW registers (secure context incl. localhost) + precaches the shell.

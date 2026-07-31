@@ -47,7 +47,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: sw.js derives its cache version from version.js (single version source)
-        run: grep -q "importScripts('version.js')" codeman/sw.js
+        run: |
+          # A bare substring match is satisfied by a COMMENTED-OUT call (verified: it did
+          # NOT fire on `// importScripts('version.js')`), so the worker could fall back to
+          # a hard-coded cache name with the invariant still green — and a release would
+          # then never evict the old shell. Two checks, both on LIVE code: the import must
+          # be a real statement (the line's first non-space characters), and CACHE_VERSION
+          # must actually be built from the value it imports.
+          if ! grep -qE "^[[:space:]]*importScripts\('version\.js'\)" codeman/sw.js; then
+            echo "sw.js must call importScripts('version.js') as a live statement (not only in a comment)"
+            exit 1
+          fi
+          if ! grep -qE "^[[:space:]]*const CACHE_VERSION = .*self\.CODEMAN_VERSION" codeman/sw.js; then
+            echo 'sw.js CACHE_VERSION must be derived from self.CODEMAN_VERSION — bump version.js, never sw.js'
+            exit 1
+          fi
       - name: api.php is never precached by the service worker
         run: |
           if awk '/^const SHELL = \[/{f=1} f{print} f&&/\];/{exit}' codeman/sw.js | grep -q 'api\.php'; then
