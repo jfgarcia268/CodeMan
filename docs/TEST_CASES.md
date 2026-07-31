@@ -134,6 +134,13 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
 - TC-drag-02 (P): drag a folder; "move into" a folder.
 - TC-drag-03 (N): project into a plain folder is rejected (`isValidProjectParent`, server mirror). **[auto: tests-api move guard]**
 - TC-drag-04 (E): in double layout, dragging an item **clears that column's active sort**.
+- TC-drag-05 (E, **known divergence**): a `.order.json` that lists the **same name twice** (only
+  reachable by hand-editing the file or a hand-built bundle — a drag and `buildLibraryMeta` both emit
+  unique names) is read differently on the two sides: the server's `array_flip` keeps the **LAST**
+  occurrence, the client's `sortChildrenLikeBuildTree` the **FIRST**, so the offline cached tree can
+  order that one folder differently from the server until the next `tree` fetch reconciles it. Both
+  behaviours are pinned so neither drifts further; neither is "the spec". No data is lost either way.
+  **[auto: tests-api — repeated name is LAST-wins on the server; tests.html — FIRST-wins on the client]**
 
 ### TC-proj — Projects & nesting
 - TC-proj-01 (P): `.project` marker rendered prominently; project-chain banner + color breadcrumb.
@@ -659,6 +666,13 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   still splits on the gaps regardless of the caret. Was dead before: `showMiniMenu` moves focus to its
   first item on open, so the old `document.activeElement === textarea` check never matched.
   **[auto: tests.html — Split via the ⋯ menu splits AT the caret]**
+- TC-merge-03 (A/N): **the view-mode half of the same rule.** `lastCaret` is never cleared
+  (`updateActiveLine` bails while `.viewing`), so it outlives the edit session — which is why Split
+  must read it *only* when the block is being edited. Verify: in that same block, Edit, put the caret
+  after `one`, **Save**, then `⋯ → Split` on the now read-only block. It must **refuse** ("Nothing to
+  split — add a blank line or place the cursor") and leave the block whole; it must not tear it in two
+  at the offset the caret happened to sit at last time. Control (same block, same caret, still in edit
+  mode) → it splits. **[auto: tests.html — Split in VIEW mode does NOT reuse the caret + its CONTROL]**
 
 ### TC-notes — Markdown notes & links
 - TC-notes-01 (P): markdown-it renders tables, strikethrough, task lists, nested lists, autolinks,
@@ -760,8 +774,12 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   whose only content is its title (renamed, never given a section) keeps every authored title.
   Same sequence in `duplicatePageFromTree` and in a queued create+save replaying on reconnect —
   which is why the guard lives in `snapshotHistory`, not in the importer.
+  **(c) the key set must be EXACT** — `isCreatePageStub` demands precisely `{title, sections}`, so a
+  page carrying any extra top-level field (hand-written, imported, or written by a future version of
+  CodeMan) is not the stub even with an empty `sections` and a filename-derived title. Relaxed to
+  `isset()` checks it would be, and that page's first real save would never reach History.
   **[auto: tests-api create-then-save (zero versions · no destructive version · next save versions ·
-  deliberately-emptied · emptied-state-then-versioned · title-only)]**
+  deliberately-emptied · emptied-state-then-versioned · title-only · extra-top-level-key IS versioned)]**
 - TC-data-13 (A, **fail OPEN**): the stub check reads the PRIOR on-disk content, so it must never
   treat content it cannot READ as the stub — un-decodable bytes (an external editor, a truncated
   write, a hand-edited file) are the case with the most to lose, and calling them a stub would
@@ -834,7 +852,11 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   nothing keeps its `Imported 0 pages, M failed` wording. Mobile (375px): the toast wraps inside the
   viewport (it is `max-width`-capped) and the modal fits. **[auto: tests.html export scope-note +
   import caveat (bundle · single page · zero pages) — the WORDING of each toast/modal ONLY; that the
-  file downloads, the modal's multi-line `pre-line` rendering and the 375px wrap are manual]**
+  file downloads and the modal's multi-line `pre-line` rendering are manual. The 375px toast wrap is
+  now automated too: **tests.html measures a real `.toast` against the real `style.css` in a 375px
+  iframe** — the longest composed import message keeps a 16px gutter on BOTH edges, the cap is the
+  fixed 460px arm on a desktop-width viewport, and (the CONTROL, since the cap is a `max-width` and
+  not a `width`) a short toast like `Saved` is still shrink-to-fit and pixel-unchanged]**
   *(The bundle now also carries the library's
   shape — see TC-io-07 — so the export modal and the import toast say what it DOES carry as well as
   what it doesn't; trash and version history remain the only omissions.)*

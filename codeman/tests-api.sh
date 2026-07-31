@@ -509,6 +509,18 @@ post save_page '{"path":"Titled.json","data":{"title":"Renamed once","sections":
 post save_page '{"path":"Titled.json","data":{"title":"Renamed twice","sections":[]}}' >/dev/null
 eqs "a title-only page's authored title IS versioned" "$(hcount 'Titled.json')" "1"
 has "…holding the authored title, not the create_page stub" "$(cat "$DATA"/.history/Titled.json/*.json)" '"Renamed once"'
+# (bb) the EXACT-KEYS condition. isCreatePageStub demands the key set be precisely
+#     {title, sections} — the third load-bearing condition, and the only one that was
+#     untested. Relaxed to isset() checks, ANY page that merely HAS those two keys with an
+#     empty sections list and a filename-derived title reads as the stub: a hand-written or
+#     imported page carrying an extra top-level field, or a page written by a FUTURE version
+#     of CodeMan that adds one, loses its first real save from history. Written straight to
+#     disk because no current API call produces the shape.
+printf '%s' '{"title":"Extra","sections":[],"extra":1}' > "$DATA/Extra.json"
+post save_page '{"path":"Extra.json","data":{"title":"Extra","sections":[{"title":"S","collapsed":false,"tags":[],"blocks":[{"type":"bash","label":"","code":"real work"}],"subsections":[]}]}}' >/dev/null
+eqs "an extra top-level key means it is NOT the create_page stub (it IS versioned)" "$(hcount 'Extra.json')" "1"
+has "…and the snapshot is the prior on-disk content, extra key and all" "$(cat "$DATA"/.history/Extra.json/*.json)" '"extra"'
+
 # (c) FAIL OPEN. isCreatePageStub decodes the PRIOR on-disk content, and anything it
 #     cannot read as an array is NOT a stub — so it gets snapshotted. Un-decodable content
 #     (an external editor, a truncated write, a hand-edited file) is the case with the MOST
@@ -584,6 +596,20 @@ rm -f "$DATA/Ord/.order.json"
 otree=$(curl -sG "$BASE" --data-urlencode "action=tree")
 ordnames=$(printf '%s' "$otree" | tr '{' '\n' | grep -o '"name":"[ABC]"' | sed 's/.*:"//; s/"//' | tr -d '\n')
 eqs "…exactly as with NO .order.json on disk" "$ordnames" "ABC"
+
+# A REPEATED name in .order.json. buildTree indexes the order with array_flip, which keeps
+# the LAST occurrence of a duplicated value — so ["C.json","A.json","C.json"] gives C index 2,
+# A index 1, i.e. A before C. The CLIENT-side twin (sortChildrenLikeBuildTree, used for the
+# offline cached reorder) is FIRST-wins and reads the same list as C before A; the two
+# genuinely disagree on this one input. Reachable only via a hand-edited/merged order file or
+# a hand-built bundle — no production writer emits a duplicate — so both behaviours are pinned
+# (the client half in tests.html) rather than silently drifting further apart. Written straight
+# to disk: `reorder` would round-trip it, but the point is what buildTree READS.
+printf '%s' '["C.json","A.json","C.json"]' > "$DATA/Ord/.order.json"
+otree=$(curl -sG "$BASE" --data-urlencode "action=tree")
+ordnames=$(printf '%s' "$otree" | tr '{' '\n' | grep -o '"name":"[ABC]"' | sed 's/.*:"//; s/"//' | tr -d '\n')
+eqs "a repeated name in .order.json is LAST-wins on the server (array_flip)" "$ordnames" "ACB"
+rm -f "$DATA/Ord/.order.json"
 
 # SERVER-BEHAVIOUR PIN: create_folder calls prependOrder UNCONDITIONALLY, so re-creating a
 # folder that already exists jumps it to the top of its parent's order. That is why the

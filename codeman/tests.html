@@ -2331,6 +2331,79 @@
         }
       }
 
+      // ---- …and the OTHER half of the same line: VIEW mode has no caret --------------
+      // `const pos = el.classList.contains('viewing') ? 0 : lastCaret` is one expression
+      // with two halves. Only the lastCaret half was pinned above, so dropping the
+      // `viewing` test shipped green — and that regression is worse than the bug it
+      // replaced: lastCaret SURVIVES the edit session (updateActiveLine bails while
+      // .viewing, so it is never cleared), which means Split on a block the user is only
+      // READING would silently tear it in two at wherever the caret happened to be the
+      // last time they edited it. View mode, caret-at-0 and caret-at-end are all "no split
+      // point" — that is the semantic being preserved. Same end-to-end harness as above:
+      // real Edit → real caret → real Save (→ .viewing) → the real ⋯ → the real Split item.
+      // The refusal is a SUPPRESSION, so the same block, re-entered for editing with the
+      // same caret, is its control: it must still split.
+      {
+        const _cpp = currentPagePath, _cpd = currentPageData, _api = window.api,
+              _renderPage = window.renderPage, _toast = window.toast;
+        let sel = null, b = null;
+        try {
+          const SP = RUN + 'splitview/S.json';
+          const toasts = [];
+          window.api = async () => ({ ok: true, mtime: 1 });
+          window.renderPage = () => {};
+          window.toast = (m) => toasts.push(String(m));
+          b = { type: 'bash', label: '', code: 'one\ntwo' };   // no blank line ⇒ caret path
+          const arr = [b];
+          currentPagePath = SP;
+          currentPageData = { title: 's', sections: [{ title: 's', collapsed: false, tags: [], blocks: arr, subsections: [] }] };
+          pageDirty.clear();
+          if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+          sel = renderBlock(b, arr, 0);
+          document.body.appendChild(sel);
+          const splitNow = () => {
+            sel.querySelector('.block-overflow').click();
+            const it = [...document.querySelectorAll('.mini-menu .mini-menu-opt')]
+              .find(o => o.textContent.includes('Split'));
+            if (it) it.click();
+            document.querySelectorAll('.mini-menu').forEach(m => { if (m._close) m._close(); else m.remove(); });
+          };
+          // Edit, place a caret, then SAVE — lastCaret is now a live, stale 3.
+          sel.querySelector('.block-edit').click();
+          let textarea = sel.querySelector('.code-edit');
+          textarea.selectionStart = textarea.selectionEnd = 3;
+          textarea.dispatchEvent(new Event('keyup'));
+          sel.querySelector('.block-save').click();
+          for (let i = 0; i < 6; i++) await Promise.resolve();
+          await new Promise(r => setTimeout(r, 0));
+          ta('a saved block is back in view mode (the precondition for the refusal)',
+             sel.classList.contains('viewing'), true);
+          toasts.length = 0;
+          splitNow();
+          ta('Split in VIEW mode does NOT reuse the caret left over from the last edit',
+             arr.map(x => x.code), ['one\ntwo']);
+          ta('…it refuses, exactly as with no caret at all', toasts.some(m => m.includes('Nothing to split')), true);
+          // CONTROL: nothing about this block or this caret is unsplittable — only the
+          // view state is. Re-enter the edit session and the identical action splits.
+          sel.querySelector('.block-edit').click();
+          textarea = sel.querySelector('.code-edit');
+          textarea.selectionStart = textarea.selectionEnd = 3;
+          textarea.dispatchEvent(new Event('keyup'));
+          toasts.length = 0;
+          splitNow();
+          ta('CONTROL: the same block, same caret, back in EDIT mode does split',
+             arr.map(x => x.code), ['one', 'two']);
+        } finally {
+          document.querySelectorAll('.mini-menu').forEach(m => { if (m._close) m._close(); else m.remove(); });
+          if (b) blockBackups.delete(b);
+          if (sel) sel.remove();
+          currentPagePath = _cpp; currentPageData = _cpd; window.api = _api;
+          window.renderPage = _renderPage; window.toast = _toast;
+          pageDirty.clear(); cleanPageSnapshot = null;
+          if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+        }
+      }
+
       // ---- the per-render-path wiring, asserted THROUGH the render functions -------
       // The focus flush and the session-end hook were only ever exercised by calling them
       // directly (wireFocusFlush on a synthetic <div>, afterEditSession with a hand-set
@@ -2483,6 +2556,60 @@
         const ws = getComputedStyle(probe).whiteSpace;
         probe.remove(); link.remove();
         ta('.modal-title keeps newlines (white-space: pre-line)', ws, 'pre-line');
+      }
+
+      // ---- a sentence-length .toast stays inside the viewport ------------------------
+      // .toast is position:fixed with `right:16px` and an AUTO width, so it is shrink-to-fit
+      // and a sentence-length message (the bundle-scope import report) grows until it runs
+      // out of viewport — which is how it came to run off the left edge on mobile.
+      // `max-width: min(460px, calc(100vw - 32px))` is the fix and had no assertion at all.
+      // Measured here on real geometry against the real stylesheet, in an IFRAME because
+      // 100vw is the only way to express "the viewport" and the suite's own window is
+      // whatever size the runner gives it. Measured with the cap removed, for the record:
+      // at 375px the toast spans left:0 → right:359 (edge-to-edge, the 16px gutter gone),
+      // and at 1000px it is 935px of unbroken single line instead of a readable 460.
+      {
+        const cssHref = new URL('style.css', location.href).href;
+        // The genuinely longest composed toast in the app: importPages' full report plus
+        // the bundle-scope caveat.
+        const LONG = 'Imported 5 pages · restored 4 folders, 5 layout settings, 3 shape items failed · '
+                   + '2 existing folders left as-is — trash and version history are not included.';
+        const frames = [];
+        const measure = async (vw, text) => {
+          const f = document.createElement('iframe');
+          f.style.cssText = 'position:absolute;left:-10000px;top:0;border:0;width:' + vw + 'px;height:400px';
+          // overflow:hidden keeps a scrollbar from shaving the viewport width, so `vw`
+          // below really is the 100vw the cap is computed against.
+          f.srcdoc = '<!doctype html><html><head><link rel="stylesheet" href="' + cssHref + '">'
+                   + '<style>html,body{margin:0;overflow:hidden}</style></head><body></body></html>';
+          await new Promise((resolve) => { f.onload = resolve; f.onerror = resolve; document.body.appendChild(f); });
+          frames.push(f);
+          const d = f.contentDocument;
+          const el = d.createElement('div');
+          el.className = 'toast show';
+          el.textContent = text;
+          d.body.appendChild(el);
+          const r = el.getBoundingClientRect();
+          return { vw: f.contentWindow.innerWidth, left: Math.round(r.left), right: Math.round(r.right), width: Math.round(r.width) };
+        };
+        try {
+          const narrow = await measure(375, LONG);
+          ta('the 375px probe really is a 375px viewport', narrow.vw, 375);
+          ta('a sentence-length toast keeps a 16px gutter on BOTH edges at 375px',
+             { left: narrow.left, right: narrow.right }, { left: 16, right: 359 });
+          // The other arm of the min(): on a desktop viewport the cap is the fixed 460px,
+          // not "the whole window minus a gutter".
+          const wide = await measure(1000, LONG);
+          ta('…and on a wide viewport the cap is the fixed 460px arm', wide.width, 460);
+          // CONTROL for the cap: it is a MAX, so the short toasts every other caller passes
+          // are still shrink-to-fit and pixel-unchanged (a `width` in place of `max-width`
+          // would satisfy the two assertions above while stretching every "Saved").
+          const short = await measure(375, 'Saved');
+          ta('CONTROL: a short toast is still shrink-to-fit, not stretched to the cap',
+             short.width < 120, true);
+        } finally {
+          frames.forEach(f => f.remove());
+        }
       }
 
       // ---- D-B3: a wide table in a note/rich block SCROLLS, prose still wraps ---------
@@ -2867,6 +2994,20 @@
         ta('order:[] is the DEFAULT order, not an arbitrary one',
            sortChildrenLikeBuildTree(cached.slice(), []).map(orderKey),
            ['Sub', 'alpha.json', 'zeta.json']);
+        /* A REPEATED name in the order list. `if (!idx.has(k))` makes the FIRST occurrence
+           win, so ['C','A','C'] means C-then-A; drop the guard and the last occurrence wins,
+           which re-sorts the folder silently. No production path emits a duplicate (a drag
+           sends the full unique child list, buildLibraryMeta reads unique on-disk names), so
+           this is only reachable through a hand-edited/merged .order.json or a hand-built
+           bundle — but on exactly that input the SERVER DISAGREES: PHP's array_flip keeps the
+           LAST occurrence, so buildTree reads the same file as A-then-C (pinned in
+           tests-api.sh alongside this). Neither side is "the spec"; both are pinned so a
+           change to either is a deliberate one rather than a silent drift. */
+        const dupd = [{ type: 'page', name: 'A', path: 'F/A.json' },
+                      { type: 'page', name: 'C', path: 'F/C.json' }];
+        ta('a repeated name in the order list is FIRST-wins on the client',
+           sortChildrenLikeBuildTree(dupd.slice(), ['C.json', 'A.json', 'C.json']).map(orderKey),
+           ['C.json', 'A.json']);
         // …and the same, driven through the REAL offline caller (coverage of a pure
         // helper is not coverage of its wiring — that lesson is in CLAUDE.md).
         {
