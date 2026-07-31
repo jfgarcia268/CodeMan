@@ -2942,6 +2942,16 @@
         ta('colSort is filtered to enumerated folders and the allowlisted fields',
            Object.keys(meta.colSort).sort(), ['', 'Work']);
         ta('…preserving field and direction', meta.colSort['Work'], { field: 'name', dir: 'desc' });
+        // M-BLM-07: the EXPORT side normalises `dir` too, and that half was unpinned — the
+        // asymmetry is the tell, since the identical expression on the IMPORT side
+        // (readLibraryMeta, below) IS asserted. Same "N call sites, N assertions" shape as
+        // the rest of this sweep: a junk dir written into the bundle round-trips into the
+        // restored .colsort.json, where nothing downstream re-checks it. The `desc`
+        // assertion directly above is this one's positive control — normalisation must not
+        // flatten a REAL direction to 'asc'.
+        const dirMeta = buildLibraryMeta([{ type: 'folder', name: 'F', path: 'F', children: [] }],
+          { 'F': { field: 'name', dir: 'sideways' } }, new Set(), '', '');
+        t('a junk colsort dir is normalised on the EXPORT side too', dirMeta.colSort['F'].dir, 'asc');
         ta('favourites ride in a SEPARATE client block, filtered to pages in the tree',
            meta.client.favorites, ['Work/Salesforce/Runbook.json']);
         t('…and recentCopies stays out', meta.client.recentCopies, undefined);
@@ -2994,6 +3004,18 @@
            [{ path: null, project: false, order: null }]);
         ta('a junk colsort field is dropped',
            Object.keys(readLibraryMeta({ __codeman_meta: { format: 'codeman-library', folders: [], colSort: { X: { field: 'evil' } } } }).colSort), []);
+        // M-RLM-06: `strs()` is deny-by-default hygiene on the RESTORE path and has THREE
+        // consumers — a folder's `order`, `rootOrder`, and `client.favorites`. None was
+        // asserted, so dropping the `.filter` shipped green while a non-string survived
+        // into the `reorder` payload SENT to the server. Caller coverage of the order
+        // consumer (the payload itself) is in the wiring block below — helper coverage is
+        // not caller coverage.
+        const junkLists = readLibraryMeta({ __codeman_meta: { format: 'codeman-library',
+          folders: [{ path: 'F', order: ['A', null, 7, 'B'] }],
+          rootOrder: ['R', {}, 'S'], client: { favorites: ['P.json', 5] } } });
+        ta("a folder's order keeps only its STRINGS", junkLists.folders[0].order, ['A', 'B']);
+        ta('…as does rootOrder', junkLists.rootOrder, ['R', 'S']);
+        ta('…and the favourites list', junkLists.favorites, ['P.json']);
 
         /* --- AC#5: forward compatibility, by construction -------------------------------
            A NEW bundle imported by the PRE-CHANGE client: the page loop's shape guard is
@@ -3221,6 +3243,72 @@
             favorites.has('Work/Salesforce/Runbook.json'), true);
           t('…and one for a page the bundle does NOT contain is not resurrected',
             favorites.has('Ghost/Gone.json'), false);
+
+          // ---- 14. M-RLM-06 (caller): a non-string order never reaches the SERVER -----
+          // readLibraryMeta's strs() filter is asserted as a helper above; what actually
+          // matters is the `reorder` PAYLOAD, which is what the sweep's recurring lesson
+          // is about. Both consumers that can reach a payload are exercised in one run:
+          // a folder's recorded order and rootOrder.
+          favorites.clear();
+          await runImport({ __codeman_meta: Object.assign({}, meta, {
+            folders: [{ path: 'Ord', order: ['A.json', null, 7, 'B.json'] }],
+            rootOrder: ['Ord', {}, 'Z.json'], colSort: {}, client: { favorites: [] },
+          }) }, []);
+          ta('a non-string in a sidecar order never reaches the reorder payload',
+             of('reorder').map(c => c[1].parent + ' → ' + JSON.stringify(c[1].order)),
+             ['Ord → ["A.json","B.json"]', ' → ["Ord","Z.json"]']);
+
+          // ---- 15. M-IMP-10: the stale-`known` retry is CONDITIONAL, in BOTH directions
+          // Case 10 pins the retry EXISTING; nothing pinned it staying NARROW. Made
+          // unconditional, ANY create_page rejection (quota, a hostile name, a disk error)
+          // rebuilds the whole chain, which re-`create_folder`s an EXISTING folder — that
+          // both jumps it to the top of its parent (create_folder prependOrders
+          // unconditionally) and re-marks it `created`, pulling it into the Phase-4 layout
+          // targets. Merge restraint then breaks for a folder the import never created:
+          // the user's sidebar reshuffles on a failed page.
+          const staleMeta = Object.assign({}, meta, {
+            folders: [{ path: 'Gone', order: ['P.json', 'Q.json'] }],
+            rootOrder: null, colSort: {}, client: { favorites: [] },
+          });
+          const goneSeed = () => [{ type: 'folder', name: 'Gone', path: 'Gone', children: [] }];
+          // (a) NEGATIVE: a NON-parent rejection must not trigger a rebuild.
+          await runImport({ 'Gone/P.json': { sections: [] }, __codeman_meta: staleMeta }, goneSeed(),
+            { create_page: () => ({ error: 'disk quota exceeded' }) });
+          t('a create_page rejection that is NOT about the parent is never retried', of('create_page').length, 1);
+          ta('…and rebuilds no folder chain', of('create_folder').map(c => c[1].name), []);
+          ta('…so an EXISTING folder is never pulled into the layout phase (merge restraint)',
+             of('reorder'), []);
+          t('…while the page is still counted as failed',
+            /^Imported 0 pages, 1 failed/.test(toasts[0]), true);
+          // (b) POSITIVE CONTROL for the three suppression assertions above: a GENUINE
+          // stale-parent rejection DOES rebuild and retry, and the rebuilt folder IS then
+          // a layout target. Without this pairing, "0 create_folder / 0 reorder" cannot
+          // tell "the condition held" from "the retry does not exist at all".
+          let firstGone = true;
+          await runImport({ 'Gone/P.json': { sections: [] }, __codeman_meta: staleMeta }, goneSeed(),
+            { create_page: (b) => { if (firstGone) { firstGone = false; return { error: 'parent folder does not exist' }; } return dirs.has(b.parent) ? { ok: true } : { error: 'parent folder does not exist' }; } });
+          ta('a STALE-parent rejection does rebuild the chain and retry',
+             [of('create_page').length, of('create_folder').map(c => c[1].name)], [2, ['Gone']]);
+          ta('…and the rebuilt folder IS a layout target',
+             of('reorder').map(c => c[1].parent + ' → ' + JSON.stringify(c[1].order)),
+             ['Gone → ["P.json","Q.json"]']);
+          t('…and the page lands rather than being lost', /^Imported 1 page/.test(toasts[0]), true);
+
+          // ---- 16. M-IMP-13: an ORPHAN folder entry is never SENT ---------------------
+          // A sidecar entry whose parent is enumerated nowhere is rejected client-side.
+          // Both counters net out the same in the toast (bad = shapeFailed + folderFailed),
+          // so the CALL LIST is the discriminating assertion: sending it would exercise
+          // api.php's parent guard as an error path, which the design forbids. `Fine` in
+          // the same run is the positive control — a legitimate entry DOES produce a call,
+          // so this is not a vacuous "no calls were made".
+          await runImport({ __codeman_meta: Object.assign({}, meta, {
+            folders: [{ path: 'Fine' }, { path: 'Orphan/Child' }],
+            rootOrder: null, colSort: {}, client: { favorites: [] },
+          }) }, []);
+          ta('an orphan folder entry is never SENT, while a legitimate one is',
+             of('create_folder').map(c => (c[1].parent ? c[1].parent + '/' : '') + c[1].name), ['Fine']);
+          t('…the orphan is counted', toasts[0].includes('1 shape item failed'), true);
+          t('…and the legitimate entry is restored', /restored 1 folder/.test(toasts[0]), true);
         } finally {
           document.createElement = _create; HTMLInputElement.prototype.click = _click;
           window.toast = _toast; window.loadTree = _load; window.api = _api;

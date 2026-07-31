@@ -15,7 +15,7 @@ and reports against this matrix); UI/usability passes are run by the
 
 1. **Automated suites first** (fast, deterministic):
    - **Client units** — open `codeman/tests.html` in a browser. Expect the summary
-     **"N passed, 0 failed"** (currently **897**). `window.__testResult = {pass, fail, done}` for
+     **"N passed, 0 failed"** (currently **912**). `window.__testResult = {pass, fail, done}` for
      scripting (`done` flips true after the async offline tests finish).
    - **Server API** — `bash codeman/tests-api.sh` (spins a throwaway `php -S` against a temp data
      dir; exit 0 = all green; currently **194**). Override port: `bash codeman/tests-api.sh 8099` —
@@ -869,10 +869,21 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   and its project-vs-plain marker byte-for-byte; it does **not** jump to the top of its parent (the
   old import called `create_folder` for every path segment of every page, and `create_folder`
   prependOrders unconditionally); and the toast says `· N existing folder(s) left as-is` so an
-  unchanged sidebar is explained rather than looking like a failure. **[auto: tests.html — the
-  create/reorder/set_col_sort calls the import does and does not make, plus the `left as-is`
-  clause]** *(manual only: the byte-for-byte on-disk comparison of the pre-existing folder's
-  `.order.json`/`.colsort.json`/`.project` before and after.)*
+  unchanged sidebar is explained rather than looking like a failure. **A second, subtler route into
+  the same damage: the stale-`known` retry.** When a `create_page` is refused because its parent is
+  genuinely gone (another device deleted the folder), the import rebuilds that page's chain once and
+  retries — and the rebuilt folder legitimately becomes a layout target. That retry must stay
+  **narrow**: a rejection for any OTHER reason (quota, a name the server dislikes, a disk error) must
+  NOT rebuild the chain, because re-`create_folder`ing an existing folder both jumps it to the top of
+  its parent AND re-marks it as "created by this import", which pulls a folder the import never made
+  into the layout phase. Verify both directions: make `create_page` fail with a non-parent error (the
+  chain is untouched, the page is counted failed, nothing is reordered) and with
+  `parent folder does not exist` (the chain is rebuilt, the page lands, the rebuilt folder's recorded
+  order is applied). **[auto: tests.html — the create/reorder/set_col_sort calls the import does and
+  does not make, plus the `left as-is` clause; and both retry directions, the stale-parent one
+  serving as the positive control for the non-parent one's zero-call assertions]** *(manual only: the
+  byte-for-byte on-disk comparison of the pre-existing folder's `.order.json`/`.colsort.json`/
+  `.project` before and after.)*
 - TC-io-11 (A, **offline-only desktop**): export then import end to end with no server reachable —
   the shape restores from the IndexedDB mirror (empty folders included), and a later reconnect
   flushes cleanly. **On the write-queue size, measure — don't assume it shrinks.** The change trades
@@ -884,9 +895,17 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   count for the library under test rather than asserting a direction.
 - TC-io-12 (N, **hostile sidecar**): hand-edit a bundle's `__codeman_meta` to contain a traversal
   path (`../escape`), a dotfile path (`.history`), a non-string path, a project whose parent is a
-  **plain** folder, and a junk `colSort` field. Each is rejected **client-side** (no request is
+  **plain** folder, a junk `colSort` field, an **orphan** folder entry (`Orphan/Child` with no
+  `Orphan` entry anywhere), and a **non-string inside an `order` array** (`["A", null, 7, "B"]`).
+  Each is rejected **client-side** (no request is
   sent), each real rejection is **counted** in the toast's `N shape item(s) failed`, and nothing in
-  the data root is corrupted. The project-under-a-plain-folder case is **not** a failure: it is
+  the data root is corrupted. The orphan entry is the same class as the project downgrade: the
+  server's parent guard must **never** be exercised as an error path, so no `create_folder` is sent
+  for it at all — and because `shapeFailed` and `folderFailed` net out identically in the toast, the
+  **absence of the request** is the only observable difference. The non-string order entry is
+  filtered on both ends: `readLibraryMeta` strips it on the way in (and the same filter guards
+  `rootOrder` and `client.favorites`), and `buildLibraryMeta` normalises a junk `colSort` `dir` on the
+  way **out** as well as in. The project-under-a-plain-folder case is **not** a failure: it is
   downgraded to `create_folder` (the server guard must never be exercised as an error path) and
   reported in its own clause — `· 1 project restored as a plain folder (a project cannot sit inside
   a plain folder)` — because the folder and all its pages landed, and reporting it as
@@ -899,7 +918,12 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   `folders`-not-an-array is only distinguishable via an array-LIKE with a `.map` (a string falls
   into the never-throw catch and returns null either way), and the array-sidecar guard only via an
   array CARRYING `format`/`folders`. Both are asserted that way; the plain-JSON forms are kept
-  beside them but prove nothing on their own.]**
+  beside them but prove nothing on their own. The orphan entry and the non-string order are asserted
+  through the REAL `importPages` — on the CALL LIST and the `reorder` PAYLOAD respectively, not on
+  `readLibraryMeta`'s return value alone — and the orphan run's zero-call assertion is paired with a
+  legitimate sibling entry that DOES produce a `create_folder`, so it can never pass vacuously. The
+  export-side `dir` normalisation is controlled by the existing assertion that a REAL `desc`
+  survives.]**
 - TC-io-13 (P/E, **the user's manual order survives a restore**): the sidecar **omits** a folder's
   `order` whenever `defaultChildOrder` (tree.js) thinks the children are already in `buildTree`'s
   default order — so a divergence between those two comparators silently **DROPS** a dragged order
