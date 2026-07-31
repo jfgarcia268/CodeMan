@@ -15,7 +15,7 @@ and reports against this matrix); UI/usability passes are run by the
 
 1. **Automated suites first** (fast, deterministic):
    - **Client units** — open `codeman/tests.html` in a browser. Expect the summary
-     **"N passed, 0 failed"** (currently **886**). `window.__testResult = {pass, fail, done}` for
+     **"N passed, 0 failed"** (currently **897**). `window.__testResult = {pass, fail, done}` for
      scripting (`done` flips true after the async offline tests finish).
    - **Server API** — `bash codeman/tests-api.sh` (spins a throwaway `php -S` against a temp data
      dir; exit 0 = all green; currently **194**). Override port: `bash codeman/tests-api.sh 8099` —
@@ -102,10 +102,17 @@ Each case lists **dimensions** to cover: **P**ositive · **N**egative · **E**dg
   (that was a real second defect, invisible to the unit suite until the live run). Prime the mirror
   first (a healthy boot, or `⋯ → Prime offline cache`), then break the response.
   Related shape guards: the **Trash** and **History** panels say "Could not load…" on a non-array
-  response instead of claiming they're empty. **[auto: tests.html — malformed-tree guard (setTreeData
+  response instead of claiming they're empty. `cacheOnSuccess` names **three** per-action guards —
+  `tree`, `col_sorts`, `get_page` — and all three are in scope: break the **`col_sorts`** response
+  the same way (200 + `{"error":…}` / `null` / `[]`), reload, and confirm the per-column `⇅` sort
+  prefs still come back (inspect `kv` → the namespaced `colsorts` key: it must still hold the good
+  map, not the error body — nothing later repairs it, so a poisoned one survives every reload).
+  **[auto: tests.html — malformed-tree guard (setTreeData
   rejects every non-array shape / loadTree falls back to the mirror / navigation does not throw /
   cacheOnSuccess leaves the kv mirror intact on a malformed, 4xx or null body, and still caches a
-  valid one) · `probeBackend` refuses a malformed tree, stays offline and leaves both the persisted
+  valid one) · the same five-shape sweep for **`col_sorts`** plus a positive control that a valid
+  object DOES refresh the `colsorts` mirror (a "nothing was written" assertion proves nothing
+  without one) · `probeBackend` refuses a malformed tree, stays offline and leaves both the persisted
   mirror and `treeData` intact (and still reconnects on a valid one) · `flushQueue` drains its ops,
   skips only the reconcile and still reports `Synced` · the Trash and History panels' "Could not
   load…" vs genuinely-empty wording]** *(manual half: the live devtools/`echo` interception and the
@@ -783,7 +790,14 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   `tab.data` and the next autosave would write it to disk. With a page open, make `get_page`
   answer `{"error":"invalid path"}` (devtools) and run a Replace all that changes that page: the
   tab keeps its real content and its `baseMtime`, and no error body reaches the editor.
-  **[auto: tests.html — the REAL `openReplace` Replace-all against a stubbed `get_page` error]**
+  **Then the other half, which is the more damaging one:** with `get_page` healthy, run the same
+  Replace all and confirm the open tab now shows the **replaced** text (and picked up the new
+  `baseMtime`). A reconcile that silently never runs leaves every open tab on **pre-replace**
+  content, and the next autosave writes that stale text back over the server's replacement — and it
+  looks identical to "the guard worked" from the outside.
+  **[auto: tests.html — the REAL `openReplace` Replace-all against a stubbed `get_page` error,
+  instrumented so the reconcile must actually be REACHED, plus a positive control that a valid
+  reply DOES replace `tab.data`/`baseMtime`/`currentPageData`]**
 
 ### TC-io — Export / Import
 - TC-io-01 (P): export HTML (self-contained, title escaped) / Markdown / JSON. **[auto: tests.html pageToHtml/pageToMarkdown]**
@@ -900,7 +914,17 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
   literals. The corpus now carries `Ｗide` (U+FF37) and `😀emoji` (U+1F600): byte order puts `Ｗide`
   first, UTF-16 code-unit order puts the emoji first, so they are the ONLY pair that catches
   `cmpUtf8` regressing to a plain JS string compare — every other name in the corpus is BMP, where
-  the two orderings agree.]**
+  the two orderings agree. It ALSO carries `Cap`/`cap`, two same-type siblings differing only in
+  case: the type tier ties and ASCII folding ties, so only the raw-byte tier can order them — the
+  one input that catches `cmpUtf8(a.r, b.r)` being dropped. They are listed in the corpus in the
+  OPPOSITE order on purpose, or the index tie-break would reproduce the right answer anyway.]**
+  ⚠️ **Filesystem caveat (Extended, Linux only):** `Cap/` and `cap/` cannot coexist on a
+  case-INSENSITIVE volume (macOS/APFS), so `tests-api.sh` probes the test volume and drops `cap`
+  from the expected slice when it folds case — the oracle *literal* stays byte-identical in both
+  suites (invariant 11) either way. The CI runner is Linux, so the full pair IS exercised on every
+  push; a purely-macOS local run leaves the server half of that pair unproved. This matters because
+  the documented production deployment is Linux/Docker, where `Alpha/` and `alpha/` really can
+  coexist and a lost tier 3 is a false "already default" verdict — the data-losing direction.
 - TC-io-14 (P/E, **import is a MERGE, and stars are bundle-scoped**): a restore must not clear the
   favourites the user already has, and must not resurrect a star for a page the bundle doesn't
   contain. Star a page that is NOT in the bundle, import a bundle whose sidecar stars (a) a page it

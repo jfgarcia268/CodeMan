@@ -619,12 +619,34 @@ test ! -e "$DATA/PlainP/Nope" && ok "…and nothing was created" || bad "create_
 # from a plain JS string compare. Without a supplementary-plane name the whole corpus is
 # BMP and the JS side could silently regress to string comparison — in the data-LOSING
 # direction (a false "already default" verdict discards the user's manual order).
-SORT_ORACLE_JSON='["10x","2x","_under","a b","a-b","a_b","Alpha","alpha2","beta","ZZ","Ångström","Ｗide","😀emoji","9lives.json","alpha.json","Beta.json","Zed.json","Émile.json"]'
+# Cap/cap are the TIER-3 pair: two SAME-TYPE siblings differing only in case, so the type
+# tier ties and PHP's ASCII-only strcasecmp ties too — the order comes purely from
+# scandir's ascending (byte) sort, which PHP 8's STABLE usort preserves, i.e. Cap first.
+# That is the tier tree.js models as cmpUtf8(a.r, b.r), and it IS reachable in production:
+# the documented deployment is Linux/Docker, where Alpha/ and alpha/ coexist.
+# FILESYSTEM CAVEAT: on a case-INSENSITIVE volume (macOS/APFS, the usual dev machine) the
+# two directories cannot both exist — `mkdir cap` after `mkdir Cap` fails — so the pair is
+# untestable server-side there. The ORACLE LITERAL stays byte-identical with tests.html
+# (CI invariant 11); only the on-disk corpus and the expected slice drop "cap" when the
+# volume folds case. The CI runner is Linux, so the full pair IS exercised on every push.
+SORT_ORACLE_JSON='["10x","2x","_under","a b","a-b","a_b","Alpha","alpha2","beta","Cap","cap","ZZ","Ångström","Ｗide","😀emoji","9lives.json","alpha.json","Beta.json","Zed.json","Émile.json"]'
 mkdir -p "$DATA/Sortcase"
 for d in "Alpha" "beta" "alpha2" "ZZ" "_under" "10x" "2x" "a b" "a-b" "a_b" "Ångström" "Ｗide" "😀emoji"; do mkdir -p "$DATA/Sortcase/$d"; done
 for p in "Beta" "alpha" "Zed" "Émile" "9lives"; do
   printf '%s' '{"title":"x","sections":[]}' > "$DATA/Sortcase/$p.json"
 done
+CASE_SENSITIVE=0
+mkdir "$DATA/Sortcase/Cap" 2>/dev/null
+if mkdir "$DATA/Sortcase/cap" 2>/dev/null; then CASE_SENSITIVE=1; fi
+if [ "$CASE_SENSITIVE" = 1 ]; then
+  SORT_EXPECT="$SORT_ORACLE_JSON"
+else
+  echo "  · case-insensitive volume: the Cap/cap tier-3 pair is skipped server-side (pinned in tests.html)"
+  SORT_EXPECT=$(printf '%s' "$SORT_ORACLE_JSON" | php -r '
+  $a = json_decode(stream_get_contents(STDIN), true);
+  echo json_encode(array_values(array_filter($a, function ($x) { return $x !== "cap"; })), JSON_UNESCAPED_UNICODE);
+  ')
+fi
 got=$(curl -sG "$BASE" --data-urlencode "action=tree" | php -r '
 $t = json_decode(stream_get_contents(STDIN), true);
 $s = null; foreach ($t as $x) if ($x["type"] === "folder" && $x["name"] === "Sortcase") $s = $x;
@@ -633,7 +655,7 @@ echo json_encode(array_map(function ($i) {
   return $i["type"] === "folder" ? $i["name"] : $i["name"] . ".json";
 }, $s["children"]), JSON_UNESCAPED_UNICODE);
 ')
-eqs "buildTree default order matches the shared comparator oracle" "$got" "$SORT_ORACLE_JSON"
+eqs "buildTree default order matches the shared comparator oracle" "$got" "$SORT_EXPECT"
 rm -rf "$DATA/Sortcase"
 
 # --- col_sorts / set_col_sort (per-column sort prefs, one root-level .colsort.json) --

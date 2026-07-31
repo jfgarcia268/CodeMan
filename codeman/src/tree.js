@@ -280,9 +280,11 @@ function cmpUtf8(ba, bb) {
 // t: type tier (folders first) · f: ASCII-folded name bytes (= strcasecmp) ·
 // r: raw name bytes (= scandir's SCANDIR_SORT_ASCENDING, which PHP 8's STABLE usort
 // preserves for a strcasecmp tie) · i: original index, so the sort is a total order.
-// Tier 3 only fires for two siblings differing solely in case — impossible on a
-// case-insensitive volume (macOS/APFS) and unspecified on PHP < 8.0's unstable usort;
-// it is here to make the JS side total, not to chase that case.
+// Tier 3 only fires for two siblings differing solely in case. That is impossible on a
+// case-INSENSITIVE volume (macOS/APFS, the usual dev machine) but entirely reachable on
+// the documented Linux/Docker deployment, where Alpha/ and alpha/ coexist — and there a
+// missing tier 3 is a false "already default" verdict, i.e. it DROPS the user's manual
+// order. Do not delete it as dead weight; the oracle carries a Cap/cap pair for it.
 function decorateChild(n, i) {
   const enc = new TextEncoder();
   const name = String((n && n.name) || '');

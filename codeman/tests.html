@@ -2792,11 +2792,22 @@
            cmpUtf8 apart from a plain string compare — and the rest of the corpus is BMP,
            so without them the JS side could regress to `<` in the data-LOSING direction
            (a false "already default" verdict discards the user's manual order). An
-           emoji-named folder is all it takes. */
-        const SORT_ORACLE_JSON = '["10x","2x","_under","a b","a-b","a_b","Alpha","alpha2","beta","ZZ","Ångström","Ｗide","😀emoji","9lives.json","alpha.json","Beta.json","Zed.json","Émile.json"]';
+           emoji-named folder is all it takes.
+           Cap/cap are the TIER-3 pair: two SAME-TYPE siblings differing only in case, so
+           the type tier ties and asciiFold makes tier 2 tie too — only the raw-byte tier
+           (cmpUtf8(a.r, b.r), = scandir's ascending sort preserved by PHP 8's STABLE usort)
+           can order them, and 'C' 0x43 < 'c' 0x63 puts Cap first. They are listed in the
+           corpus in the OPPOSITE order (cap before Cap) on purpose: with them in oracle
+           order the index tie-break would reproduce the right answer and tier 3 would stay
+           deletable. Unreachable on a case-INSENSITIVE volume (macOS/APFS — the two dirs
+           cannot coexist), but the documented deployment is Linux/Docker, where they can;
+           there a lost tier 3 is a false "already default" verdict, the data-losing
+           direction again. See the tests-api.sh note for why the server side skips this
+           pair when the test volume folds case. */
+        const SORT_ORACLE_JSON = '["10x","2x","_under","a b","a-b","a_b","Alpha","alpha2","beta","Cap","cap","ZZ","Ångström","Ｗide","😀emoji","9lives.json","alpha.json","Beta.json","Zed.json","Émile.json"]';
         const SORT_ORACLE = JSON.parse(SORT_ORACLE_JSON);
         const corpus = []
-          .concat(['Alpha', 'beta', 'alpha2', 'ZZ', '_under', '10x', '2x', 'a b', 'a-b', 'a_b', 'Ångström', 'Ｗide', '😀emoji']
+          .concat(['Alpha', 'cap', 'beta', 'alpha2', 'ZZ', '_under', '10x', '2x', 'a b', 'a-b', 'a_b', 'Ångström', 'Ｗide', '😀emoji', 'Cap']
             .map(name => ({ type: 'folder', name, path: name })))
           .concat(['Beta', 'alpha', 'Zed', 'Émile', '9lives']
             .map(name => ({ type: 'page', name, path: name + '.json' })));
@@ -3450,6 +3461,52 @@
         }
       }
 
+      // ---- …and the THIRD per-action guard in the same paragraph: col_sorts -----------
+      // cacheOnSuccess's shape check names THREE actions — tree, col_sorts, get_page.
+      // tree and get_page were pinned above; col_sorts had ZERO assertions, so its guard
+      // was deletable with a fully green suite. Same blast radius in miniature: a
+      // reachable-but-wrong `col_sorts` body written into the PERSISTED `colsorts` mirror
+      // means the per-column sort prefs come back corrupt offline and survive a reload
+      // (loadTree reads the mirror, so nothing later repairs it). The suppression
+      // assertions are paired with a POSITIVE CONTROL — "the mirror is untouched" proves
+      // nothing on its own if the write never happens for an unrelated reason.
+      {
+        const _fetch = window.fetch, _setOffline = window.setOffline, _renderTree = window.renderTree;
+        const csBefore = await kvGet('colsorts');
+        const goodCs = { '': { field: 'name', dir: 'asc' }, 'Ord': { field: 'kind', dir: 'desc' } };
+        try {
+          window.setOffline = () => {}; window.renderTree = () => {};
+          const res = (status, bodyText) => Promise.resolve({
+            status, ok: status < 400, json: async () => JSON.parse(bodyText),
+          });
+          await kvSet('colsorts', goodCs);
+          window.fetch = () => res(200, '{"error":"nope"}');              // 200 + error body
+          await api('col_sorts');
+          ta('an error col_sorts body leaves the colsorts mirror INTACT', await kvGet('colsorts'), goodCs);
+          window.fetch = () => res(400, '{"error":"nope"}');              // reachable 4xx
+          await api('col_sorts');
+          ta('a 4xx col_sorts response leaves the colsorts mirror INTACT', await kvGet('colsorts'), goodCs);
+          window.fetch = () => res(200, 'null');                          // 200, wrong shape
+          await api('col_sorts');
+          ta('a null col_sorts response leaves the colsorts mirror INTACT', await kvGet('colsorts'), goodCs);
+          window.fetch = () => res(200, '[]');                            // 200, array shape
+          await api('col_sorts');
+          ta('an ARRAY-shaped col_sorts response leaves the colsorts mirror INTACT',
+             await kvGet('colsorts'), goodCs);
+          window.fetch = () => res(200, '<br />Warning: oops<br />{}');   // unparseable → _transient
+          await api('col_sorts');
+          ta('a malformed col_sorts body leaves the colsorts mirror INTACT', await kvGet('colsorts'), goodCs);
+          // POSITIVE CONTROL — without this the five above pass with cacheOnSuccess gutted.
+          window.fetch = () => res(200, '{"Fresh":{"field":"kind","dir":"asc"}}');
+          await api('col_sorts');
+          ta('…while a VALID col_sorts object DOES refresh the mirror',
+             await kvGet('colsorts'), { Fresh: { field: 'kind', dir: 'asc' } });
+        } finally {
+          window.fetch = _fetch; window.setOffline = _setOffline; window.renderTree = _renderTree;
+          if (csBefore === undefined) await kvDel('colsorts'); else await kvSet('colsorts', csBefore);
+        }
+      }
+
       // ---- …and the SIBLING call sites in the same paragraph ------------------------
       // cacheOnSuccess (above) was pinned; the two offline.js sites that call apiFetch('tree')
       // DIRECTLY — probeBackend's reconnect probe and flushQueue's post-drain reconcile —
@@ -3555,19 +3612,45 @@
           openPages.length = 0;
           openPages.push({ path: FRP, title: 'P', data: original, filter: '', baseMtime: 5 });
           activePath = FRP; currentPagePath = FRP; currentPageData = original;
+          // The three suppression assertions below observe state that is UNCHANGED — which
+          // is also exactly what you observe when the loop never runs at all (proved:
+          // `if (true) continue;` at the top of the reconcile loop left the whole suite
+          // green). So the run is instrumented (get_page must actually be REACHED) and
+          // followed by a positive control, mirroring flushQueue's `treeCalls` pin above.
+          let getCalls = 0;
+          const replaceAll = async () => {
+            openReplace();
+            const overlay = document.body.lastElementChild;
+            overlay.querySelector('.fr-input').value = 'x';
+            await [...overlay.querySelectorAll('button')].find(b => b.textContent === 'Replace all').onclick();
+            overlay.querySelector('.panel-head button').click();
+          };
           window.api = async (action) => {
             if (action === 'replace_content') return { totalMatches: 1, pages: [{ path: FRP, matches: 1 }], changedPages: 1 };
-            if (action === 'get_page') return { error: 'invalid path' };
+            if (action === 'get_page') { getCalls++; return { error: 'invalid path' }; }
             return { ok: true };
           };
-          openReplace();
-          const overlay = document.body.lastElementChild;
-          overlay.querySelector('.fr-input').value = 'x';
-          await [...overlay.querySelectorAll('button')].find(b => b.textContent === 'Replace all').onclick();
-          overlay.querySelector('.panel-head button').click();
+          await replaceAll();
           ta("a malformed get_page never becomes the open tab's content", openPages[0].data, original);
           ta('…and currentPageData is left pointing at the real page', currentPageData, original);
           ta('…and the tab keeps its baseMtime rather than adopting a bogus one', openPages[0].baseMtime, 5);
+          ta('…and the reconcile was actually ATTEMPTED (not skipped for the changed page)', getCalls, 1);
+          // POSITIVE CONTROL. The regression the suppression assertions CANNOT see is the
+          // more damaging one: a reconcile that never runs leaves every open tab holding
+          // PRE-replace content, and the next autosave writes that stale content back over
+          // the server's replacement (the applyRename class). A valid reply must land.
+          const fresh = { title: 'P', sections: [{ title: 'S', blocks: [{ type: 'sql', code: 'AFTER' }], subsections: [] }] };
+          window.api = async (action) => {
+            if (action === 'replace_content') return { totalMatches: 1, pages: [{ path: FRP, matches: 1 }], changedPages: 1 };
+            if (action === 'get_page') { getCalls++; return Object.assign({ _mtime: 42 }, JSON.parse(JSON.stringify(fresh))); }
+            return { ok: true };
+          };
+          await replaceAll();
+          ta('a VALID get_page DOES replace the open tab content (else stale text is re-saved)',
+             openPages[0].data, fresh);
+          ta('…and the tab adopts the refreshed baseMtime', openPages[0].baseMtime, 42);
+          ta('…and the active page renders the refreshed data', currentPageData, fresh);
+          ta('…via a second real get_page call', getCalls, 2);
         } finally {
           window.api = _api; window.toast = _toast; window.showConfirm = _confirm;
           window.loadTree = _load; window.renderPage = _render;
