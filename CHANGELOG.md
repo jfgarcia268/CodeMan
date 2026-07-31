@@ -13,6 +13,8 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
 
 ## [Unreleased]
 
+## [1.14.0] — 2026-07-31
+
 ### Added
 - **HTML preview block.** A new block kind that holds a small static web project (an entry HTML file
   plus its CSS, JS and images) and renders it **live** inside the page. Upload a whole folder with
