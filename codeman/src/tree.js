@@ -17,7 +17,16 @@ let treeData = [];
 // anywhere else would leave those aggregates stale; a CI grep invariant (tests.yml
 // `invariants` job) enforces that no bare assignment survives outside this function.
 // Reads of the global stay direct everywhere.
-function setTreeData(t) { treeData = t; invalidateTreeMemos(); }
+// It is ALSO the single shape guard: treeData must stay an ARRAY or every consumer
+// (folderChildren → nodeAtPath → renderTree/navigation) throws. A malformed `tree`
+// response — a 200 carrying {error:…}, null, or a PHP notice — used to land here
+// verbatim: the library rendered as the EMPTY onboarding state and the next click
+// threw "folderChildren(...).find is not a function". A bad shape is REJECTED (the
+// last good tree survives) and reported as `false` so the caller can fall back to the
+// offline mirror instead of showing an empty library — see loadTree below. Guarding at
+// the choke point covers all five writers (loadTree + offline.js's probeBackend /
+// flushQueue reconcile / restoreNodeToTree / mutateTreeCache).
+function setTreeData(t) { if (!Array.isArray(t)) return false; treeData = t; invalidateTreeMemos(); return true; }
 // Memoize a pure node→value function by node identity (WeakMap). Repeated renders
 // (sidebar resize, Miller window paging, keyboard-driven re-renders) re-request the
 // same folder aggregates; caching by the node object avoids re-walking the subtree
@@ -123,7 +132,19 @@ async function loadTree() {
     api('tree'),
     api('col_sorts').catch(() => null),   // preserve col_sorts-failure tolerance
   ]);
-  setTreeData(tree);
+  // A non-array `tree` is a FAILURE, not "the library is empty". api() only falls back
+  // to the IndexedDB mirror when apiFetch THROWS, so a *reachable* server answering 200
+  // with {error:…}/null/an unparseable body (→ the _transient error object) sails
+  // straight through and used to poison treeData — bypassing a perfectly good offline
+  // cache. Treat it like unreachable: read the mirror, flag offline (which also starts
+  // the self-healing probe loop), and say so out loud rather than silently rendering
+  // an empty library.
+  if (!setTreeData(tree)) {
+    const cached = await offlineApi('tree');   // namespaced local mirror ([] if none)
+    setTreeData(cached);
+    setOffline(true);
+    toast((tree && tree.error) || 'Could not load the library — showing the offline copy');
+  }
   colSort = cols || {};                    // null/undefined → default {} (as today)
   renderTree();
 }
@@ -214,6 +235,99 @@ function sortMillerChildren(children, pref) {
   const out = children.slice().sort(cmp);
   if (pref.dir === 'desc') out.reverse();
   return out;
+}
+
+/* ---------- buildTree's DEFAULT child order, reproduced client-side ----------
+   api.php's buildTree (:373-384) is the single authority on how a folder's children
+   are ordered: folders before pages, then the .order.json index (unlisted entries
+   last, PHP_INT_MAX), then strcasecmp(name). The library-shape sidecar
+   (buildLibraryMeta, features.js) records a folder's order ONLY where it differs from
+   that default, so a folder the user never dragged does not gain an .order.json
+   artifact on restore — which means the comparator below has to match the server's
+   EXACTLY. The direction of an error matters: a false "non-default" verdict writes an
+   order array that reproduces the same visible order (harmless), while a false
+   "default" verdict DROPS the user's manual order (data loss). Every tier exists to
+   make the second impossible. The two comparators live in different languages and
+   cannot call each other, so they are pinned to one shared hard-coded oracle asserted
+   independently in tests.html AND tests-api.sh (plus a CI grep that the oracle string
+   appears in both). */
+
+// The order KEY buildTree matches on (api.php:378-379): a folder's name, or
+// "<page>.json" for a page.
+function orderKey(n) {
+  if (!n) return '';
+  return n.type === 'folder' ? String(n.name || '') : String(n.name || '') + '.json';
+}
+
+// PHP's strcasecmp folds ASCII A-Z only (locale-independent since PHP 8.2).
+// JS toLowerCase() folds UNICODE too — 'İ' → 'i̇', 'Σ' → 'σ' — which would diverge
+// from the server on exactly the names that are hardest to notice. ASCII only.
+function asciiFold(s) {
+  return String(s == null ? '' : s).replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
+}
+
+// Lexicographic compare of two UTF-8 byte arrays (shorter-is-less on a prefix) —
+// what PHP's byte-wise strcasecmp/strcmp do. JS string '<' is UTF-16 CODE-UNIT
+// order, which differs from byte order for supplementary-plane characters, so the
+// bytes are compared explicitly rather than the strings.
+function cmpUtf8(ba, bb) {
+  const n = Math.min(ba.length, bb.length);
+  for (let i = 0; i < n; i++) if (ba[i] !== bb[i]) return ba[i] < bb[i] ? -1 : 1;
+  return ba.length === bb.length ? 0 : (ba.length < bb.length ? -1 : 1);
+}
+
+// Decorate a child once so TextEncoder runs O(n), not O(n log n).
+// t: type tier (folders first) · f: ASCII-folded name bytes (= strcasecmp) ·
+// r: raw name bytes (= scandir's SCANDIR_SORT_ASCENDING, which PHP 8's STABLE usort
+// preserves for a strcasecmp tie) · i: original index, so the sort is a total order.
+// Tier 3 only fires for two siblings differing solely in case. That is impossible on a
+// case-INSENSITIVE volume (macOS/APFS, the usual dev machine) but entirely reachable on
+// the documented Linux/Docker deployment, where Alpha/ and alpha/ coexist — and there a
+// missing tier 3 is a false "already default" verdict, i.e. it DROPS the user's manual
+// order. Do not delete it as dead weight; the oracle carries a Cap/cap pair for it.
+function decorateChild(n, i) {
+  const enc = new TextEncoder();
+  const name = String((n && n.name) || '');
+  return { n, i, t: n && n.type === 'folder' ? 0 : 1, f: enc.encode(asciiFold(name)), r: enc.encode(name) };
+}
+function compareDecorated(a, b) {
+  return (a.t - b.t) || cmpUtf8(a.f, b.f) || cmpUtf8(a.r, b.r) || (a.i - b.i);
+}
+
+// PURE. The order keys a folder's children would have with NO .order.json at all.
+function defaultChildOrder(children) {
+  return (children || []).map(decorateChild).sort(compareDecorated).map((d) => orderKey(d.n));
+}
+
+// PURE. The order keys the children are ACTUALLY in (treeData order = the server's
+// effective order — verified live: it is the persisted order, not the Miller view).
+function childOrderKeys(children) {
+  return (children || []).map(orderKey);
+}
+
+// PURE. True when the children are already in buildTree's default order, i.e. this
+// folder needs no `order` in the sidecar and no .order.json on restore.
+function isDefaultChildOrder(children) {
+  const a = childOrderKeys(children), b = defaultChildOrder(children);
+  return a.length === b.length && a.every((k, i) => k === b[i]);
+}
+
+// Sort a cached folder's children IN PLACE exactly as buildTree does for a given
+// .order.json array: type tier first, then the order index with unlisted entries LAST
+// (PHP_INT_MAX), then the default order. Shared with offline.js's cached `reorder` so
+// an offline reorder — including the `order: []` "back to default" signal a sidecar
+// import sends — means the same thing locally as on the server.
+function sortChildrenLikeBuildTree(list, order) {
+  const idx = new Map();
+  (order || []).forEach((k, i) => { if (!idx.has(k)) idx.set(k, i); });
+  const dec = (list || []).map((n, i) => {
+    const d = decorateChild(n, i);
+    d.o = idx.has(orderKey(n)) ? idx.get(orderKey(n)) : Infinity;
+    return d;
+  });
+  dec.sort((a, b) => (a.t - b.t) || (a.o === b.o ? 0 : a.o < b.o ? -1 : 1) || compareDecorated(a, b));
+  dec.forEach((d, i) => { list[i] = d.n; });
+  return list;
 }
 
 // Persist a column's sort choice (field='manual' clears it → back to default order).
@@ -1203,6 +1317,7 @@ function buildPendingRow() {
 
   const input = document.createElement('input');
   input.className = 'pending-input';
+  input.maxLength = 255; // FS per-name byte limit; safeName() rejects >255 server-side too (defense in depth)
   input.placeholder = isProject ? 'New project name' : kind === 'folder' ? 'New folder name' : 'New page name';
   let done = false;
   const finish = (commit) => {

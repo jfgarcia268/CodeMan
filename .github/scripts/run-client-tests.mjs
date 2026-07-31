@@ -9,11 +9,14 @@
 // the page headless via Playwright, polls __testResult, and fails on:
 //   - fail > 0                  (an assertion failed)
 //   - !done within TIMEOUT_MS   (the suite hung or crashed mid-run)
-//   - pass < FLOOR              (the suite silently shrank — e.g. an early
-//                               script error swallowed half the assertions)
+//   - pass !== FLOOR            (the suite changed size — see below)
+//   - pageErrors.length > 0     (an uncaught page error, even one that changed
+//                               no counts, e.g. a throw inside a listener)
 //
-// FLOOR must be bumped when assertions are intentionally added/removed —
-// keep it equal to the suite's actual total.
+// FLOOR is an EQUALITY, not a floor: a >= check is silent when someone deletes
+// 5 assertions in the same change that adds 6. Bump FLOOR to the suite's actual
+// total whenever assertions are intentionally added or removed — that bump is
+// the reviewable record of the change.
 //
 // Playwright is a CI-only dependency installed under .github/ (never inside
 // codeman/ — the app has no build step and no npm deps). Locally you can run
@@ -28,7 +31,7 @@ import { chromium } from 'playwright';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = process.env.CODEMAN_ROOT || path.resolve(__dirname, '..', '..');
 const PORT = Number(process.env.CODEMAN_TEST_PORT || 8123);
-const FLOOR = 343;            // = tests.html's current assertion total
+const FLOOR = 932;          // = tests.html's EXACT assertion total (equality-checked)
 const TIMEOUT_MS = 60000;
 
 function fail(msg) { console.error('✗ ' + msg); process.exit(1); }
@@ -69,10 +72,19 @@ if (!result || !result.done) {
        `(last result: ${JSON.stringify(result)}; page errors: ${pageErrors.join(' | ') || 'none'})`);
 }
 if (result.fail > 0) fail(`${result.fail} assertion(s) failed (${result.pass} passed)`);
-if (result.pass < FLOOR) {
-  fail(`only ${result.pass} assertions ran — expected at least ${FLOOR}. ` +
-       `Did an early error swallow part of the suite? (page errors: ${pageErrors.join(' | ') || 'none'}) ` +
-       `If assertions were removed on purpose, update FLOOR in .github/scripts/run-client-tests.mjs.`);
+if (result.pass !== FLOOR) {
+  fail(`${result.pass} assertions ran — expected exactly ${FLOOR}. ` +
+       (result.pass < FLOOR
+         ? 'Assertions disappeared (deleted, or an early error swallowed part of the suite). '
+         : 'Assertions were added. ') +
+       `(page errors: ${pageErrors.join(' | ') || 'none'}) ` +
+       `If the change is intentional, update FLOOR in .github/scripts/run-client-tests.mjs to ${result.pass}.`);
 }
-console.log(`✓ tests.html: ${result.pass} passed, 0 failed (floor ${FLOOR})`);
+// An uncaught page error that happens to leave the counts intact (a throw inside an
+// event handler, a rejected promise) used to be printed only as part of another
+// failure — i.e. swallowed. It's a failure in its own right.
+if (pageErrors.length) {
+  fail(`${pageErrors.length} uncaught page error(s) during the run: ${pageErrors.join(' | ')}`);
+}
+console.log(`✓ tests.html: ${result.pass} passed, 0 failed (expected exactly ${FLOOR})`);
 process.exit(0);

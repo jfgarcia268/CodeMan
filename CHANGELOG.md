@@ -13,6 +13,236 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
 
 ## [Unreleased]
 
+## [1.14.0] — 2026-07-31
+
+### Added
+- **HTML preview block.** A new block kind that holds a small static web project (an entry HTML file
+  plus its CSS, JS and images) and renders it **live** inside the page. Upload a whole folder with
+  `Upload…` or drag one onto the block; CodeMan works out the entry file, inlines every
+  sub-resource, and shows the running result in a resizable preview. `▶ Run` / `↻ Reload` / `■ Stop`
+  control the preview, the file list shows every stored file (with a `⌁` marker for the entry, a
+  "Make entry" action on other HTML files, and `✕` to remove one), the entry HTML stays editable in
+  the block, and `Copy` copies the single bundled document. Everything lives inside the page, so
+  history, trash, restore, duplicate, offline and export all work exactly as they do for any other
+  block. Projects are capped (1 MB total, 512 KB per file, 50 files) with a warning above 256 KB,
+  because every version is kept in page history.
+- **Honest preview warnings.** When something in a project can't be shown in the preview — a missing
+  or out-of-project file, a reference form that isn't supported (`<object data>`, `<form action>`,
+  inline `style="…url(…)"`), an `@import`, or simply a file that's in the project but never
+  referenced — it is listed in a banner above the preview under **Problems**. Routine notes
+  (responsive-image variants collapsed for the preview, or a reminder that network/storage APIs and
+  remote scripts don't work in the sandbox) are listed separately under **Notes**. A reference to a
+  project file can never disappear from the preview without being reported.
+- **Responsive images.** `srcset`, `<picture><source>`, `sizes` and CSS `image-set()` are understood:
+  the preview keeps one variant (preferring the element's own `src`, then `1x`/the smallest) and says
+  which ones it dropped. **All uploaded variants are still stored and still listed** — the collapse
+  only affects what the preview renders.
+- **A JSON backup now restores your library's shape, not just its pages.** `Export ▸ All pages →
+  JSON` writes the shape alongside the page content: which folders are **projects** (including
+  projects nested inside projects), the **manual order** you arranged by dragging, per-column
+  **sort** preferences, and your **favourites**. Importing into an empty library rebuilds all of it —
+  no manual repair. Trash and version history are still not included, and the export and import
+  messages say exactly that.
+- **A JSON backup no longer loses empty folders.** The bundle used to work out folders from page
+  paths alone, so a folder with no pages under it appeared nowhere in the file and simply vanished
+  on restore. Every folder is now listed explicitly.
+
+### Changed
+- **Importing into a library you already have leaves it alone.** Layout is applied only to folders
+  the import itself creates: an existing folder keeps its order, its column sort and its
+  project marker, and — new — it no longer jumps to the top of its parent just because the import
+  mentioned it. The toast says how many existing folders were left as they were, so an unchanged
+  sidebar reads as intentional rather than as a failed import.
+- **An import no longer calls a deliberate, harmless adjustment a failure.** When a bundle names a
+  project whose parent is a plain folder — which CodeMan doesn't allow — the folder and all of its
+  pages are still restored, just without the project marker. That used to be reported as
+  `1 shape item failed`, which reads as data loss; it now gets its own clause:
+  `· 1 project restored as a plain folder (a project cannot sit inside a plain folder)`. Genuine
+  failures still count as failures.
+- Converting a block **away** from an HTML project now asks first when the project holds other
+  files, naming them, and reminds you the change can be undone from page History.
+- **Uploading into an HTML project keeps everything.** A second, non-replacing `Upload…` now merges:
+  files the upload doesn't mention are kept, files it does replace are named in a confirmation
+  first, and the project's previous entry file is kept as a regular file rather than being lost. The
+  toast afterwards says what was replaced and what the entry file is now.
+- `⋯ → Replace project…` now asks for confirmation before discarding an existing project.
+- The preview warning banner is quieter and easier to act on: repeated references of the same kind
+  are grouped into a single line, ordinary page-to-page links are reported as a **note** rather than
+  a problem, a banner with only notes is neutral instead of amber, and `+N more` is now a button
+  that reveals the rest instead of just counting them.
+- The HTML file list gained a header showing how much of the 1 MB budget the project uses, and the
+  preview can be resized from `⋯ → Preview height…` (Small / Medium / Large) as well as by dragging.
+- Long `⋯` menus now scroll inside themselves instead of running off the bottom of the screen.
+- **Editing a block no longer saves on every keystroke.** While a block editor is open, CodeMan holds
+  the changes locally and saves when you press **Save**, when you click away from the block, or when
+  you leave/close the tab. So **Cancel now really is a cancel**: a typed-then-cancelled edit writes
+  nothing and no longer spends page-History versions (it used to burn about two per cancelled edit).
+  **The trade-off, plainly:** between those moments your un-saved text lives only in the browser tab,
+  so a crash, force-quit or power loss *while the editor is still open and focused* now loses what
+  you typed since you last clicked out of the block — where before it was on the server within half a
+  second. Switching browser tabs, closing the tab, and clicking out of the block all still save, so
+  nothing is lost by simply walking away. One consequence: an edit you background mid-session **is**
+  saved, so cancelling after that does cost one History version.
+  Checklist blocks are unaffected — they have no Edit/Cancel and still save immediately.
+
+### Fixed
+- **An over-long folder or project name is now rejected cleanly instead of corrupting the folder's
+  order.** Creating a folder or project with a name longer than the filesystem allows (over 255
+  bytes) used to fail silently on disk yet report success — and it added that never-created name to
+  the top of its parent's manual sort order, quietly reshuffling the sidebar. Such a name is now
+  refused with a clear error, nothing is written, and the order is left untouched; the create box in
+  the sidebar also stops you typing a name that long in the first place.
+- **Restoring a backup no longer leaves a history version that would empty the page.** After
+  importing an `All pages → JSON` bundle, every restored page's History showed exactly one saved
+  version — and that version was empty. Clicking **Restore** on it (the only version there, presented
+  like any normal one) wiped the page's content, and the page's real earlier versions had never been
+  in the bundle to begin with. History on a restored page now correctly reads *"No saved versions
+  yet"*, and starts collecting real versions from your first edit. The same empty version was created
+  whenever a page was made and saved in one step — duplicating a page from the sidebar, or an offline
+  page syncing when you reconnect — so those are fixed too. Normal history is unchanged: pages you
+  deliberately empty still snapshot the work they replaced, and nothing that was ever saved with
+  content is affected.
+- **Export and import now say what a JSON bundle actually contains.** `Exported 12 pages` /
+  `Imported 12 pages` read as a complete backup, but a bundle carries **page content only** — project
+  markers, manual folder order, column sort, trash and version history are not in it, so a restored
+  library came back as plain folders with no history and no explanation. Exporting all pages now
+  confirms the count *and* lists what the bundle does not include (page content itself restores
+  exactly), and a bundle import repeats the caveat. Exporting or importing a **single** page is
+  unchanged — the caveat doesn't apply there.
+- **Rich Text blocks no longer silently destroy pasted content.** Pasting a **table** dropped all its
+  markup and ran every cell's text together into one line; **images** were deleted outright; and
+  **Heading 5 / Heading 6** were flattened to plain text. Tables (including captions, column groups
+  and merged cells), images and all six heading levels now survive a paste, a save and a reload, and
+  render properly in both the app and an exported HTML page.
+- **Rich Text blocks export to Markdown correctly.** They previously collapsed into a single run-on
+  line with every paragraph, list item and line break lost. Paragraphs and lists now keep their
+  structure, tables export as real Markdown tables, and images export as their alt text.
+- Converting a Rich Text block containing a table into a Table (CSV) or Code block now produces a
+  real table instead of one run-on line.
+- **HTML project: the entry file is no longer lost when merging an upload.** Uploading a second
+  folder without choosing "Replace project" silently deleted the project's existing entry HTML.
+- **HTML preview: the preview no longer shrinks when clicked.** Clicking (rather than dragging) a
+  preview shrank it by 2px each time and marked the page as changed; a click now does nothing.
+- A drag-and-drop import that couldn't fully read a folder now says so and asks before importing,
+  instead of quietly importing a partial project.
+- `■ Stop` is disabled while the preview isn't running, and on phones it moves into the `⋯` menu so
+  the block's button row stays readable; `▶`/`■` are now labelled for screen readers.
+- Removing a file from an HTML project is now an obvious delete button with a proper tap target, and
+  the confirmation message names where to recover it from.
+- Cancelling the folder picker no longer leaves an invisible element behind in the page.
+- On phones, the empty-state and editor placeholder no longer suggest a folder upload, which isn't
+  available there.
+- **Page history no longer stops recording after 20 quick saves.** Once a page had its full 20
+  versions, further saves made within the same second could overwrite the version just written
+  instead of dropping the oldest one — so the newest changes were silently discarded. History now
+  always keeps the **20 most recent** versions.
+- **Restoring a version is now crash-safe.** Restoring from History wrote the old version straight
+  over the live page; an interruption mid-write could leave the page truncated. The restore is now
+  written atomically, and a version that isn't valid JSON is refused instead of replacing a good page.
+- The "Project not imported" message shown when an HTML project exceeds the size cap now has a
+  single **OK** button — it previously offered a "Cancel" that did exactly the same thing.
+- **Deleting a block while editing it no longer saves the page twice**, so it costs one page-History
+  version instead of two.
+- **Esc now cancels the editor in every block kind.** It only worked in Code and Note blocks; in Rich
+  Text, Table (CSV), JSON and HTML blocks it did nothing, so the only way out was the Cancel button.
+  Esc reverts unsaved changes exactly like Cancel does — and when a `⋯` menu is open, Esc still just
+  closes the menu.
+- **`⋯` menus that open from a column-sort or Export button no longer run off the bottom of a short
+  window.** In a window under about 500px tall the last options couldn't be reached at all (the menu
+  can't be scrolled to). Menus that already fit are positioned exactly as before.
+- Multi-line messages in dialogs now keep their line breaks instead of running together — most
+  visible in the "Project not imported" list of oversized files.
+- **The sidebar `⋯` menu no longer runs off the left edge of the window when the sidebar is narrow.**
+  With the sidebar dragged to its minimum width, the menu opened partly off-screen — the icons and
+  the first characters of every option were cut off and unreachable (it can't be scrolled to). It now
+  slides just far enough to sit fully inside the window, keeping its size; at every normal sidebar
+  width it opens exactly where it always has.
+- **A bad reply from the server no longer makes your whole library look empty.** If the server was
+  reachable but answered the sidebar's request with something unusable (an error message, an empty
+  reply, or output with a stray warning in front of it), CodeMan showed the "no pages yet" welcome
+  screen — ignoring the offline copy it already had — and clicking anywhere in the sidebar then
+  failed. It now recognises the bad reply as a failure, shows your offline copy instead, tells you so,
+  and starts retrying in the background. The Trash and History panels likewise say "Could not load…"
+  rather than claiming they're empty.
+- **A save the server rejected reported success and lost the edit.** If the server refused a save —
+  most easily by another device deleting the page's folder while you had it open, but also on a bad
+  path or a server hiccup that produced a broken reply — CodeMan showed "Saved", marked the page as
+  up to date, and the edit then existed nowhere: it was gone after a reload, with nothing to recover
+  it from. A rejected save now says so, naming the server's reason, and the edit is **kept**: a
+  passing hiccup is queued and retried automatically, a real refusal is parked in **Unsynced changes**
+  (the red badge, bottom-right — also reachable from the sidebar `⋯` menu and the command palette),
+  where you can inspect it, retry it once the problem is fixed, export it, or discard it. It survives
+  a reload. The same blind spot on the "Overwrite" answer to a save-conflict prompt, and on the save
+  CodeMan makes when you leave the tab, is fixed too.
+- A page saved by hand or imported without any sections is now kept in the offline copy, so it still
+  opens when the server is unreachable instead of coming up empty with no explanation.
+- **Splitting a block at the cursor works again.** `Split` in a block's `⋯` menu ignored where you had
+  put the cursor and refused with "add a blank line or place the cursor" — even though you just had.
+  It now splits exactly at the cursor. (Blocks containing a blank line still split on the gaps, and
+  view mode / cursor at the very start or end still correctly report there's nothing to split.)
+- **A full-library JSON backup could not be restored — and said it had worked.** Importing an
+  `All pages → JSON` export into an empty library (the disaster-recovery case the export exists for)
+  **silently dropped every page that lived in a folder**, keeping only the pages at the top level. The
+  folder names were built wrongly — the last character of each first-level folder was cut off, so
+  `Notes/Recipe` was filed under a folder called `Note`, and the page itself was then never written —
+  and the failures were hidden behind an "Imported N pages" success message. A 14-page backup restored
+  **2** pages. If you have ever restored a backup into a fresh/empty CodeMan and pages seemed to be
+  missing, this was why; re-import the same export file and everything now lands. Import also now
+  **reports failures** ("Imported 8 pages, 3 failed") instead of claiming success over partial data
+  loss, and the server refuses to invent a folder whose parent doesn't exist rather than quietly
+  creating a bogus one. Re-importing into an existing library was never affected, which is why this
+  went unnoticed.
+- **"Download for offline" now actually lets you duplicate a page while offline.** With the server
+  unreachable, the `❐` on a page row in the sidebar refused with "Open this page before duplicating it
+  offline" for *every* page that wasn't already open in a tab — even ones you had just downloaded for
+  offline use. Downloaded pages now duplicate normally, with their real content; only a page CodeMan
+  genuinely has no offline copy of is still refused.
+- **Wide tables in Note and Rich Text blocks now scroll instead of being crushed.** A table with more
+  columns than fit squeezed every column down to about one character wide and stacked the text
+  vertically (a 20-column table rendered as 47px-wide, 245px-tall cells) rather than letting the table
+  scroll sideways. Columns now keep a sensible width and the table scrolls horizontally, on desktop and
+  on phones. Long unbroken words in ordinary note/rich prose still wrap inside the block as before.
+- **Wide Table (CSV) blocks now scroll too.** The same defect reached the CSV block by a different
+  route and was missed the first time: a table with many columns was squeezed to about one character
+  per column (a 20-column table rendered as 45px-wide, 75px-tall cells on a laptop, and roughly two
+  characters per column stacked six lines deep on a phone), and the right-hand columns could not be
+  reached because the block never grew a horizontal scrollbar — the in-app view was actually worse
+  than the same table in an exported HTML page. Columns now keep their natural width and the block
+  scrolls sideways, on desktop and on phones. Cells with line breaks inside them still show those
+  line breaks.
+- **"Saved" is no longer announced before the save has happened.** Saving a block reported "Saved"
+  immediately and then again when the write completed (announced twice to screen readers) — and if the
+  server refused the write, the false "Saved" appeared first and was only corrected a moment later.
+  The message now appears once, after the save has actually landed, and never appears at all when the
+  save is refused. A save made while offline now reads **"Saved offline — will sync"** so a queued
+  change isn't mistaken for one that reached the server.
+
+### Security
+- **An over-long folder/project name no longer leaks a server file path in the response.** The failed
+  create used to emit a raw PHP filesystem warning (which included an absolute server path) into the
+  API response body; the create is now validated up front and the warning is suppressed, so no path
+  is disclosed.
+- The HTML preview runs in an iframe with `sandbox="allow-scripts"` and **no** `allow-same-origin` —
+  the previewed project gets an opaque origin, so it cannot read CodeMan's page, cookies or storage,
+  and the app's Content-Security-Policy blocks it from reaching the network. `alert()`/`confirm()`
+  do nothing inside the preview (no `allow-modals`), which is deliberate.
+- **Exported HTML pages now carry the same Content-Security-Policy as the app.** Previously a
+  standalone export was less restrictive than CodeMan itself; an export containing a live HTML
+  preview now enforces the identical policy.
+- Binary project files are stored as base64 and are **excluded from content search**, so a word that
+  happens to occur inside encoded image data no longer produces false search results. Images pasted
+  **inline** into a Rich Text block are excluded the same way.
+- **The Rich Text sanitizer now works from a declared per-tag attribute allowlist.** An attribute is
+  kept only if it is explicitly named for that tag, so no event handler — including any added to
+  browsers in future — can survive a paste without someone deliberately listing it.
+- **Pasted image sources are restricted to `https:` and non-vector `data:image` URLs**, matching the
+  app's own Content-Security-Policy. Scalable-vector images are refused because that format can carry
+  scripts; plain-`http:` and relative sources are refused too. The image itself is kept, just without
+  the rejected source.
+- **A pasted `<svg>` or `<math>` block is now removed together with its contents.** Because those
+  elements report their name differently from ordinary HTML, they were previously only unwrapped —
+  which let the text of an embedded script show up in the block.
+
 ## [1.13.0] — 2026-07-14
 
 ### Added

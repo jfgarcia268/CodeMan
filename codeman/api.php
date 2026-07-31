@@ -80,6 +80,13 @@ function safeName($n) {
     if ($n === '' || $n === '.' || $n === '..') return null;
     if (strpbrk($n, "/\\") !== false) return null; // no path separators
     if ($n[0] === '.') return null;                 // no hidden files
+    // A single path segment can't exceed the filesystem's per-name limit (255 bytes on
+    // ext4/APFS/most). Without this cap an over-long name reached mkdir()/file_put_contents,
+    // which failed with a raw "File name too long" PHP warning — and create_folder/
+    // create_project used to ignore mkdir's return, so they leaked that warning into the
+    // body (invalid JSON) AND prependOrder'd a phantom name for a dir that never existed.
+    // strlen() = BYTE length (multibyte names count each byte, matching the FS limit).
+    if (strlen($n) > 255) return null;
     return $n;
 }
 
@@ -426,6 +433,28 @@ function rrmdir($path) {
     }
 }
 
+// Is $json byte-for-byte-equivalent to what create_page writes for the page named
+// $name — {"title":"<name>","sections":[]} and NOTHING else? Deliberately STRUCTURAL
+// (so it can't be broken by re-formatting) and exact on all three counts: EXACTLY the
+// keys title+sections, the title create_page itself derived from the filename, and a
+// sections list of length 0. Any extra key, any section, a DIFFERENT title, anything
+// that doesn't parse → false.
+//
+// The title check is not decoration. Without it "any empty-sections page" qualifies,
+// and a page whose only content IS its title (renamed but never given a section) would
+// have every one of those titles silently dropped from history — authored content. This
+// is the only content a history snapshot is ever allowed to skip; it must not be
+// loosened into "looks empty enough".
+function isCreatePageStub($json, $name) {
+    $d = json_decode($json, true);
+    if (!is_array($d)) return false;
+    $keys = array_keys($d);
+    sort($keys);
+    if ($keys !== ['sections', 'title']) return false;
+    if (!is_string($d['title']) || $d['title'] !== $name) return false;
+    return is_array($d['sections']) && count($d['sections']) === 0;
+}
+
 // Snapshot a page's current content into .history before it's overwritten,
 // pruning to the most recent HISTORY_KEEP versions.
 function snapshotHistory($base, $rel, $path) {
@@ -439,18 +468,52 @@ function snapshotHistory($base, $rel, $path) {
     // best-effort no-op so a future unguarded caller can't reintroduce a .history escape.
     $hdir = safePath($historyDir, $rel);
     if ($hdir === null) return;
+    $vers = is_dir($hdir) ? (glob($hdir . '/*.json') ?: []) : [];
+    // Never version the create_page stub as a page's FIRST history entry. Any
+    // create-then-immediately-save sequence — importPages restoring a JSON bundle,
+    // duplicatePageFromTree, a queued create+save replaying on reconnect — writes an
+    // empty page and then the real content one call later, so the page's ONLY history
+    // version became {"title":…,"sections":[]}. The History panel presented that as a
+    // normal restorable version, and restoring it EMPTIES the page: a restored backup
+    // shipped with a loaded gun where its safety net should be.
+    //
+    // BOTH conditions are load-bearing, and together they bound this to a page's very
+    // first snapshot of content nobody authored:
+    //   (1) the page has NO versions yet — a page that has ever been saved is untouched
+    //       by this, so a page a user DELIBERATELY emptied still versions normally (its
+    //       real content is already in history, and the empty state it was emptied INTO
+    //       is snapshotted by the next save like any other content); and
+    //   (2) the prior content is the create_page stub FOR THIS FILENAME — reproducible
+    //       from the filename alone, so there is literally nothing to lose.
+    // Never widen this. Suppressing a snapshot is destroying a recovery point, and
+    // failing OPEN (snapshotting a stub) is only noise — failing closed loses data.
+    if (!$vers && isCreatePageStub($old, basename($path, '.json'))) return;
     if (!is_dir($hdir)) mkdir($hdir, 0777, true);
     $stamp = @filemtime($path) ?: time();
-    $vfile = $hdir . '/' . $stamp . '.json';
     // mtime is second-granularity, so two saves in the same second collide on the
     // version filename. Bump to the next free integer key (filenames must stay
     // pure-integer for restore-by-ts) so a concurrent same-second version is still
     // retained and recoverable instead of being silently dropped.
+    //
+    // The version key must also never go BACKWARDS. Once the folder is at
+    // HISTORY_KEEP, the prune frees the LOW keys again — so a burst of same-second
+    // saves (autosave is per-keystroke) would restart at the page's mtime, land on a
+    // just-freed low key, and the next prune would delete the version we JUST wrote,
+    // silently discarding every save after the cap was reached. Start at one past the
+    // highest key that exists.
+    $maxTs = 0;
+    foreach ($vers as $v) { $n = (int)basename($v, '.json'); if ($n > $maxTs) $maxTs = $n; }
+    if ($stamp <= $maxTs) $stamp = $maxTs + 1;
+    $vfile = $hdir . '/' . $stamp . '.json';
     while (file_exists($vfile)) { $stamp++; $vfile = $hdir . '/' . $stamp . '.json'; }
     writeJsonAtomic($vfile, $old);
     $vers = glob($hdir . '/*.json') ?: [];
     if (count($vers) > HISTORY_KEEP) {
-        sort($vers); // oldest mtimes first (numeric filenames)
+        // Sort by the NUMERIC version key, not the string path: a plain sort() only
+        // happens to work while every key has the same digit count.
+        usort($vers, function($a, $b) {
+            return (int)basename($a, '.json') <=> (int)basename($b, '.json');
+        });
         foreach (array_slice($vers, 0, count($vers) - HISTORY_KEEP) as $v) @unlink($v);
     }
 }
@@ -533,6 +596,24 @@ switch ($action) {
                 if (substr($file->getFilename(), -5) !== '.json') continue;
                 $content = @file_get_contents($file->getPathname());
                 if ($content === false) continue;
+                // HTML-project blocks store binary assets as one-line base64 under the
+                // reserved "b64" key. Random base64 runs produce false search hits (and
+                // needless scan cost), so blank those spans out. Guarded by a presence
+                // strpos so the 99.9% of pages with no html block pay one substring check
+                // and nothing else. The base64 alphabet contains no quote or backslash, so
+                // the char class can never run past its string. save_page writes with
+                // JSON_PRETTY_PRINT, hence the \s* around the colon.
+                if (strpos($content, '"b64"') !== false) {
+                    $content = preg_replace('/"b64"\s*:\s*"[A-Za-z0-9+\/=]*"/', '"b64":""', $content);
+                }
+                // Rich-text blocks may embed an image INLINE as a data: URL (the sanitizer
+                // allows data:image/…;base64,…). Same false-hit problem as "b64", but the
+                // payload sits mid-string inside the block's HTML rather than under its own
+                // key — so blank the base64 run itself. Guarded by a presence strpos so
+                // pages with no inline image pay one substring check.
+                if (strpos($content, 'data:image/') !== false) {
+                    $content = preg_replace('/data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+\/=]*/i', 'data:image/x;base64,', $content);
+                }
                 // Fast path: scan the raw JSON directly (save_page stores
                 // JSON_UNESCAPED_UNICODE, so most content — incl. UTF-8 — matches as-is).
                 $matched = stripos($content, $q) !== false;
@@ -547,6 +628,14 @@ switch ($action) {
                     $decoded = json_decode($content, true);
                     if ($decoded !== null) {
                         $hay = json_encode($decoded, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                        // the same b64 strip, or a non-ASCII / slash-bearing query would
+                        // reintroduce the false positives through this branch
+                        if (strpos($hay, '"b64"') !== false) {
+                            $hay = preg_replace('/"b64"\s*:\s*"[A-Za-z0-9+\/=]*"/', '"b64":""', $hay);
+                        }
+                        if (strpos($hay, 'data:image/') !== false) {
+                            $hay = preg_replace('/data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+\/=]*/i', 'data:image/x;base64,', $hay);
+                        }
                         $matched = stripos($hay, $q) !== false;
                     }
                 }
@@ -704,7 +793,18 @@ switch ($action) {
         $path = safePath($base, $parent . '/' . $name);
         $parentDir = safePath($base, $parent);
         if ($path === null || $parentDir === null) jsonError('invalid path');
-        if (!is_dir($path)) mkdir($path, 0777, true);
+        // The parent must already exist — same guard as create_page/save_page. Without it the
+        // recursive mkdir silently MATERIALISED whatever parent it was handed and still reported
+        // ok:true, so a client bug (or a crafted request) could litter the confined data root
+        // with arbitrary nested folders; it also hid importPages' bad parent derivation, which
+        // then lost pages. Reject instead of inventing structure the caller never asked for.
+        if (!is_dir($parentDir)) jsonError('parent folder does not exist', 404);
+        // Check mkdir's result — same discipline as create_page's write check. An unchecked
+        // mkdir() that fails (e.g. a name the FS still can't hold, permissions, disk full)
+        // emitted a raw PHP warning into the body (invalid JSON → the client false-trips
+        // offline) AND still ran prependOrder below, writing a phantom .order.json entry for
+        // a directory that never existed. @-suppress the warning; bail with clean JSON.
+        if (!is_dir($path) && !@mkdir($path, 0777, true)) jsonError('failed to create folder', 500);
         prependOrder($parentDir, $name); // new folder at top
         echo json_encode(['ok' => true]);
         break;
@@ -723,7 +823,10 @@ switch ($action) {
         if ($parent !== '' && !file_exists($parentDir . '/.project')) {
             jsonError('projects can only be created at the top level or inside another project');
         }
-        if (!is_dir($path)) mkdir($path, 0777, true);
+        // Check mkdir's result (same discipline as create_folder/create_page) — a failed,
+        // unchecked mkdir leaked a raw PHP warning into the body and still marked+prependOrder'd
+        // a project directory that never existed.
+        if (!is_dir($path) && !@mkdir($path, 0777, true)) jsonError('failed to create project', 500);
         @file_put_contents($path . '/.project', '');
         prependOrder($parentDir, $name); // new project at top of its parent
         echo json_encode(['ok' => true]);
@@ -991,7 +1094,15 @@ switch ($action) {
         if ($path === null || $hfile === null) jsonError('invalid path');
         if (!file_exists($hfile)) jsonError('version not found', 404);
         snapshotHistory($base, $input['path'], $path);
-        copy($hfile, $path);
+        // writeJsonAtomic is the SINGLE write path for every JSON file: a plain
+        // copy() streams into the LIVE page, so a crash mid-copy truncates it —
+        // exactly what the atomic-write work exists to prevent. Read the version,
+        // validate it still parses (a corrupt snapshot must not replace a good
+        // page), then temp-file + rename it into place.
+        $ver = @file_get_contents($hfile);
+        if ($ver === false) jsonError('version unreadable', 500);
+        if (json_decode($ver, true) === null && trim($ver) !== 'null') jsonError('version is not valid JSON', 500);
+        if (writeJsonAtomic($path, $ver) === false) jsonError('write failed', 500);
         clearstatcache(true, $path);
         echo json_encode(['ok' => true, 'mtime' => @filemtime($path)]);
         break;

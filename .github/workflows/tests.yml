@@ -47,7 +47,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: sw.js derives its cache version from version.js (single version source)
-        run: grep -q "importScripts('version.js')" codeman/sw.js
+        run: |
+          # A bare substring match is satisfied by a COMMENTED-OUT call (verified: it did
+          # NOT fire on `// importScripts('version.js')`), so the worker could fall back to
+          # a hard-coded cache name with the invariant still green — and a release would
+          # then never evict the old shell. Two checks, both on LIVE code: the import must
+          # be a real statement (the line's first non-space characters), and CACHE_VERSION
+          # must actually be built from the value it imports.
+          if ! grep -qE "^[[:space:]]*importScripts\('version\.js'\)" codeman/sw.js; then
+            echo "sw.js must call importScripts('version.js') as a live statement (not only in a comment)"
+            exit 1
+          fi
+          if ! grep -qE "^[[:space:]]*const CACHE_VERSION = .*self\.CODEMAN_VERSION" codeman/sw.js; then
+            echo 'sw.js CACHE_VERSION must be derived from self.CODEMAN_VERSION — bump version.js, never sw.js'
+            exit 1
+          fi
       - name: api.php is never precached by the service worker
         run: |
           if awk '/^const SHELL = \[/{f=1} f{print} f&&/\];/{exit}' codeman/sw.js | grep -q 'api\.php'; then
@@ -64,6 +78,51 @@ jobs:
             echo 'Bare file_put_contents(..., json_encode(...)) found — route it through writeJsonAtomic'
             exit 1
           fi
+          # The single-line grep above only catches the INLINE json_encode shape. It
+          # missed restore_history, which `copy()`d a history version straight over the
+          # LIVE page, and would equally miss the split form
+          # (`$j = json_encode(...); file_put_contents($p, $j);`). So ban the write
+          # PRIMITIVES themselves: writeJsonAtomic's own file_put_contents is the only
+          # permitted one, and copy()/fwrite()/fputs() have no legitimate caller here.
+          # Any write shape, split across however many lines, must end in one of these.
+          # Two allowlisted writes: writeJsonAtomic's own temp write, and the EMPTY
+          # `.project` marker (no content to truncate). Comment lines are skipped so a
+          # code comment can name the banned primitives.
+          if grep -nE '(^|[^_[:alnum:]])(copy|fwrite|fputs|file_put_contents)[[:space:]]*\(' codeman/api.php \
+             | grep -vE '^[0-9]+:[[:space:]]*(//|\*|#)' \
+             | grep -vF 'file_put_contents($tmp, $json, LOCK_EX)' \
+             | grep -vF "file_put_contents(\$path . '/.project', '')"; then
+            echo 'Non-atomic file write found in api.php — route it through writeJsonAtomic'
+            echo '(writeJsonAtomic holds the ONLY permitted file_put_contents; copy()/fwrite()/fputs() are banned)'
+            exit 1
+          fi
+      - name: the HTML-project iframe sandbox is never widened (allow-same-origin)
+        run: |
+          # PERMANENT INVARIANT (CLAUDE.md): the html-block preview is
+          # sandbox="allow-scripts" WITHOUT allow-same-origin — that pairing is what
+          # gives the untrusted project an opaque origin (no parent.document, no
+          # cookies/storage, no egress). Adding allow-same-origin alongside
+          # allow-scripts VOIDS the entire sandbox and every assertion stays green.
+          # Comment lines may NAME the token (they're what documents the invariant), and
+          # tests.html carries it inside the assertion that PINS the attribute — every
+          # other occurrence in codeman/ is a violation.
+          if grep -rn 'allow-same-origin' codeman/ \
+             | grep -v '^codeman/tests.html:' \
+             | grep -vE ':[[:space:]]*(//|\*|#)'; then
+            echo 'allow-same-origin found in codeman/ — this VOIDS the html-block sandbox. Not a tuning knob.'
+            exit 1
+          fi
+          # …and the two places that build the iframe must still declare the sandbox.
+          grep -q "setAttribute('sandbox', 'allow-scripts')" codeman/src/editor.js
+          grep -q 'sandbox="allow-scripts"' codeman/src/features.js
+      - name: index.html still ships its CSP meta
+        run: |
+          # The app's only CSP is a <meta> (no build step, no server config in-repo);
+          # dropping it silently removes object-src 'none' / base-uri 'none' and the
+          # same-origin script confinement the html-block sandbox leans on.
+          grep -q "http-equiv=\"Content-Security-Policy\"" codeman/index.html
+          grep -q "object-src 'none'" codeman/index.html
+          grep -q "base-uri 'none'" codeman/index.html
       - name: treeData is only written through setTreeData (memo invalidation)
         run: |
           # setTreeData() is the SINGLE write point for the sidebar treeData global: it sets
@@ -74,6 +133,27 @@ jobs:
           if grep -rnE 'treeData[[:space:]]*=[^=]' codeman/src \
              | grep -vE 'function setTreeData|let treeData|var treeData'; then
             echo 'Direct `treeData =` assignment found — route it through setTreeData() (memo invalidation)'
+            exit 1
+          fi
+      - name: rich-sanitizer keeps its declared tables (no script-bearing tag, no scriptable vector src)
+        run: |
+          # The rich-block sanitizer is deny-by-default across THREE declared tables.
+          # Both Sets are single-line literals on purpose — these greps are line-scoped.
+          grep -q 'const RICH_ALLOWED' codeman/src/editor.js
+          grep -q 'const RICH_DANGEROUS' codeman/src/editor.js
+          grep -q 'function richImgSrc' codeman/src/editor.js
+          # The allowlist literal must never NAME a script-bearing tag: one added token
+          # turns a paste into an execution path and every assertion stays green.
+          if grep -n 'const RICH_ALLOWED' codeman/src/editor.js \
+             | grep -owE "'(SCRIPT|STYLE|IFRAME|OBJECT|EMBED|LINK|META|FORM|INPUT|BUTTON|SVG|MATH|TEXTAREA|BASE|TEMPLATE|NOSCRIPT)'"; then
+            echo 'RICH_ALLOWED names a dangerous tag'
+            exit 1
+          fi
+          # The scriptable vector image format must never be accepted by the <img src>
+          # filter — it is a script-bearing document format, so a permitted data: source
+          # for it is an XSS primitive. Load-bearing, not an incomplete MIME list.
+          if grep -n 'svg' codeman/src/editor.js | grep -q 'richImgSrc'; then
+            echo 'svg reachable from richImgSrc'
             exit 1
           fi
       - name: CSRF read-only allowlist matches between api.php and the desktop proxy
@@ -96,3 +176,97 @@ jobs:
             exit 1
           fi
           echo "CSRF read-only allowlists match ($(echo "$php_tokens" | grep -c .) actions)"
+      - name: edit-session wiring census (all five session-bearing render paths)
+        run: |
+          # The autosave-deferral contract lives in FOUR hooks that must be wired once per
+          # session-bearing render path (code+note share renderBlock; rich, csv, json,
+          # html-entry): beforeEditSession (the clean-page snapshot — what makes Cancel
+          # free), afterEditSession (the session end), wireEscapeRevert (Esc → the Cancel
+          # BUTTON) and wireFocusFlush (the crash-safety flush while autosave is deferred).
+          # Dropping ONE call from ONE path is invisible to any single behavioural
+          # assertion — it is per-kind DRIFT, so it needs a count. tests.html carries the
+          # mirror of this census; this grep is the cheap independent copy.
+          E=codeman/src/editor.js
+          nocomment() { grep -vE '^[[:space:]]*(//|\*)' "$E"; }
+          # `|| true`: a count of ZERO makes grep exit 1, which under the runner's `-eo
+          # pipefail` would abort the step with no diagnostic. Swallow it so the explicit
+          # comparisons below report WHICH hook went missing.
+          n_before=$(grep -cE '^[[:space:]]*beforeEditSession\(\);' "$E" || true)
+          n_after=$(nocomment | grep -vE '^function afterEditSession' | grep -oE 'afterEditSession\(\)' | wc -l | tr -d ' ' || true)
+          n_esc=$(nocomment | grep -oE 'wireEscapeRevert\(' | wc -l | tr -d ' ' || true)
+          n_flush=$(nocomment | grep -oE 'wireFocusFlush\(' | wc -l | tr -d ' ' || true)
+          fails=0
+          # 5 call sites (the definition line is `function beforeEditSession() {`, unmatched)
+          [ "$n_before" = 5 ] || { echo "beforeEditSession() call sites: $n_before, expected 5"; fails=1; }
+          # 10 = 2 per path: each Revert button has BOTH branches (clean-exit and
+          # restore-backup), and both end the session. EXACT, not >=8 — a floor is silent
+          # when one path loses its restore-backup call (the same reason the tests.html
+          # FLOOR is an equality). If a path is legitimately added, bump this to 2*paths.
+          [ "$n_after" = 10 ] || { echo "afterEditSession() calls: $n_after, expected 10 (2 per render path)"; fails=1; }
+          # 5 call sites + 1 definition each
+          [ "$n_esc" = 6 ] || { echo "wireEscapeRevert( occurrences: $n_esc, expected 6 (5 calls + 1 definition)"; fails=1; }
+          [ "$n_flush" = 6 ] || { echo "wireFocusFlush( occurrences: $n_flush, expected 6 (5 calls + 1 definition)"; fails=1; }
+          if [ "$fails" = 1 ]; then
+            echo 'An edit-session hook lost (or gained) a call site — see the autosave-deferral gotcha in CLAUDE.md.'
+            echo 'If a render path was legitimately added/removed, update BOTH these counts and the tests.html census.'
+            exit 1
+          fi
+          echo "edit-session wiring census OK (before=$n_before after=$n_after esc=$n_esc flush=$n_flush)"
+      - name: afterEditSession never calls scheduleSave (the dirty choke point)
+        run: |
+          # afterEditSession arms `saveTimer` DIRECTLY and must NEVER route through
+          # scheduleSave() — scheduleSave's first line re-marks the page dirty, which is
+          # exactly the flag afterEditSession just cleared, so Cancel would silently cost a
+          # write and a History version again. Scoped to the function body (comments in it
+          # legitimately NAME scheduleSave — they're what document the rule).
+          if awk '/^function afterEditSession\(\)/{f=1} f{print} f&&/^}/{exit}' codeman/src/editor.js \
+             | grep -vE '^[[:space:]]*(//|\*)' | grep -n 'scheduleSave('; then
+            echo 'afterEditSession calls scheduleSave() — that re-marks the page dirty. Arm saveTimer directly.'
+            exit 1
+          fi
+      - name: the default-child-order oracle is identical in both suites
+        run: |
+          # tree.js's defaultChildOrder must reproduce api.php buildTree's fallback
+          # ordering EXACTLY, because the library-shape export OMITS a folder's `order`
+          # whenever the two agree — so a divergence silently DROPS the user's manual
+          # order on the next restore. The two comparators are in different languages and
+          # cannot call each other, so both are pinned to ONE hard-coded oracle:
+          # tests.html asserts it against defaultChildOrder, tests-api.sh asserts it
+          # against the REAL buildTree. Editing one copy and not the other leaves BOTH
+          # suites self-consistently green — exactly the silent-drift shape this repo
+          # greps for. Extracted from each file (no third copy to drift) and compared.
+          html_oracle=$(sed -n "s/.*SORT_ORACLE_JSON = '\(.*\)';.*/\1/p" codeman/tests.html | head -1)
+          sh_oracle=$(sed -n "s/^SORT_ORACLE_JSON='\(.*\)'.*/\1/p" codeman/tests-api.sh | head -1)
+          if [ -z "$html_oracle" ]; then
+            echo 'SORT_ORACLE_JSON not found in codeman/tests.html — the comparator parity proof is gone'
+            exit 1
+          fi
+          if [ -z "$sh_oracle" ]; then
+            echo 'SORT_ORACLE_JSON not found in codeman/tests-api.sh — the comparator parity proof is gone'
+            exit 1
+          fi
+          if [ "$html_oracle" != "$sh_oracle" ]; then
+            echo 'The default-child-order oracle DIVERGED between the two suites:'
+            echo "  tests.html   : $html_oracle"
+            echo "  tests-api.sh : $sh_oracle"
+            echo 'Both must pin the same order, or defaultChildOrder can drift from buildTree unseen.'
+            exit 1
+          fi
+          echo "default-child-order oracle matches in both suites: $html_oracle"
+      - name: no html-block mutation calls renderPage (it would kill the live iframe)
+        run: |
+          # renderPage() rewrites #page wholesale (`#page.innerHTML = ''`), which destroys a
+          # running html-project iframe. Every in-block mutation (upload, file remove, entry
+          # change, height drag, entry edit) must update its own subtree + remountFrame() +
+          # scheduleSave() instead. The ONLY two legitimate renderPage() calls inside
+          # renderHtmlBlock are the ones that intentionally tear the block down: the
+          # block-kind CONVERT and the DELETE. Same shape as the writeJsonAtomic primitive
+          # ban: scope to the function body, allowlist by what the line does.
+          if awk '/^function renderHtmlBlock\(/{f=1} f{print} f&&/^}/{exit}' codeman/src/editor.js \
+             | grep -vE '^[[:space:]]*(//|\*)' \
+             | grep -n 'renderPage()' \
+             | grep -vE 'convertBlock|parentArray\.splice'; then
+            echo 'renderHtmlBlock has a renderPage() call outside convert/delete — it would kill the live iframe.'
+            echo '(see the html-block rule (5) in CLAUDE.md: mutate the subtree + remountFrame() + scheduleSave())'
+            exit 1
+          fi

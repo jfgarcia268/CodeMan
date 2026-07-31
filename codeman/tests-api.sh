@@ -13,8 +13,11 @@
 # (preview dry-run / literal / regex / regex-too-complex bound), rename_tag
 # (rename/merge/delete), the safePath reject contract (dotfile reads + traversal
 # rejected at get_page/delete/list_history/restore_trash), the offline-replay
-# reconstruction shapes round-tripping post-safePath, and the optional password
-# gate (header-only; ?token= no longer accepted).
+# reconstruction shapes round-tripping post-safePath, get_history_version +
+# restore_history (atomic write, never a raw copy over the live page), HISTORY_KEEP
+# pruning keeping the 20 NEWEST versions, contentFileIterator never descending into
+# .history/.trash, rebuild_index, reorder, col_sorts/set_col_sort (incl. the ""
+# root key), and the optional password gate (header-only; ?token= no longer accepted).
 #
 #   Run:  bash codeman/tests-api.sh           (exit 0 = all green)
 #         bash codeman/tests-api.sh 8099       (override the starting port;
@@ -98,6 +101,38 @@ r=$(post save_page '{"path":"Box/Pg.json","data":{"title":"Pg","sections":[]}}')
 r=$(post save_page '{"path":"Ghost/Pg.json","data":{"title":"x","sections":[]}}'); eqs "save_page missing parent → 404" "$(code "$r")" "404"
 has "save_page missing parent → clean JSON error" "$(body "$r")" '"error"'
 
+# create_folder's parent must exist too. The recursive mkdir used to MATERIALISE whatever
+# parent it was handed and still report ok:true — so importPages' off-by-one parent
+# derivation littered the root with bogus folders instead of failing, and any client bug or
+# crafted request could create arbitrary nested structure inside the data root.
+r=$(post create_folder '{"name":"X","parent":"no/such/place"}');   eqs "create_folder missing parent → 404" "$(code "$r")" "404"
+has "create_folder missing parent → clean JSON error" "$(body "$r")" '"error":"parent folder does not exist"'
+test ! -e "$DATA/no" && ok "create_folder missing parent materialised nothing" || bad "create_folder missing parent materialised nothing" "$DATA/no exists"
+# …but a legitimate nested folder (parent created first) still works, one level at a time.
+r=$(post create_folder '{"name":"Deep","parent":"Box"}');          eqs "create_folder nested under an existing parent → 200" "$(code "$r")" "200"
+test -d "$DATA/Box/Deep" && ok "create_folder nested folder was created" || bad "create_folder nested folder was created" "missing"
+
+# create_folder / create_project with an OVER-LONG (>255 byte) name. safeName caps the segment
+# at the FS per-name limit; before, the name reached an UNCHECKED mkdir() that failed with a raw
+# "File name too long" PHP warning — leaked into the body (invalid JSON, no "error" key) AND still
+# ran prependOrder(), polluting the parent's .order.json with a phantom name for a dir that never
+# existed. Assert: clean JSON error, no warning leak, no dir created, no order pollution.
+LONGNAME=$(printf 'a%.0s' $(seq 1 300))
+r=$(post create_folder "{\"name\":\"$LONGNAME\",\"parent\":\"Box\"}")
+has "create_folder >255-byte name → clean JSON error" "$(body "$r")" '"error"'
+hasnt "create_folder >255-byte name → no PHP warning leaked" "$(body "$r")" "Warning"
+test ! -e "$DATA/Box/$LONGNAME" && ok "create_folder >255-byte name created no directory" || bad "create_folder >255-byte name created no directory" "dir exists"
+hasnt "create_folder >255-byte name did NOT pollute .order.json" "$(cat "$DATA/Box/.order.json" 2>/dev/null)" "aaaa"
+r=$(post create_project "{\"name\":\"$LONGNAME\",\"parent\":\"\"}")
+has "create_project >255-byte name → clean JSON error" "$(body "$r")" '"error"'
+hasnt "create_project >255-byte name → no PHP warning leaked" "$(body "$r")" "Warning"
+test ! -e "$DATA/$LONGNAME" && ok "create_project >255-byte name created no directory" || bad "create_project >255-byte name created no directory" "dir exists"
+hasnt "create_project >255-byte name did NOT pollute root .order.json" "$(cat "$DATA/.order.json" 2>/dev/null)" "aaaa"
+# A valid LONG-but-≤255 name must still succeed — don't over-reject at the boundary.
+OKNAME=$(printf 'b%.0s' $(seq 1 255))
+r=$(post create_folder "{\"name\":\"$OKNAME\",\"parent\":\"Box\"}"); eqs "create_folder 255-byte name → 200" "$(code "$r")" "200"
+test -d "$DATA/Box/$OKNAME" && ok "create_folder 255-byte name was created" || bad "create_folder 255-byte name was created" "missing"
+
 # --- safePath confinement (no traversal escapes the data root) -------------
 post save_page '{"path":"../../ESCAPE_SENTINEL.json","data":{"title":"e","sections":[]}}' >/dev/null
 hasnt "save_page traversal did not write a sibling of the data dir" "$(ls "$(dirname "$DATA")" 2>/dev/null)" "ESCAPE_SENTINEL.json"
@@ -140,6 +175,28 @@ grep -q 'api/v1' "$DATA/Slash.json" && ok "replace_content re-stores slashes UNE
 # Sanity: the non-ASCII fallback + ASCII-no-slash fast path are unaffected by the change.
 has "search_content non-ASCII still matches (fallback intact)" "$(sc '日本語')" "UniEsc.json"
 has "search_content ASCII-no-slash still matches (fast path intact)" "$(sc 'echo')" "Uni.json"
+
+# --- HTML-project b64 search strip ------------------------------------------
+# An html block stores binary assets as ONE UNBROKEN LINE of standard base64 under the
+# reserved "b64" key. Random base64 runs contain real words by chance, so search_content
+# blanks those spans before scanning — otherwise every page with an image becomes a
+# false positive. The SAME word in a real `code` field must still match on that page.
+post save_page '{"path":"Proj.json","data":{"title":"Proj","sections":[{"title":"S","collapsed":false,"tags":[],"blocks":[{"type":"html","html":true,"label":"","entry":"index.html","code":"<img src=\"logo.png\"> findmeplease","files":[{"p":"logo.png","m":"image/png","b64":"AAAAreportAAAAquarterlyAAAA"}]}],"subsections":[]}]}}' >/dev/null
+hasnt "search_content ignores a word inside a b64 blob"        "$(sc 'report')"       "Proj.json"
+has   "search_content still matches the block's real code"     "$(sc 'findmeplease')" "Proj.json"
+# Same guarantee through the DECODED-FALLBACK branch: a slash-bearing query (base64's
+# alphabet includes '/') and a non-ASCII query both take the decode path, which applies
+# the identical strip — without it the false positives come straight back.
+post save_page '{"path":"Proj2.json","data":{"title":"Proj2","sections":[{"title":"S","collapsed":false,"tags":[],"blocks":[{"type":"html","html":true,"label":"","entry":"index.html","code":"plain ascii entry 日本語marker","files":[{"p":"a.png","m":"image/png","b64":"AAAAap/v1AAAAqqq"}]}],"subsections":[]}]}}' >/dev/null
+hasnt "search_content fallback ignores a slash-query inside b64" "$(sc 'ap/v1')"       "Proj2.json"
+has   "search_content fallback still matches real CJK content"   "$(sc '日本語marker')" "Proj2.json"
+
+# A RICH block can embed an image INLINE as a data: URL (the sanitizer allows
+# data:image/…;base64,…). Same false-hit problem as "b64", but mid-string inside the
+# block's HTML rather than under its own key — so the base64 run itself is blanked.
+post save_page '{"path":"Rich.json","data":{"title":"Rich","sections":[{"title":"S","collapsed":false,"tags":[],"blocks":[{"type":"plaintext","rich":true,"label":"","code":"<p>quarterly notes</p><img src=\"data:image/png;base64,AAAAinvoiceAAAAledgerAAAA\">"}],"subsections":[]}]}}' >/dev/null
+hasnt "search_content ignores a word inside an inline data: image" "$(sc 'invoice')"   "Rich.json"
+has   "search_content still matches the rich block's real prose"   "$(sc 'quarterly')" "Rich.json"
 
 # --- list_tags (index-backed: pageMetaIndexed + flushIndex) ----------------
 post save_page '{"path":"TagA.json","data":{"title":"TagA","sections":[{"title":"S","collapsed":false,"tags":["alpha","shared"],"blocks":[],"subsections":[]}]}}' >/dev/null
@@ -354,7 +411,11 @@ has "pathological regex (backtrack limit) → clean 'regex too complex'" "$(body
 post create_project '{"name":"OProj","parent":""}' >/dev/null
 r=$(post create_folder '{"parent":"OProj","name":"OFold"}')
 eqs "replay create_folder (nested) → 200" "$(code "$r")" "200"
-r=$(post save_page '{"path":"OProj/OFold/OPage.json","data":{"title":"OPage","sections":[]},"force":true}')
+# The replayed page carries a section (as a real replayed save does) so that the re-save
+# below snapshots: a page whose content is exactly {"title":"<filename>","sections":[]} is
+# the create_page stub, and snapshotHistory deliberately never versions that (see the
+# "create-then-save leaves no destructive empty version" case).
+r=$(post save_page '{"path":"OProj/OFold/OPage.json","data":{"title":"OPage","sections":[{"title":"S","collapsed":false,"tags":[],"blocks":[],"subsections":[]}]},"force":true}')
 eqs "replay save_page (nested, force) → 200" "$(code "$r")" "200"
 test -f "$DATA/OProj/OFold/OPage.json" && ok "replay wrote the nested page on disk" || bad "replay wrote the nested page" "missing"
 r=$(post get_page '{"path":"OProj/OFold/OPage.json"}')
@@ -363,6 +424,306 @@ has "replay round-trips the nested page" "$(body "$r")" '"title":"OPage"'
 # must still snapshot the prior version (best-effort guard doesn't break valid paths).
 post save_page '{"path":"OProj/OFold/OPage.json","data":{"title":"OPage2","sections":[]},"force":true}' >/dev/null
 test -d "$DATA/.history/OProj/OFold/OPage.json" && ok "snapshotHistory still snapshots a legit nested save" || bad "snapshotHistory still snapshots a legit nested save" "no history dir"
+
+# --- get_history_version + restore_history (atomic, never a raw copy) -------------
+# restore_history used to `copy()` a history version straight over the LIVE page: a
+# crash mid-copy truncates it, which is exactly what writeJsonAtomic exists to prevent.
+# It must snapshot first, then temp-file + rename, and leave the page parseable.
+post create_page '{"name":"Rh","parent":""}' >/dev/null
+post save_page '{"path":"Rh.json","data":{"title":"one","sections":[]}}' >/dev/null
+sleep 1
+post save_page '{"path":"Rh.json","data":{"title":"two","sections":[]}}' >/dev/null
+rh_hist=$(curl -sG "$BASE" --data-urlencode "action=list_history" --data-urlencode "path=Rh.json")
+rh_ts=$(printf '%s' "$rh_hist" | grep -o '"ts":[0-9]*' | head -1 | grep -o '[0-9]*')   # newest first
+[ -n "$rh_ts" ] && ok "list_history returned a version ts for Rh.json" || bad "list_history returned a version ts" "none in [$rh_hist]"
+r=$(post get_history_version "{\"path\":\"Rh.json\",\"ts\":$rh_ts}")
+eqs "get_history_version → 200" "$(code "$r")" "200"
+has "get_history_version returns the stored version body" "$(body "$r")" '"title": "one"'
+r=$(post get_history_version '{"path":"Rh.json","ts":1}')
+eqs "get_history_version unknown ts → 404" "$(code "$r")" "404"
+r=$(post get_history_version '{"path":"../../etc/passwd","ts":1}')
+has "get_history_version traversal path → invalid path" "$(body "$r")" '"error":"invalid path"'
+rh_before=$(ls "$DATA/.history/Rh.json" 2>/dev/null | wc -l | tr -d ' ')
+r=$(post restore_history "{\"path\":\"Rh.json\",\"ts\":$rh_ts}")
+eqs "restore_history → 200" "$(code "$r")" "200"
+has "restore_history → ok" "$(body "$r")" '"ok":true'
+has "restore_history returns the new mtime" "$(body "$r")" '"mtime":'
+has "restore_history put the old content back" "$(cat "$DATA/Rh.json")" '"title": "one"'
+php -r '$c=@file_get_contents($argv[1]); exit(json_decode($c,true)===null?1:0);' "$DATA/Rh.json" \
+  && ok "restored page is valid JSON (atomic write, not a truncated copy)" \
+  || bad "restored page is valid JSON" "does not parse"
+rh_after=$(ls "$DATA/.history/Rh.json" 2>/dev/null | wc -l | tr -d ' ')
+[ "$rh_after" -gt "$rh_before" ] && ok "restore_history snapshotted the replaced version first ($rh_before → $rh_after)" || bad "restore_history snapshotted first" "history count $rh_before → $rh_after"
+eqs "restore_history left no .tmp-* residue" "$(find "$DATA" -name '.tmp-*' 2>/dev/null | wc -l | tr -d ' ')" "0"
+r=$(post restore_history '{"path":"Rh.json","ts":1}')
+eqs "restore_history unknown ts → 404 (page untouched)" "$(code "$r")" "404"
+has "restore_history 404 left the page as restored" "$(cat "$DATA/Rh.json")" '"title": "one"'
+# a CORRUPT version must be refused, not written over a perfectly good page
+printf '%s' '{"title": "trunc' > "$DATA/.history/Rh.json/$rh_ts.json"
+r=$(post restore_history "{\"path\":\"Rh.json\",\"ts\":$rh_ts}")
+has "restore_history refuses a version that is not valid JSON" "$(body "$r")" '"error"'
+has "refused restore left the live page intact" "$(cat "$DATA/Rh.json")" '"title": "one"'
+
+# --- HISTORY_KEEP: pruning keeps exactly 20, and keeps the NEWEST ------------------
+# The prune sorts version filenames and drops the head. With 25 saves the surviving
+# window must be the LAST 20 — a reversed/lexicographic mistake would silently keep
+# the OLDEST 20 and quietly discard everything you'd actually want to recover.
+post create_page '{"name":"Keep","parent":""}' >/dev/null
+i=1; while [ "$i" -le 25 ]; do
+  post save_page "{\"path\":\"Keep.json\",\"data\":{\"title\":\"v$i\",\"sections\":[]}}" >/dev/null
+  i=$((i+1))
+done
+kn=$(ls "$DATA/.history/Keep.json" 2>/dev/null | wc -l | tr -d ' ')
+eqs "25 saves prune to exactly HISTORY_KEEP (20) versions" "$kn" "20"
+knew="$DATA/.history/Keep.json/$(ls "$DATA/.history/Keep.json" | sort -n | tail -1)"
+kold="$DATA/.history/Keep.json/$(ls "$DATA/.history/Keep.json" | sort -n | head -1)"
+# snapshots hold the content BEFORE each save: v1…v24 (the create_page stub is not
+# versioned — see the create-then-save case below) → surviving window is v5…v24 (the
+# 20 newest), so the extremes pin the direction of the prune.
+has "the NEWEST surviving version is the most recent one (v24)" "$(cat "$knew")" '"title": "v24"'
+has "the OLDEST surviving version is v5 (older ones were pruned)" "$(cat "$kold")" '"title": "v5"'
+kl=$(curl -sG "$BASE" --data-urlencode "action=list_history" --data-urlencode "path=Keep.json")
+eqs "list_history reports the same 20 versions" "$(printf '%s' "$kl" | grep -o '"ts":' | wc -l | tr -d ' ')" "20"
+
+# --- create-then-save leaves NO destructive empty version in history --------------
+# importPages restores a bundle as create_page (which writes {"title":…,"sections":[]})
+# then save_page (the real content) — so every restored page's ONLY history version was
+# that empty stub. The History panel presented it as a normal restorable version, and
+# restoring it EMPTIED the page: a restored backup shipped with a loaded gun where its
+# safety net should be. Same sequence in duplicatePageFromTree and in a queued
+# create+save replaying on reconnect, so the guard lives in snapshotHistory, not in the
+# importer: a page's FIRST snapshot is skipped when the prior content is exactly the
+# create_page stub FOR THAT FILENAME.
+hcount() { curl -sG "$BASE" --data-urlencode "action=list_history" --data-urlencode "path=$1" | grep -o '"ts":' | wc -l | tr -d ' '; }
+post create_folder '{"name":"Restore","parent":""}' >/dev/null
+post create_page '{"name":"Imported","parent":"Restore"}' >/dev/null
+post save_page '{"path":"Restore/Imported.json","data":{"title":"Imported","sections":[{"title":"S","collapsed":false,"tags":["t"],"blocks":[{"type":"bash","label":"","code":"restored content"}],"subsections":[]}]}}' >/dev/null
+has "the restored page holds the imported content" "$(cat "$DATA/Restore/Imported.json")" 'restored content'
+eqs "create_page→save_page leaves ZERO history versions (no empty stub)" "$(hcount 'Restore/Imported.json')" "0"
+# THE acceptance bar, stated directly: no version a user could restore would empty the page.
+destructive=0
+for v in "$DATA"/.history/Restore/Imported.json/*.json; do
+  [ -e "$v" ] || continue
+  php -r '$d=json_decode(@file_get_contents($argv[1]),true); exit((is_array($d) && empty($d["sections"]))?1:0);' "$v" || destructive=$((destructive+1))
+done
+eqs "no listed version of a restored page would destroy it if restored" "$destructive" "0"
+# ...and normal history is UNAFFECTED — the next save versions the real prior content.
+post save_page '{"path":"Restore/Imported.json","data":{"title":"Imported","sections":[{"title":"S2","collapsed":false,"tags":[],"blocks":[{"type":"bash","label":"","code":"second edit"}],"subsections":[]}]}}' >/dev/null
+eqs "the next save DOES version (history still works after a restore)" "$(hcount 'Restore/Imported.json')" "1"
+has "…and that version holds the real content, not an empty stub" "$(cat "$DATA"/.history/Restore/Imported.json/*.json)" 'restored content'
+
+# CONSERVATIVE HALF: content a user could have authored is NEVER skipped.
+# (a) a page a user deliberately EMPTIED is real data — its content versions normally,
+#     and once the page has history even stub-shaped content is versioned, so the skip
+#     can only ever apply to a page's very first snapshot.
+post create_page '{"name":"Emptied","parent":""}' >/dev/null
+post save_page '{"path":"Emptied.json","data":{"title":"Emptied","sections":[{"title":"S","collapsed":false,"tags":[],"blocks":[{"type":"bash","label":"","code":"authored work"}],"subsections":[]}]}}' >/dev/null
+post save_page '{"path":"Emptied.json","data":{"title":"Emptied","sections":[]}}' >/dev/null
+eqs "deliberately emptying a page versions the work it replaced" "$(hcount 'Emptied.json')" "1"
+has "…and that version is the authored content" "$(cat "$DATA"/.history/Emptied.json/*.json)" 'authored work'
+post save_page '{"path":"Emptied.json","data":{"title":"Emptied","sections":[{"title":"S","collapsed":false,"tags":[],"blocks":[{"type":"bash","label":"","code":"back again"}],"subsections":[]}]}}' >/dev/null
+eqs "the emptied state itself is then versioned like any other content" "$(hcount 'Emptied.json')" "2"
+# (b) a page whose only content IS its title (renamed, never given a section) keeps every
+#     authored title — "sections is empty" alone must never qualify as the stub.
+post create_page '{"name":"Titled","parent":""}' >/dev/null
+post save_page '{"path":"Titled.json","data":{"title":"Renamed once","sections":[]}}' >/dev/null
+post save_page '{"path":"Titled.json","data":{"title":"Renamed twice","sections":[]}}' >/dev/null
+eqs "a title-only page's authored title IS versioned" "$(hcount 'Titled.json')" "1"
+has "…holding the authored title, not the create_page stub" "$(cat "$DATA"/.history/Titled.json/*.json)" '"Renamed once"'
+# (bb) the EXACT-KEYS condition. isCreatePageStub demands the key set be precisely
+#     {title, sections} — the third load-bearing condition, and the only one that was
+#     untested. Relaxed to isset() checks, ANY page that merely HAS those two keys with an
+#     empty sections list and a filename-derived title reads as the stub: a hand-written or
+#     imported page carrying an extra top-level field, or a page written by a FUTURE version
+#     of CodeMan that adds one, loses its first real save from history. Written straight to
+#     disk because no current API call produces the shape.
+printf '%s' '{"title":"Extra","sections":[],"extra":1}' > "$DATA/Extra.json"
+post save_page '{"path":"Extra.json","data":{"title":"Extra","sections":[{"title":"S","collapsed":false,"tags":[],"blocks":[{"type":"bash","label":"","code":"real work"}],"subsections":[]}]}}' >/dev/null
+eqs "an extra top-level key means it is NOT the create_page stub (it IS versioned)" "$(hcount 'Extra.json')" "1"
+has "…and the snapshot is the prior on-disk content, extra key and all" "$(cat "$DATA"/.history/Extra.json/*.json)" '"extra"'
+
+# (c) FAIL OPEN. isCreatePageStub decodes the PRIOR on-disk content, and anything it
+#     cannot read as an array is NOT a stub — so it gets snapshotted. Un-decodable content
+#     (an external editor, a truncated write, a hand-edited file) is the case with the MOST
+#     to lose: calling it a stub would silently discard the only copy there is. Written
+#     straight to disk, because no API call can produce it. The guard shipped untested.
+printf '%s' 'this is not json at all' > "$DATA/Corrupt.json"
+post save_page '{"path":"Corrupt.json","data":{"title":"Corrupt","sections":[]}}' >/dev/null
+eqs "unreadable prior content is NEVER read as the stub (fail OPEN)" "$(hcount 'Corrupt.json')" "1"
+has "…and the un-decodable bytes are what got snapshotted" "$(cat "$DATA"/.history/Corrupt.json/*.json)" 'not json at all'
+
+# --- contentFileIterator: content scans NEVER descend into dot-dirs ----------------
+# .history/.trash hold ~20 versions per page. A bare RecursiveDirectoryIterator would
+# still pass every other assertion here while making search hit stale snapshots — and
+# replace_content would REWRITE history, destroying the recovery net.
+post create_page '{"name":"DotScan","parent":""}' >/dev/null
+post save_page '{"path":"DotScan.json","data":{"title":"DotScan","sections":[{"title":"S","collapsed":false,"tags":["livetag"],"blocks":[{"type":"bash","label":"","code":"livemarker"}],"subsections":[]}]}}' >/dev/null
+mkdir -p "$DATA/.history/DotScan.json"
+printf '%s' '{"title":"old","sections":[{"title":"S","collapsed":false,"tags":["historyonlytag"],"blocks":[{"type":"bash","label":"","code":"historyonlymarker"}],"subsections":[]}]}' > "$DATA/.history/DotScan.json/1.json"
+eqs "search_content finds nothing for a .history-only token" "$(sc 'historyonlymarker')" "[]"
+has "search_content still matches the LIVE page content"     "$(sc 'livemarker')" "DotScan.json"
+sbd=$(curl -sG "$BASE" --data-urlencode "action=search_blocks" --data-urlencode "q=historyonlymarker")
+hasnt "search_blocks does not scan .history" "$sbd" "historyonlymarker"
+# a trashed page's content is likewise out of scope for search
+post create_page '{"name":"TrashScan","parent":""}' >/dev/null
+post save_page '{"path":"TrashScan.json","data":{"title":"TrashScan","sections":[{"title":"S","collapsed":false,"tags":[],"blocks":[{"type":"bash","label":"","code":"trashonlymarker"}],"subsections":[]}]}}' >/dev/null
+post delete '{"path":"TrashScan.json"}' >/dev/null
+eqs "search_content finds nothing for a .trash-only token" "$(sc 'trashonlymarker')" "[]"
+post rebuild_index '{}' >/dev/null   # force a full re-parse so list_tags can't hide behind a warm index
+ltd=$(curl -sG "$BASE" --data-urlencode "action=list_tags")
+hasnt "list_tags does not surface a .history-only tag" "$ltd" '"tag":"historyonlytag"'
+has   "list_tags still surfaces the live tag"          "$ltd" '"tag":"livetag"'
+# replace_content must leave the history snapshot byte-identical (it never walked in)
+post replace_content '{"find":"historyonlymarker","replace":"CLOBBERED"}' >/dev/null
+has "replace_content left the .history snapshot untouched" "$(cat "$DATA/.history/DotScan.json/1.json")" "historyonlymarker"
+
+# --- rebuild_index ----------------------------------------------------------------
+rm -f "$DATA/.index.json"
+r=$(post rebuild_index '{}')
+eqs "rebuild_index → 200" "$(code "$r")" "200"
+has "rebuild_index → ok" "$(body "$r")" '"ok":true'
+has "rebuild_index reports a page count" "$(body "$r")" '"pages":'
+test -f "$DATA/.index.json" && ok "rebuild_index regenerated .index.json" || bad "rebuild_index regenerated .index.json" "missing"
+ipages=$(body "$r" | grep -o '"pages":[0-9]*' | grep -o '[0-9]*')
+[ "${ipages:-0}" -gt 0 ] && ok "rebuild_index indexed the library ($ipages pages)" || bad "rebuild_index indexed the library" "pages=$ipages"
+hasnt "the index holds no .history entries" "$(cat "$DATA/.index.json")" ".history"
+hasnt "the index holds no .trash entries"   "$(cat "$DATA/.index.json")" ".trash"
+
+# --- reorder (manual child order in .order.json) ----------------------------------
+post create_folder '{"name":"Ord","parent":""}' >/dev/null
+for n in A B C; do post create_page "{\"name\":\"$n\",\"parent\":\"Ord\"}" >/dev/null; done
+r=$(post reorder '{"parent":"Ord","order":["C.json","A.json","B.json"]}')
+eqs "reorder → 200" "$(code "$r")" "200"
+has "reorder → ok" "$(body "$r")" '"ok":true'
+has "reorder persisted .order.json" "$(cat "$DATA/Ord/.order.json" 2>/dev/null)" '["C.json","A.json","B.json"]'
+# and the tree actually comes back in that order
+otree=$(curl -sG "$BASE" --data-urlencode "action=tree")
+ordnames=$(printf '%s' "$otree" | tr '{' '\n' | grep -o '"name":"[ABC]"' | sed 's/.*:"//; s/"//' | tr -d '\n')
+eqs "tree returns the folder's children in the stored order" "$ordnames" "CAB"
+r=$(post reorder '{"parent":"../escape","order":["x"]}')
+has "reorder traversal parent → invalid path" "$(body "$r")" '"error":"invalid path"'
+
+# An EMPTY order array must be behaviourally identical to having no .order.json at all.
+# There is no action that DELETES an order file, so the library-shape import sends [] to
+# clear the reverse-creation artifact prependOrder leaves in a folder it created. If []
+# meant anything else, that clear would itself be a corruption.
+r=$(post reorder '{"parent":"Ord","order":[]}')
+eqs "reorder with an empty order → 200" "$(code "$r")" "200"
+eqs "…persists an empty .order.json" "$(cat "$DATA/Ord/.order.json" 2>/dev/null)" "[]"
+otree=$(curl -sG "$BASE" --data-urlencode "action=tree")
+ordnames=$(printf '%s' "$otree" | tr '{' '\n' | grep -o '"name":"[ABC]"' | sed 's/.*:"//; s/"//' | tr -d '\n')
+eqs "…and the tree comes back in the DEFAULT order (== no order file)" "$ordnames" "ABC"
+rm -f "$DATA/Ord/.order.json"
+otree=$(curl -sG "$BASE" --data-urlencode "action=tree")
+ordnames=$(printf '%s' "$otree" | tr '{' '\n' | grep -o '"name":"[ABC]"' | sed 's/.*:"//; s/"//' | tr -d '\n')
+eqs "…exactly as with NO .order.json on disk" "$ordnames" "ABC"
+
+# A REPEATED name in .order.json. buildTree indexes the order with array_flip, which keeps
+# the LAST occurrence of a duplicated value — so ["C.json","A.json","C.json"] gives C index 2,
+# A index 1, i.e. A before C. The CLIENT-side twin (sortChildrenLikeBuildTree, used for the
+# offline cached reorder) is FIRST-wins and reads the same list as C before A; the two
+# genuinely disagree on this one input. Reachable only via a hand-edited/merged order file or
+# a hand-built bundle — no production writer emits a duplicate — so both behaviours are pinned
+# (the client half in tests.html) rather than silently drifting further apart. Written straight
+# to disk: `reorder` would round-trip it, but the point is what buildTree READS.
+printf '%s' '["C.json","A.json","C.json"]' > "$DATA/Ord/.order.json"
+otree=$(curl -sG "$BASE" --data-urlencode "action=tree")
+ordnames=$(printf '%s' "$otree" | tr '{' '\n' | grep -o '"name":"[ABC]"' | sed 's/.*:"//; s/"//' | tr -d '\n')
+eqs "a repeated name in .order.json is LAST-wins on the server (array_flip)" "$ordnames" "ACB"
+rm -f "$DATA/Ord/.order.json"
+
+# SERVER-BEHAVIOUR PIN: create_folder calls prependOrder UNCONDITIONALLY, so re-creating a
+# folder that already exists jumps it to the top of its parent's order. That is why the
+# client-side import SKIPS create_folder for folders it knows already exist — this pins the
+# behaviour being worked around, so a future server change is caught here rather than
+# silently making the client's skip redundant (or, worse, the wrong fix).
+post create_folder '{"name":"OrdA","parent":"Ord"}' >/dev/null
+post create_folder '{"name":"OrdB","parent":"Ord"}' >/dev/null
+has "create_folder prepends a NEW folder to its parent's order" "$(cat "$DATA/Ord/.order.json")" '["OrdB","OrdA"]'
+post create_folder '{"name":"OrdA","parent":"Ord"}' >/dev/null
+has "create_folder on an EXISTING folder still prependOrders it (the client must skip it)" \
+    "$(cat "$DATA/Ord/.order.json")" '["OrdA","OrdB"]'
+rm -rf "$DATA/Ord/OrdA" "$DATA/Ord/OrdB"; rm -f "$DATA/Ord/.order.json"
+
+# create_project under a PLAIN folder is refused (the client validates first and downgrades
+# to create_folder, so this path should never be reached from the app — pinned regardless).
+post create_folder '{"name":"PlainP","parent":""}' >/dev/null
+r=$(post create_project '{"name":"Nope","parent":"PlainP"}')
+has "create_project under a plain folder → refused" "$(body "$r")" '"error":"projects can only be created'
+test ! -e "$DATA/PlainP/Nope" && ok "…and nothing was created" || bad "create_project under a plain folder created nothing" "PlainP/Nope exists"
+
+# --- buildTree's DEFAULT child order: the cross-language comparator oracle ---------
+# tree.js's defaultChildOrder must reproduce this EXACTLY — the library-shape export omits
+# a folder's `order` whenever the two agree, so a divergence silently DROPS the user's
+# manual order on the next restore. The two comparators are in different languages and
+# cannot call each other, so both are pinned to this ONE literal, which also appears in
+# codeman/tests.html; a CI invariant fails the build if the two copies ever diverge.
+# The corpus is created DIRECTLY ON DISK (not via create_folder, whose prependOrder would
+# install an order file and defeat the point), so this is buildTree's real fallback.
+# Ｗide (U+FF37) and 😀emoji (U+1F600) are the load-bearing pair: byte order puts Ｗide
+# FIRST (0xEF < 0xF0) while UTF-16 code-unit order puts the emoji first (0xD83D < 0xFF37),
+# so they are the only two names in the corpus whose relative order tells cmpUtf8 apart
+# from a plain JS string compare. Without a supplementary-plane name the whole corpus is
+# BMP and the JS side could silently regress to string comparison — in the data-LOSING
+# direction (a false "already default" verdict discards the user's manual order).
+# Cap/cap are the TIER-3 pair: two SAME-TYPE siblings differing only in case, so the type
+# tier ties and PHP's ASCII-only strcasecmp ties too — the order comes purely from
+# scandir's ascending (byte) sort, which PHP 8's STABLE usort preserves, i.e. Cap first.
+# That is the tier tree.js models as cmpUtf8(a.r, b.r), and it IS reachable in production:
+# the documented deployment is Linux/Docker, where Alpha/ and alpha/ coexist.
+# FILESYSTEM CAVEAT: on a case-INSENSITIVE volume (macOS/APFS, the usual dev machine) the
+# two directories cannot both exist — `mkdir cap` after `mkdir Cap` fails — so the pair is
+# untestable server-side there. The ORACLE LITERAL stays byte-identical with tests.html
+# (CI invariant 11); only the on-disk corpus and the expected slice drop "cap" when the
+# volume folds case. The CI runner is Linux, so the full pair IS exercised on every push.
+SORT_ORACLE_JSON='["10x","2x","_under","a b","a-b","a_b","Alpha","alpha2","beta","Cap","cap","ZZ","Ångström","Ｗide","😀emoji","9lives.json","alpha.json","Beta.json","Zed.json","Émile.json"]'
+mkdir -p "$DATA/Sortcase"
+for d in "Alpha" "beta" "alpha2" "ZZ" "_under" "10x" "2x" "a b" "a-b" "a_b" "Ångström" "Ｗide" "😀emoji"; do mkdir -p "$DATA/Sortcase/$d"; done
+for p in "Beta" "alpha" "Zed" "Émile" "9lives"; do
+  printf '%s' '{"title":"x","sections":[]}' > "$DATA/Sortcase/$p.json"
+done
+CASE_SENSITIVE=0
+mkdir "$DATA/Sortcase/Cap" 2>/dev/null
+if mkdir "$DATA/Sortcase/cap" 2>/dev/null; then CASE_SENSITIVE=1; fi
+if [ "$CASE_SENSITIVE" = 1 ]; then
+  SORT_EXPECT="$SORT_ORACLE_JSON"
+else
+  echo "  · case-insensitive volume: the Cap/cap tier-3 pair is skipped server-side (pinned in tests.html)"
+  SORT_EXPECT=$(printf '%s' "$SORT_ORACLE_JSON" | php -r '
+  $a = json_decode(stream_get_contents(STDIN), true);
+  echo json_encode(array_values(array_filter($a, function ($x) { return $x !== "cap"; })), JSON_UNESCAPED_UNICODE);
+  ')
+fi
+got=$(curl -sG "$BASE" --data-urlencode "action=tree" | php -r '
+$t = json_decode(stream_get_contents(STDIN), true);
+$s = null; foreach ($t as $x) if ($x["type"] === "folder" && $x["name"] === "Sortcase") $s = $x;
+if (!$s) { echo "NO Sortcase NODE"; exit; }
+echo json_encode(array_map(function ($i) {
+  return $i["type"] === "folder" ? $i["name"] : $i["name"] . ".json";
+}, $s["children"]), JSON_UNESCAPED_UNICODE);
+')
+eqs "buildTree default order matches the shared comparator oracle" "$got" "$SORT_EXPECT"
+rm -rf "$DATA/Sortcase"
+
+# --- col_sorts / set_col_sort (per-column sort prefs, one root-level .colsort.json) --
+r=$(post set_col_sort '{"parent":"","field":"name","dir":"desc"}')
+eqs "set_col_sort root → 200" "$(code "$r")" "200"
+cs=$(curl -sG "$BASE" --data-urlencode "action=col_sorts")
+has "the ROOT column key is the empty string" "$cs" '"":{"field":"name","dir":"desc"}'
+post set_col_sort '{"parent":"Ord","field":"kind","dir":"asc"}' >/dev/null
+cs=$(curl -sG "$BASE" --data-urlencode "action=col_sorts")
+has "a nested column keys off its folder rel path" "$cs" '"Ord":{"field":"kind","dir":"asc"}'
+test -f "$DATA/.colsort.json" && ok "col sorts live in ONE root-level .colsort.json" || bad "col sorts live in one root-level .colsort.json" "missing"
+test ! -e "$DATA/Ord/.colsort.json" && ok "no per-folder .colsort.json is written" || bad "no per-folder .colsort.json" "Ord/.colsort.json exists"
+post set_col_sort '{"parent":"","field":"manual"}' >/dev/null
+cs=$(curl -sG "$BASE" --data-urlencode "action=col_sorts")
+hasnt "field=manual clears the root entry" "$cs" '"":{'
+has   "clearing one column leaves the others" "$cs" '"Ord":{"field":"kind","dir":"asc"}'
+post set_col_sort '{"parent":"Ord","field":"bogus","dir":"asc"}' >/dev/null
+cs=$(curl -sG "$BASE" --data-urlencode "action=col_sorts")
+eqs "an unknown sort field clears the entry (back to manual)" "$cs" "{}"
+r=$(post set_col_sort '{"parent":"../escape","field":"name"}')
+has "set_col_sort traversal parent → invalid path" "$(body "$r")" '"error":"invalid path"'
 
 # --- CSRF enforcement: deny-by-default, header-less writes 403, reads 200 ----
 # The post() helper always sends X-CodeMan-Request, so every write test above

@@ -1377,7 +1377,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 /* ---------- Thin dark scrollbar for source editors + block views ---------- */
 /* Firefox (no overlay problem): thin themed bars everywhere. */
 .code-edit, .code-view,
-.csv-edit, .json-edit, .csv-table-wrap, .json-tree, .json-raw,
+.csv-edit, .json-edit, .csv-table-wrap, .json-tree, .json-raw, .html-files,
 .block.note .code-edit, .block.note .code-view pre, .block.note .code-view table,
 .block.rich .rich-surface pre, .block.rich .rich-surface table {
   scrollbar-width: thin;
@@ -1392,6 +1392,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
    persistent, space-reserving custom bar (defeats the macOS overlay auto-hide). */
 .code-view::-webkit-scrollbar,
 .csv-table-wrap::-webkit-scrollbar, .json-tree::-webkit-scrollbar, .json-raw::-webkit-scrollbar,
+.html-files::-webkit-scrollbar,
 .block.note .code-view pre::-webkit-scrollbar, .block.note .code-view table::-webkit-scrollbar,
 .block.rich .rich-surface pre::-webkit-scrollbar, .block.rich .rich-surface table::-webkit-scrollbar {
   -webkit-appearance: none; width: 8px; height: 8px;
@@ -1513,6 +1514,22 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 }
 .block.note .code-view th, .block.note .code-view td {
   border: 1px solid var(--border-2); padding: 5px 10px;
+  /* Table cells must NOT inherit the prose `overflow-wrap: anywhere` set on .code-view.
+     `anywhere` feeds its break opportunities into MIN-CONTENT sizing, which collapsed every
+     column to one character — so the auto table layout always shrank to fit and the
+     overflow-x:auto above was unreachable (measured at 1440px: 20 columns → 45px-wide, 70px-tall
+     cells with scrollWidth == clientWidth; a scrollbar only appeared at 30 columns, by which point
+     every column was already one character).
+     `break-word` keeps a long unbroken token from spilling out of its cell but is
+     min-content-NEUTRAL, so columns keep their natural width and a wide table overflows and
+     scrolls. Prose keeps `anywhere` (a 400-char token must still wrap inside the block): the
+     reset is scoped to cells ONLY.
+     THE ONE-LINE RECIPE for any table cell in this file is exactly the declaration below —
+     `overflow-wrap: break-word; word-break: normal`. Do NOT reach for `word-break: break-word`:
+     it is the DEPRECATED ALIAS specified as `word-break: normal` + `overflow-wrap: anywhere`,
+     i.e. it CAUSES this defect under a different name (it is what broke .csv-table for two
+     releases after the note/rich cells were fixed). */
+  overflow-wrap: break-word; word-break: normal;
 }
 .block.note .code-view th { background: var(--surface, #2d2d30); font-weight: 600; color: #fff; }
 .code-view a { color: #4ea0e0; text-decoration: none; }
@@ -1582,6 +1599,21 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
    Mirrors the note-view <pre>/<table> pattern. */
 .block.rich .rich-surface pre { max-width: 100%; overflow-x: auto; white-space: pre; }
 .block.rich .rich-surface table { display: block; max-width: 100%; overflow-x: auto; }
+/* Pasted tables/images/h5-h6 are allowlisted by the rich sanitizer, so they need real
+   styling here (and the same rules are mirrored into pageToHtml's export CSS). */
+.block.rich .rich-surface table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+.block.rich .rich-surface th, .block.rich .rich-surface td {
+  border: 1px solid var(--border-2); padding: 4px 9px; text-align: left; vertical-align: top;
+  /* Same cell-scoped reset as the note view — `.rich-surface`'s prose `overflow-wrap: anywhere`
+     inherits into cells and collapses each column's min-content to one character, making the
+     overflow-x:auto above unreachable. See the note-table comment for the full rationale. */
+  overflow-wrap: break-word; word-break: normal;
+}
+.block.rich .rich-surface thead th { background: var(--panel-2); color: #fff; font-weight: 600; }
+.block.rich .rich-surface caption { color: var(--text-dim); font-size: 12px; padding: 3px; }
+.block.rich .rich-surface img { max-width: 100%; height: auto; border-radius: 4px; margin: 4px 0; }
+.block.rich .rich-surface h4 { font-size: 1.05em; margin: 8px 0 4px; }
+.block.rich .rich-surface h5, .block.rich .rich-surface h6 { font-size: 1em; margin: 8px 0 4px; color: #fff; }
 
 /* tiny "Copied to clipboard" bubble that pops next to the Copy button */
 .copy-pop {
@@ -1750,6 +1782,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   opacity: 0;
   transition: opacity 0.2s;
   pointer-events: none;
+  /* Most toasts are a few words, but a couple carry a real sentence (the import
+     bundle-scope note). Unbounded, those grew a single line right across the viewport
+     and off the left edge on mobile — cap + wrap. Short toasts are shrink-to-fit and
+     unaffected. */
+  max-width: min(460px, calc(100vw - 32px));
+  line-height: 1.45;
 }
 .toast.show { opacity: 1; }
 
@@ -1777,6 +1815,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   color: var(--text);
   margin-bottom: 12px;
   line-height: 1.45;
+  /* Modal messages are plain strings; some are multi-line (the html-project over-cap
+     rejection is a \n-separated list of oversized files). pre-line honours those
+     newlines while still collapsing runs of spaces and wrapping normally, so the
+     single-line messages every other caller passes render exactly as before. */
+  white-space: pre-line;
 }
 .modal-input {
   width: 100%;
@@ -1970,6 +2013,13 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
   padding: 4px;
   min-width: 180px;
+  /* a long menu (block kinds + actions) scrolls INSIDE itself rather than running off
+     the viewport. showMiniMenu's capture-phase scroll-to-close handler ignores scroll
+     events originating inside the menu — without that companion guard, arrowing down
+     past the visible rows would scroll here and close the menu mid-navigation. */
+  max-height: min(70vh, 520px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .mini-menu-opt { display: flex; align-items: center; gap: 10px; padding: 8px 12px; font-size: 13px; color: var(--text); border-radius: 4px; cursor: pointer; }
 .mini-menu-opt:hover { background: var(--accent-2); }
@@ -2052,7 +2102,19 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .csv-table { border-collapse: collapse; width: 100%; font-size: 13px; }
 .csv-table th, .csv-table td {
   border: 1px solid var(--border-2); padding: 5px 10px; text-align: left;
-  vertical-align: top; white-space: pre-wrap; word-break: break-word;
+  vertical-align: top; white-space: pre-wrap;
+  /* Same cell-scoped reset as the note/rich tables, and for the same reason wearing a
+     different property name: `word-break: break-word` is the DEPRECATED ALIAS specified as
+     `word-break: normal` + `overflow-wrap: anywhere` — so it fed break opportunities into
+     MIN-CONTENT sizing exactly as the inherited prose `anywhere` did. Every column collapsed
+     to ~one character, the auto table layout always shrank to fit, and the overflow-x:auto on
+     .csv-table-wrap was unreachable (measured at 1440px: 20 columns → 45×59-75px cells,
+     scrollWidth 939 == clientWidth; at 390px, 31×171px cells). NEVER use `word-break:
+     break-word` on a table cell. `overflow-wrap: break-word` is min-content-NEUTRAL: a long
+     unbroken token still can't spill out of its cell, but columns keep their natural width and
+     a wide table genuinely overflows and scrolls. `white-space: pre-wrap` stays — CSV cells
+     can carry embedded newlines. */
+  overflow-wrap: break-word; word-break: normal;
 }
 .csv-table thead th { background: var(--panel-2); color: #fff; font-weight: 600; position: sticky; top: 0; }
 .csv-table tbody tr:nth-child(even) td { background: rgba(255,255,255,.02); }
@@ -2114,6 +2176,78 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   border: 1px solid rgba(231,179,92,.35); border-radius: 5px;
   font-size: 12px; padding: 5px 10px; margin: 0 0 8px;
 }
+
+/* ---- HTML project block ---- */
+.block.html .html-edit {
+  display: block; box-sizing: border-box;
+  margin: 8px 14px; width: calc(100% - 28px);
+  background: #303841; color: var(--text);
+  border: 1px solid var(--border-2); border-radius: 6px;
+  padding: 8px 10px; font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 13px; line-height: 1.5; resize: vertical;
+  max-height: 60vh; overflow: auto; tab-size: 2;
+  white-space: pre;          /* no soft-wrap — long markup lines scroll horizontally */
+}
+.block.html.viewing .html-edit { display: none; }
+.block.html .html-view { padding: 6px 14px 12px; }
+.html-warn {
+  color: #e7b35c; background: rgba(231,179,92,.1);
+  border: 1px solid rgba(231,179,92,.35); border-radius: 5px;
+  font-size: 12px; padding: 5px 10px; margin: 0 0 8px;
+}
+.html-warn ul { margin: 4px 0 0 16px; padding: 0; }
+.html-warn li { margin: 2px 0; word-break: break-word; }
+.html-warn-head { margin-top: 6px; font-weight: 600; opacity: .9; }
+/* Notes (routine collapses, CSP heuristics) read as informational, not as a failure */
+.html-warn .html-warn-note, .html-warn .html-warn-note li { color: var(--text-dim); }
+/* …and when EVERYTHING in the banner is a note, the whole box drops out of amber —
+   a nav that can't navigate in a single-document preview isn't a problem. */
+.html-warn.html-warn-info {
+  color: var(--text-dim); background: rgba(255,255,255,.03); border-color: var(--border-2);
+}
+.html-warn-more { margin-top: 6px; font-size: 11px; padding: 2px 8px; }
+.html-frame-wrap {
+  position: relative; resize: vertical; overflow: hidden;
+  border: 1px solid var(--border-2); border-radius: 6px; background: #fff;
+  min-height: 120px; max-height: 1200px;
+}
+.html-frame { display: block; width: 100%; height: 100%; border: 0; }
+.html-poster {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 8px;
+  background: var(--panel); color: var(--text-dim);
+}
+.html-poster-cap { font-size: 12px; font-family: "SF Mono", Menlo, Consolas, monospace; }
+/* A long project scrolls its own list instead of pushing the preview off screen.
+   Deliberately NO overscroll-behavior here (unlike the menu) so the page keeps
+   scrolling once the list bottoms out. */
+.html-files {
+  margin-top: 8px; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px;
+  max-height: 320px; overflow-y: auto;
+}
+.html-files-head {
+  position: sticky; top: 0; z-index: 1; background: var(--panel);
+  padding: 3px 4px; font-size: 11.5px; color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+}
+.html-files-head.over-soft { color: var(--warn-text); }
+.html-file-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 2px 4px; border-radius: 4px; color: var(--text-dim);
+}
+.html-file-row:hover { background: rgba(255,255,255,.04); }
+.html-file-row.is-entry { color: var(--text); }
+.html-file-path { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.html-file-size { flex: 0 0 auto; opacity: .75; }
+/* the ⌁ entry marker gets its own fixed cell (empty on other rows) so every path in
+   the list starts at the same left edge */
+.html-file-mark { flex: 0 0 auto; width: 1.1em; text-align: center; }
+/* Remove is a real tap target and reads as destructive (button.danger is neutral at
+   rest, red on hover/focus) — it used to be a 20×14 button styled like "Make entry". */
+.html-file-del { flex: 0 0 auto; min-width: 24px; min-height: 24px; padding: 2px 7px; font-size: 12px; }
+.html-file-entry { flex: 0 0 auto; min-height: 24px; padding: 2px 8px; font-size: 12px; }
+.html-empty { color: var(--text-dim); font-size: 13px; font-style: italic; padding: 4px 0; }
+.block.html.drop-active .html-view { outline: 2px dashed var(--accent-2); outline-offset: 2px; }
 
 /* the per-block type switch */
 .block-toolbar .type-menu { font-size: 11px; }
@@ -2320,9 +2454,17 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   body.is-mobile .block-toolbar .block-copy,
   body.is-mobile .block-toolbar .block-overflow,
   body.is-mobile .block-toolbar .tree-toggle,
+  body.is-mobile .block-toolbar .html-run,
+  body.is-mobile .block-toolbar .html-stop,
   body.is-mobile .block-toolbar .danger {
     min-width: 34px; justify-content: center; padding: 5px 6px;
   }
+  /* ■ Stop folds into the ⋯ menu on mobile so the html row stays five controls
+     (✎ ▶ ⧉ ⋯ ✕) — it is still reachable, never removed. */
+  body.is-mobile .block-toolbar .html-stop { display: none; }
+  /* file-row buttons get the same comfortable tap target as the toolbar icons */
+  body.is-mobile .html-file-del,
+  body.is-mobile .html-file-entry { min-width: 34px; min-height: 32px; }
   /* lang picker: let it shrink so it doesn't hog the row */
   body.is-mobile .block-toolbar .lang-picker-btn { min-width: 0; max-width: 130px; }
 
@@ -2359,7 +2501,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
   /* --- 16px inputs so iOS Safari doesn't zoom on focus --- */
   .sidebar-search input, .page-search input, .modal-input, .cmdk-input,
-  .todo-text, .section-title, .block-label, .pending-input, .csv-edit, .json-edit { font-size: 16px; }
+  .todo-text, .section-title, .block-label, .pending-input, .csv-edit, .json-edit, .html-edit { font-size: 16px; }
 
   /* --- editor max-height: smaller on phones, dynamic-viewport so it tracks the
      browser chrome / on-screen keyboard (dvh); 50vh fallback for old engines --- */
@@ -2367,7 +2509,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   body.is-mobile .block.note .code-edit,
   body.is-mobile .block.csv .csv-edit,
   body.is-mobile .block.json .json-edit,
+  body.is-mobile .block.html .html-edit,
   body.is-mobile .block.rich:not(.viewing) .rich-surface { max-height: 50vh; max-height: 50dvh; }
+
+  /* iOS Safari has no folder picker — drag-drop is the only other route, and there
+     isn't one on a phone either, so hide Upload rather than offer a dead button. */
+  body.is-mobile .html-upload { display: none; }
 
   /* --- header create group + tools: bigger tap targets --- */
   .sidebar-create button { font-size: 13px; padding: 8px 4px; }

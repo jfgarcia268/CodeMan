@@ -174,9 +174,13 @@ async function duplicatePageFromTree(node) {
     const d = await api('get_page', undefined, 'path=' + encodeURIComponent(node.path));
     // Offline + cache miss → offlineApi returns an empty placeholder ({sections:[], _mtime:null})
     // that's indistinguishable from a real empty page. Refuse rather than silently persist a blank
-    // copy of a page whose real content we can't see — open or prime it first. (Online, _mtime is
-    // always set; the open-tab branch above uses the live buffer and is unaffected.)
-    if (offlineState && (!d || d._mtime == null)) { toast('Open this page before duplicating it offline'); return; }
+    // copy of a page whose real content we can't see — open or prime it first.
+    // Ask the MIRROR (pageGet) rather than testing the RESPONSE: the old `d._mtime == null` test
+    // could never say "hit", because cacheOnSuccess strips _mtime before mirroring and the miss
+    // placeholder also carries _mtime:null — so a genuine cache HIT looked exactly like a miss and
+    // tree-row Duplicate was dead offline for EVERY page not currently open, defeating
+    // primeOfflineCache / "Download for offline". (Online this is skipped entirely.)
+    if (offlineState && !(await pageGet(node.path))) { toast('Open this page before duplicating it offline'); return; }
     sections = (d && d.sections) || [];
   }
   const create = await api('create_page', { parent, name: newName });
@@ -970,34 +974,124 @@ function textToRichHtml(text) {
 // inside an otherwise-unwrapped tag is removed before its ancestor is unwrapped.
 // It's the user's own content, but we still strip scripts, event handlers and
 // javascript: URLs so a pasted snippet can't execute.
-const RICH_ALLOWED = new Set(['P', 'BR', 'DIV', 'SPAN', 'B', 'STRONG', 'I', 'EM', 'U', 'S', 'STRIKE', 'DEL', 'UL', 'OL', 'LI', 'H1', 'H2', 'H3', 'H4', 'BLOCKQUOTE', 'A', 'FONT', 'SUB', 'SUP', 'PRE', 'CODE', 'HR']);
-const RICH_DANGEROUS = new Set(['SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'EMBED', 'LINK', 'META', 'FORM', 'INPUT', 'BUTTON', 'SVG', 'TEXTAREA']);
-function sanitizeRichHtml(html) {
-  const tpl = document.createElement('template');
-  tpl.innerHTML = String(html || '');
-  const clean = (node) => {
-    [...node.childNodes].forEach(clean);          // children first (post-order)
-    if (node.nodeType === 8) { node.remove(); return; }   // comment
-    if (node.nodeType !== 1) return;                       // keep text nodes
-    const tag = node.tagName;
-    if (RICH_DANGEROUS.has(tag)) { node.remove(); return; }
-    if (!RICH_ALLOWED.has(tag)) {                          // unwrap unknown tag, keep text
-      const p = node.parentNode; if (!p) return;
-      while (node.firstChild) p.insertBefore(node.firstChild, node);
-      p.removeChild(node); return;
-    }
-    [...node.attributes].forEach(a => {
-      const name = a.name.toLowerCase();
-      if (name === 'style') { if (/javascript:|expression\(|url\s*\(/i.test(a.value)) node.removeAttribute('style'); }
-      else if (name === 'href' && tag === 'A') { if (!/^(https?:|mailto:)/i.test(a.value.trim())) node.removeAttribute('href'); }
-      else if ((name === 'color' || name === 'size' || name === 'face') && tag === 'FONT') { /* legacy font attrs allowed */ }
-      else node.removeAttribute(a.name);
-    });
-    if (tag === 'A') { node.setAttribute('target', '_blank'); node.setAttribute('rel', 'noopener noreferrer'); }
-  };
-  clean(tpl.content);
-  return tpl.innerHTML;
+//
+// THREE declared tables, deny-by-default: RICH_ALLOWED (kept), RICH_DANGEROUS
+// (dropped WITH their subtree), RICH_ATTRS (the only attributes that may survive,
+// per tag). Anything named nowhere is removed — which is why `onerror`/`onload`
+// and every FUTURE on* handler are impossible without enumerating them.
+// A merely-unknown tag is UNWRAPPED (lossless for its text), never dropped.
+//
+// The FULL table set is allowlisted on purpose: this function returns a serialized
+// string that is re-parsed by `surface.innerHTML = …`, and an unwrapped
+// <caption>/<colgroup>/<col> would leave bare text as a direct child of <table>,
+// which the second parse FOSTER-PARENTS out of the table — silently relocating
+// content above it.
+// CONSTRAINT: both Sets must stay SINGLE-LINE literals — the `rich-sanitizer` CI
+// invariant greps the `const RICH_ALLOWED` line for script-bearing tag names.
+const RICH_ALLOWED = new Set(['P', 'BR', 'DIV', 'SPAN', 'B', 'STRONG', 'I', 'EM', 'U', 'S', 'STRIKE', 'DEL', 'UL', 'OL', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'BLOCKQUOTE', 'A', 'FONT', 'SUB', 'SUP', 'PRE', 'CODE', 'HR', 'TABLE', 'CAPTION', 'COLGROUP', 'COL', 'THEAD', 'TBODY', 'TFOOT', 'TR', 'TH', 'TD', 'IMG']);
+const RICH_DANGEROUS = new Set(['SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'EMBED', 'LINK', 'META', 'FORM', 'INPUT', 'BUTTON', 'SVG', 'TEXTAREA', 'BASE', 'TEMPLATE', 'NOSCRIPT', 'MATH', 'FRAME', 'FRAMESET', 'APPLET', 'PORTAL', 'SELECT', 'OPTION', 'OPTGROUP']);
+// Deny-by-default: an attribute survives only if this table names it for that tag.
+const RICH_ATTRS = {
+  A: ['href', 'title'],
+  IMG: ['src', 'alt', 'title', 'width', 'height'],
+  FONT: ['color', 'size', 'face'],
+  TD: ['colspan', 'rowspan'],
+  TH: ['colspan', 'rowspan', 'scope'],
+  COL: ['span'],
+  COLGROUP: ['span'],
+};
+const RICH_GLOBAL_ATTRS = ['style'];               // value-filtered, all tags
+
+// Constrain an <img src> to exactly what the app's CSP already permits
+// (img-src 'self' data: https:). Returns the cleaned value, or '' to reject.
+// PURE, NEVER THROWS (the parseCsv/parseJsonSafe contract).
+// The MIME list is deliberately incomplete — see the note below the function.
+function richImgSrc(v) {
+  const s = String(v == null ? '' : v).replace(/[\x00-\x20\x7f]/g, '');
+  if (/^https:\/\/\S/i.test(s)) return s;
+  if (/^data:image\/(png|jpeg|jpg|gif|webp|avif|bmp);base64,[A-Za-z0-9+/=]*$/i.test(s)) return s;
+  return '';
 }
+// Why that list is short, and must STAY short:
+//  - control/whitespace chars are stripped BEFORE the scheme test, so `java\tscript:`
+//    and a leading-space `javascript:` can't split past it;
+//  - the vector image format is ABSENT ON PURPOSE. It is a script-bearing document
+//    format, so permitting it as a data: source would be an XSS primitive. This is
+//    load-bearing, not an oversight — do not "complete" the MIME list;
+//  - `http:` is rejected (the CSP blocks it anyway, and it's mixed content on HTTPS);
+//  - blob:, protocol-relative and relative paths all fall through to '' (rejected).
+
+// Bare non-negative integer within bounds, else '' (reject). PURE, NEVER THROWS.
+// Used for width/height (max 10000) and colspan/rowspan/span (max 1000): these carry
+// no script surface, and dropping them visually scrambles every pasted merged table.
+function richIntAttr(v, max) {
+  const s = String(v == null ? '' : v).trim();
+  if (!/^\d{1,5}$/.test(s)) return '';
+  const n = Math.min(parseInt(s, 10), max || 10000);
+  return n > 0 ? String(n) : '';
+}
+
+// Last-resort degradation for the sanitizer: inert escaped text, never raw HTML.
+function richEscapeText(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function sanitizeRichHtml(html) {
+  try {
+    // A <template>'s content is an INERT document fragment: no image loads, no script
+    // execution, no onerror firing while we walk it.
+    const tpl = document.createElement('template');
+    tpl.innerHTML = String(html || '');
+    const clean = (node) => {
+      [...node.childNodes].forEach(clean);          // children first (post-order)
+      if (node.nodeType === 8) { node.remove(); return; }   // comment
+      if (node.nodeType !== 1) return;                       // keep text nodes
+      // UPPERCASE, not node.tagName as-is: an HTML element's tagName is already
+      // uppercase, but a FOREIGN-CONTENT element (SVG / MathML, incl. an <svg><script>)
+      // reports its lowercase local name — so a raw lookup missed 'SVG' entirely and
+      // merely UNWRAPPED it. That silently defeated the dangerous-tag drop for exactly
+      // the mXSS surface the list exists to close. Normalize before every lookup.
+      const tag = String(node.tagName || '').toUpperCase();
+      if (RICH_DANGEROUS.has(tag)) { node.remove(); return; }   // drop WITH subtree
+      if (!RICH_ALLOWED.has(tag)) {                          // unwrap unknown tag, keep text
+        const p = node.parentNode; if (!p) return;
+        while (node.firstChild) p.insertBefore(node.firstChild, node);
+        p.removeChild(node); return;
+      }
+      const allowed = RICH_ATTRS[tag] || [];
+      [...node.attributes].forEach(a => {
+        const name = a.name.toLowerCase();
+        const val = a.value;
+        if (name === 'style' && RICH_GLOBAL_ATTRS.indexOf('style') !== -1) {
+          if (/javascript:|expression\(|url\s*\(/i.test(val)) node.removeAttribute(a.name);
+          return;
+        }
+        if (allowed.indexOf(name) === -1) { node.removeAttribute(a.name); return; }   // deny-by-default
+        if (name === 'href') { if (!/^(https?:|mailto:)/i.test(val.trim())) node.removeAttribute(a.name); return; }
+        // A rejected src is REMOVED, not blanked — an empty src re-requests the page
+        // in some engines.
+        if (name === 'src') { const okSrc = richImgSrc(val); if (okSrc) node.setAttribute('src', okSrc); else node.removeAttribute(a.name); return; }
+        if (name === 'width' || name === 'height') { const n = richIntAttr(val, 10000); if (n) node.setAttribute(name, n); else node.removeAttribute(a.name); return; }
+        if (name === 'colspan' || name === 'rowspan' || name === 'span') { const n = richIntAttr(val, 1000); if (n) node.setAttribute(name, n); else node.removeAttribute(a.name); return; }
+        if (name === 'scope') { if (['row', 'col', 'rowgroup', 'colgroup'].indexOf(val.toLowerCase()) === -1) node.removeAttribute(a.name); return; }
+        // alt / title / color / size / face: free text, attribute-escaped on serialize
+      });
+      if (tag === 'A') { node.setAttribute('target', '_blank'); node.setAttribute('rel', 'noopener noreferrer'); }
+    };
+    clean(tpl.content);
+    return tpl.innerHTML;
+  } catch (e) {
+    // A sanitizer that throws must degrade to INERT TEXT — never to unsanitized
+    // HTML, and never to '' (which would silently delete the block's content).
+    return richEscapeText(html || '');
+  }
+}
+// A rich block's stored HTML can now legally carry data: images, so one pasted
+// screenshot can balloon the page — and every page is multiplied ×21 on disk
+// (current + 20 history versions). Soft warning only: a hard cap could only
+// truncate or reject the paste, i.e. silent content loss.
+const RICH_SOFT_WARN = 262144;                  // 256 KB of stored HTML
+const richWarned = new WeakSet();               // once per block per session
 
 // A checklist (todo) block: rows of { text, done }. No code/markdown surface.
 function newChecklistBlock() {
@@ -1085,6 +1179,684 @@ function jsonPath(keys) {
   return out;
 }
 
+/* ---------- HTML PROJECT (pure) ---------- */
+// A small static web project (entry HTML + its CSS/JS/images) stored INLINE in the
+// page JSON, rendered by inlining every sub-resource into one document fed to a
+// sandboxed <iframe srcdoc>. Keeping it in the page means history, trash, duplicate,
+// conflict-aware save, the offline mirror and self-contained export all work with no
+// new plumbing — paid for with a hard size cap, since every byte is multiplied ×21
+// on disk (current + 20 history versions).
+//
+// EVERY helper below is pure and MUST NEVER THROW — the parseCsv / parseJsonSafe
+// contract. A malformed project shows a warning banner, never a blank block.
+
+const HTML_MAX_TOTAL = 1048576;   // 1 MB decoded, whole block
+const HTML_MAX_FILE  = 524288;    // 512 KB any single file
+const HTML_MAX_FILES = 50;
+const HTML_SOFT_WARN = 262144;    // 256 KB → soft warning (explains the ×21 history growth)
+const HTML_PAGE_WARN = 6291456;   // 6 MB serialized page → post_max_size guard
+const HTML_DEFAULT_H = 320;       // preview height px (clamped 120–1200 on read)
+
+// An HTML-project block. `code` IS the entry file's source (so blockPlainText,
+// convertBlock, search_blocks, replace_content, the block filter and Copy all work
+// unchanged); `files` holds only the NON-entry files.
+function newHtmlBlock() {
+  return { type: 'html', label: '', code: '', html: true, entry: 'index.html', files: [] };
+}
+
+// Normalize a project-relative path: strip leading "./" and "/", collapse empty
+// segments, resolve "." / "..". Returns '' if the path escapes the project root.
+function normalizeHtmlPath(p) {
+  const s = String(p == null ? '' : p).replace(/\\/g, '/');
+  const out = [];
+  for (const seg of s.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') { if (!out.length) return ''; out.pop(); continue; }
+    out.push(seg);
+  }
+  return out.join('/');
+}
+
+// Join a reference to its base directory and normalize it. `?query` / `#hash` are
+// stripped for the file lookup. Returns null when the ref is empty or escapes root.
+function resolveHtmlPath(baseDir, ref) {
+  const raw = String(ref == null ? '' : ref).trim().split('#')[0].split('?')[0];
+  if (!raw) return null;
+  if (raw.charAt(0) === '/') return normalizeHtmlPath(raw) || null;
+  const base = normalizeHtmlPath(baseDir || '');
+  return normalizeHtmlPath(base ? base + '/' + raw : raw) || null;
+}
+
+// Is this reference outside the project (so the bundler must leave it verbatim)?
+// Covers any scheme, protocol-relative "//host", and same-document "#frag".
+function isAbsoluteRef(ref) {
+  const r = String(ref == null ? '' : ref).trim();
+  if (!r) return false;
+  if (r.charAt(0) === '#') return true;
+  if (r.slice(0, 2) === '//') return true;
+  return /^[A-Za-z][A-Za-z0-9+.-]*:/.test(r);
+}
+
+// The folder picker reports paths under the picked folder's own name
+// ("demo/index.html"). Drop that leading segment when EVERY path shares it.
+function stripCommonRoot(paths) {
+  const list = (paths || []).map(p => normalizeHtmlPath(p)).filter(Boolean);
+  if (!list.length) return [];
+  const parts = list.map(p => p.split('/'));
+  if (parts.some(a => a.length < 2)) return list;
+  const root = parts[0][0];
+  if (!parts.every(a => a[0] === root)) return list;
+  return parts.map(a => a.slice(1).join('/'));
+}
+
+// Extensions stored as text (everything else is base64 binary) + a MIME map.
+const HTML_TEXT_EXTS = ['html', 'htm', 'css', 'js', 'mjs', 'json', 'svg', 'txt', 'md', 'csv', 'xml'];
+const HTML_MIME_MAP = {
+  html: 'text/html', htm: 'text/html', css: 'text/css', js: 'text/javascript',
+  mjs: 'text/javascript', json: 'application/json', svg: 'image/svg+xml',
+  txt: 'text/plain', md: 'text/markdown', csv: 'text/csv', xml: 'application/xml',
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+  webp: 'image/webp', avif: 'image/avif', ico: 'image/x-icon', bmp: 'image/bmp',
+  woff: 'font/woff', woff2: 'font/woff2', ttf: 'font/ttf', otf: 'font/otf',
+  mp4: 'video/mp4', webm: 'video/webm', ogg: 'audio/ogg', mp3: 'audio/mpeg',
+  wav: 'audio/wav', pdf: 'application/pdf',
+};
+function htmlExtInfo(path) {
+  const m = String(path == null ? '' : path).toLowerCase().match(/\.([a-z0-9]+)$/);
+  const ext = m ? m[1] : '';
+  return { text: HTML_TEXT_EXTS.indexOf(ext) !== -1, mime: HTML_MIME_MAP[ext] || 'application/octet-stream' };
+}
+
+// Pick the entry file out of an uploaded path list: a root index.html wins, else a
+// lone .html anywhere, else the caller must ask (ambiguous, with the candidates).
+function resolveHtmlEntry(paths) {
+  const list = (paths || []).map(p => normalizeHtmlPath(p)).filter(Boolean);
+  const htmls = list.filter(p => /\.(html|htm)$/i.test(p));
+  if (list.indexOf('index.html') !== -1) return { entry: 'index.html', ambiguous: false, candidates: htmls };
+  if (htmls.length === 1) return { entry: htmls[0], ambiguous: false, candidates: htmls };
+  return { entry: '', ambiguous: true, candidates: htmls };
+}
+
+// Decoded byte length of a standard base64 string (padding-aware).
+function b64DecodedBytes(b64) {
+  const s = String(b64 == null ? '' : b64).replace(/\s+/g, '');
+  if (!s) return 0;
+  let pad = 0;
+  if (s.charAt(s.length - 1) === '=') pad++;
+  if (s.charAt(s.length - 2) === '=') pad++;
+  return Math.max(0, Math.floor(s.length * 3 / 4) - pad);
+}
+
+// UTF-8 byte length of a text file's content.
+function htmlTextBytes(t) {
+  const s = String(t == null ? '' : t);
+  try { return new TextEncoder().encode(s).length; } catch (e) { return s.length; }
+}
+
+// Human byte label for the size column / cap modals.
+function htmlBytesLabel(n) {
+  const b = Math.max(0, Number(n) || 0);
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b / 1024).toFixed(b < 10240 ? 1 : 0) + ' KB';
+  return (b / 1048576).toFixed(1) + ' MB';
+}
+
+// THE single read path for "what files does this block hold": the entry (whose text
+// lives in block.code) is spliced back in at its sorted position, so the file list and
+// all size accounting agree. A path wrongly duplicated in files[] is dropped.
+function htmlFileList(block) {
+  const b = block || {};
+  const entry = normalizeHtmlPath(b.entry || '');
+  const rows = [];
+  const seen = Object.create(null);
+  (Array.isArray(b.files) ? b.files : []).forEach(f => {
+    if (!f) return;
+    const p = normalizeHtmlPath(f.p || '');
+    if (!p || p === entry || seen[p]) return;
+    seen[p] = true;
+    const bin = typeof f.b64 === 'string';
+    rows.push({ p, kind: bin ? 'binary' : 'text', bytes: bin ? b64DecodedBytes(f.b64) : htmlTextBytes(f.t), isEntry: false });
+  });
+  if (entry) rows.push({ p: entry, kind: 'text', bytes: htmlTextBytes(b.code), isEntry: true });
+  rows.sort((a, c) => (a.p < c.p ? -1 : a.p > c.p ? 1 : 0));
+  return rows;
+}
+
+// Decoded size of the whole project, plus the files ordered largest-first.
+function htmlProjectSize(block) {
+  const rows = htmlFileList(block);
+  return {
+    bytes: rows.reduce((n, r) => n + r.bytes, 0),
+    count: rows.length,
+    largest: rows.slice().sort((a, c) => c.bytes - a.bytes).map(r => ({ p: r.p, bytes: r.bytes })),
+  };
+}
+
+// The cap decision, run over a CANDIDATE file list BEFORE anything is committed to
+// the block — a rejected upload must leave the block completely untouched.
+function htmlCapCheck(entries, limits) {
+  const lim = Object.assign(
+    { total: HTML_MAX_TOTAL, file: HTML_MAX_FILE, files: HTML_MAX_FILES, soft: HTML_SOFT_WARN },
+    limits || {});
+  const list = (entries || []).filter(Boolean).map(e => ({ p: String(e.p || ''), bytes: Math.max(0, Number(e.bytes) || 0) }));
+  const total = list.reduce((n, e) => n + e.bytes, 0);
+  const offenders = list.slice().sort((a, b) => b.bytes - a.bytes);
+  const hard = [], soft = [];
+  const tooBig = list.filter(e => e.bytes > lim.file);
+  if (tooBig.length) hard.push(tooBig.length + (tooBig.length > 1 ? ' files are' : ' file is') + ' over the ' + htmlBytesLabel(lim.file) + ' per-file limit');
+  if (total > lim.total) hard.push('The project is ' + htmlBytesLabel(total) + ' — over the ' + htmlBytesLabel(lim.total) + ' limit');
+  if (list.length > lim.files) hard.push(list.length + ' files — over the ' + lim.files + '-file limit');
+  if (!hard.length && total > lim.soft) {
+    soft.push('This project is ' + htmlBytesLabel(total) + '. It is stored inside the page, and every save keeps up to 20 history versions — so it can use around '
+      + htmlBytesLabel(total * 21) + ' on the server.');
+  }
+  return { ok: !hard.length, hard, soft, offenders };
+}
+
+// FNV-1a 32-bit over a canonical descriptor of the STORED content (entry path + entry
+// text + each file's path and body). Label / htmlH deliberately don't move the key.
+// Binaries hash by base64 length PLUS a bounded head/tail fingerprint (≤128 chars per
+// file regardless of asset size), so a same-length replacement of a different binary
+// moves the key with overwhelming probability instead of silently reusing run state.
+function htmlBundleKey(block) {
+  const b = block || {};
+  const parts = [normalizeHtmlPath(b.entry || ''), String(b.code || '')];
+  (Array.isArray(b.files) ? b.files : []).forEach(f => {
+    if (!f) return;
+    parts.push(normalizeHtmlPath(f.p || ''));
+    parts.push(typeof f.b64 === 'string'
+      ? 'b' + f.b64.length + ':' + f.b64.slice(0, 64) + f.b64.slice(-64)
+      : 't' + String(f.t || ''));
+  });
+  const s = parts.join('');
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  return h.toString(16);
+}
+
+// Merge an incoming uploaded project over an existing one. THE normative merge rule:
+// nothing the block already held is ever deleted — an old entry the upload doesn't
+// overwrite is DEMOTED to a regular file, not dropped.
+//
+// Returns {entry, code, files, replaced[], displaced[], added[]}:
+//   replaced  — paths present on BOTH sides (incoming won; the old bytes are only
+//               recoverable from page History, so the caller confirms first)
+//   displaced — the old entry, demoted to a plain file because the new entry differs
+//   added     — paths the project didn't have before
+//
+// INVARIANT: the returned `entry` NEVER also appears in `files` — htmlFileList drops a
+// duplicated entry from the list, so it would persist in the JSON while being invisible.
+// Pure, DOM-free, and NEVER throws (the parseCsv / parseJsonSafe contract).
+function mergeHtmlProject(existing, incoming) {
+  try {
+    const norm = (o) => {
+      const b = (o && typeof o === 'object') ? o : {};
+      return {
+        entry: normalizeHtmlPath(b.entry || ''),
+        code: String(b.code == null ? '' : b.code),
+        files: (Array.isArray(b.files) ? b.files : []).filter(f => f && typeof f === 'object'),
+      };
+    };
+    const ex = norm(existing), inc = norm(incoming);
+
+    // 1. Materialize the EXISTING project into one flat path→record map — INCLUDING
+    //    the existing entry as an ordinary record. That inclusion IS the H-1 fix: the
+    //    old merge iterated files[] only, so the entry was never a merge candidate and
+    //    was silently lost.
+    const map = Object.create(null);
+    const exOrder = [];
+    ex.files.forEach(f => {
+      const p = normalizeHtmlPath(f.p || '');
+      if (!p || map[p]) return;
+      map[p] = f; exOrder.push(p);
+    });
+    // …but only when that entry actually HOLDS something. A brand-new block is
+    // {entry:'index.html', code:''}: materializing that placeholder would make the very
+    // first upload look like it overwrites a file, and merge-into-empty must be
+    // byte-identical to replace — no prompt, no displaced entry. An empty entry has
+    // nothing to preserve, so there is nothing to report either way.
+    if (ex.entry && ex.code && !map[ex.entry]) { map[ex.entry] = { p: ex.entry, t: ex.code }; exOrder.push(ex.entry); }
+    const before = Object.create(null);
+    exOrder.forEach(p => { before[p] = true; });
+
+    // 2. Overlay the incoming records by normalized path — incoming wins every collision.
+    const replaced = [], added = [], incOrder = [];
+    const overlay = (p, rec) => {
+      if (!p) return;
+      if (incOrder.indexOf(p) === -1) incOrder.push(p);
+      if (before[p]) { if (replaced.indexOf(p) === -1) replaced.push(p); }
+      else if (added.indexOf(p) === -1) added.push(p);
+      map[p] = rec;
+    };
+    inc.files.forEach(f => overlay(normalizeHtmlPath(f.p || ''), f));
+    if (inc.entry) overlay(inc.entry, { p: inc.entry, t: inc.code });
+
+    // 3. The new entry is the incoming one (falling back to the existing entry when the
+    //    incoming project has none). An old entry that survives untouched is demoted.
+    const entry = inc.entry || ex.entry;
+    const displaced = [];
+    if (ex.entry && entry !== ex.entry && map[ex.entry] && replaced.indexOf(ex.entry) === -1) {
+      displaced.push(ex.entry);
+    }
+
+    // 4/5. Rematerialize. Deterministic order — incoming records in upload order first,
+    //      then existing-only survivors in their original files[] order — so a repeated
+    //      merge produces a stable htmlBundleKey and no spurious remount.
+    const files = [], emitted = Object.create(null);
+    const emit = (p) => {
+      if (!p || p === entry || emitted[p] || !map[p]) return;
+      emitted[p] = true;
+      files.push(Object.assign({}, map[p], { p }));
+    };
+    incOrder.forEach(emit);
+    exOrder.forEach(emit);
+
+    const rec = entry ? map[entry] : null;
+    return { entry, code: rec ? String(rec.t == null ? '' : rec.t) : '', files, replaced, displaced, added };
+  } catch (e) {
+    return { entry: '', code: '', files: [], replaced: [], displaced: [], added: [] };
+  }
+}
+
+// Group the bundler's layer-2 census hits (unhandled ref-bearing attributes) into ONE
+// warning per (tag, attr) form instead of one per reference — a 5-page site sharing a
+// nav emitted 8 near-identical lines. <a href> is INFO: a single-document preview
+// simply can't navigate, which is expected, not broken. Never throws.
+function groupRefWarnings(hits) {
+  try {
+    const groups = [], byKey = Object.create(null), seen = Object.create(null);
+    (Array.isArray(hits) ? hits : []).forEach(h => {
+      if (!h) return;
+      const tag = String(h.tag == null ? '' : h.tag).toLowerCase();
+      const attr = String(h.attr == null ? '' : h.attr).toLowerCase();
+      const ref = String(h.ref == null ? '' : h.ref);
+      if (!tag || !attr || !ref) return;
+      const trip = tag + '|' + attr + '|' + ref;
+      if (seen[trip]) return;                    // de-dupe identical triples
+      seen[trip] = true;
+      const key = tag + '|' + attr;
+      if (!byKey[key]) { byKey[key] = { tag, attr, refs: [] }; groups.push(byKey[key]); }
+      byKey[key].refs.push(ref);
+    });
+    return groups.map(g => {
+      const n = g.refs.length;
+      const shown = g.refs.slice(0, 3).join(', ') + (n > 3 ? ' +' + (n - 3) + ' more' : '');
+      const info = (g.tag === 'a' && g.attr === 'href');
+      return {
+        level: info ? 'info' : 'warn',
+        text: '<' + g.tag + ' ' + g.attr + '> — ' + n + (info ? ' link' : ' reference') + (n === 1 ? '' : 's')
+          + (info ? ' to project files; the single-document preview can’t navigate: '
+                  : ' not inlined; they won’t load in the preview: ')
+          + shown,
+      };
+    });
+  } catch (e) { return []; }
+}
+
+// Headline for the warning banner: what to say and how loudly. infoOnly (nothing above
+// 'info') keeps the banner neutral so a routine collapse doesn't read as a failure.
+function htmlWarnSummary(warnings) {
+  const list = (Array.isArray(warnings) ? warnings : []).filter(Boolean);
+  const notes = list.filter(w => w.level === 'info').length;
+  const issues = list.length - notes;
+  const label = (c, word) => c + ' ' + word + (c === 1 ? '' : 's');
+  const parts = [];
+  if (issues) parts.push(label(issues, 'issue'));
+  if (notes) parts.push(label(notes, 'note'));
+  return { glyph: issues ? '⚠' : 'ⓘ', text: parts.join(' · '), infoOnly: !issues };
+}
+
+// Empty-state copy. Mobile has no folder picker (.html-upload is display:none there),
+// so the mobile wording must not promise a route the UI hides.
+function htmlEmptyText(isMobile) {
+  return isMobile
+    ? 'Empty — edit the entry HTML to get started. Folder upload needs a desktop browser.'
+    : 'Empty — upload a folder or edit the entry HTML.';
+}
+
+// Discrete height presets for the ⋯ → "Preview height…" submenu (design §12.2's
+// fallback, shipped alongside the drag rather than instead of it).
+const HTML_H_PRESETS = [
+  { label: 'Small', px: 240 },
+  { label: 'Medium', px: HTML_DEFAULT_H },
+  { label: 'Large', px: 560 },
+];
+
+// Parse a srcset value into candidates. A srcset is a comma-separated list of
+// "<url> [descriptor]" — and URLs may THEMSELVES contain commas ("photo,v2.jpg 2x"),
+// which is exactly why a naive split(',') is wrong. So: skip separators, consume the
+// URL as a run of NON-WHITESPACE (the comma rides along inside it), then take an
+// optional descriptor up to the next comma. A URL run that ends in a comma has no
+// descriptor ("a.jpg, b.jpg"). Never throws.
+function parseSrcset(value) {
+  const s = String(value == null ? '' : value);
+  const out = [];
+  let i = 0;
+  while (i < s.length) {
+    while (i < s.length && (/\s/.test(s.charAt(i)) || s.charAt(i) === ',')) i++;
+    if (i >= s.length) break;
+    let url = '';
+    while (i < s.length && !/\s/.test(s.charAt(i))) { url += s.charAt(i); i++; }
+    const trimmed = url.replace(/,+$/, '');
+    const endedOnComma = trimmed !== url;
+    url = trimmed;
+    let desc = '';
+    if (!endedOnComma) {
+      while (i < s.length && s.charAt(i) !== ',') { desc += s.charAt(i); i++; }
+      if (i < s.length) i++;                       // consume the separating comma
+    }
+    if (url) out.push({ url, descriptor: desc.trim() });
+  }
+  return out;
+}
+
+// Inverse of parseSrcset (whitespace normalized; order/urls/descriptors preserved).
+function serializeSrcset(entries) {
+  return (entries || [])
+    .filter(e => e && e.url)
+    .map(e => (e.descriptor ? e.url + ' ' + e.descriptor : e.url))
+    .join(', ');
+}
+
+// Which candidate the preview keeps when a srcset is collapsed. Deterministic (so
+// htmlBundleKey stays stable): the element's own src target → a 1x/bare candidate →
+// the lowest density/width → the first.
+function pickSrcsetCandidate(entries, srcTarget) {
+  const list = (entries || []).filter(e => e && e.url);
+  if (!list.length) return null;
+  if (srcTarget) { const hit = list.find(e => e.url === srcTarget); if (hit) return hit; }
+  const bare = list.find(e => !e.descriptor || /^1(\.0+)?x$/i.test(e.descriptor));
+  if (bare) return bare;
+  const scored = list
+    .map(e => {
+      const d = String(e.descriptor || '');
+      const mx = d.match(/^([\d.]+)x$/i), mw = d.match(/^(\d+)w$/i);
+      return { e, n: mx ? parseFloat(mx[1]) : mw ? parseInt(mw[1], 10) : NaN };
+    })
+    .filter(o => isFinite(o.n))
+    .sort((a, b) => a.n - b.n);
+  return scored.length ? scored[0].e : list[0];
+}
+
+// CSS image-set() is the same candidate-list shape as srcset, with optional url()
+// wrappers / quotes and an optional type() the preview ignores. Accepts either the
+// full "image-set(…)" function or just its inner value.
+function parseImageSet(value) {
+  let v = String(value == null ? '' : value).trim();
+  const wrap = v.match(/^-?(?:webkit-)?image-set\(([\s\S]*)\)$/i);
+  if (wrap) v = wrap[1];
+  const unwrap = (u) => {
+    let s = String(u || '').trim();
+    const m = s.match(/^url\(([\s\S]*)\)$/i);
+    if (m) s = m[1].trim();
+    const q = s.charAt(0);
+    if ((q === '"' || q === "'") && s.charAt(s.length - 1) === q) s = s.slice(1, -1);
+    return s.trim();
+  };
+  return parseSrcset(v)
+    .map(e => ({
+      url: unwrap(e.url),
+      descriptor: String(e.descriptor || '').replace(/type\(\s*(?:"[^"]*"|'[^']*'|[^)]*)\)/gi, '').trim(),
+    }))
+    .filter(e => e.url && !/^type\(/i.test(e.url));
+}
+
+// Attributes known to carry a resource reference. Anything here that the bundler does
+// NOT rewrite must still be DETECTED (layer 2 below) so it can never fail silently.
+const HTML_REF_ATTRS = [
+  'src', 'srcset', 'href', 'poster', 'data', 'action', 'formaction',
+  'background', 'cite', 'longdesc', 'usemap', 'profile', 'manifest', 'ping',
+];
+// The (tag, attr) pairs the rewrite table in bundleHtmlProject actually covers.
+// Keep this list next to the rewrites — the two are read together.
+const HTML_HANDLED_REFS = [
+  'img|src', 'img|srcset', 'source|src', 'source|srcset',
+  'script|src', 'link|href', 'video|src', 'video|poster', 'audio|src',
+];
+
+// Inline every sub-resource of the project into one HTML document for the sandboxed
+// preview. Regex over the raw entry string — deliberately NOT DOMParser, so the
+// author's exact document survives and the helper stays DOM-free and pure.
+//
+// THE INVARIANT: every reference the bundler rewrites warns when it can't be resolved,
+// AND every ref-bearing form the bundler does NOT handle is still detected. It must be
+// structurally impossible for a reference to a project file to vanish from the preview
+// with no entry in the warning banner. Three layers enforce it (see the end).
+//
+// Returns { html, warnings: [{level:'warn'|'info', text}] } and NEVER throws.
+function bundleHtmlProject(block) {
+  const warnings = [];
+  const warn = (text, level) => warnings.push({ level: level || 'warn', text: String(text) });
+  try {
+    const b = block || {};
+    const entry = normalizeHtmlPath(b.entry || '');
+    const entryDir = entry.indexOf('/') === -1 ? '' : entry.slice(0, entry.lastIndexOf('/'));
+    const map = Object.create(null);
+    (Array.isArray(b.files) ? b.files : []).forEach(f => {
+      if (!f) return;
+      const p = normalizeHtmlPath(f.p || '');
+      if (p && p !== entry) map[p] = f;
+    });
+    const consumed = Object.create(null);   // layer 3: every project path actually inlined
+    const warnedRef = Object.create(null);  // dedupe layer 1 ↔ layer 2 on the same ref string
+
+    const dataUri = (rec, path) => {
+      if (rec && typeof rec.b64 === 'string') {
+        return 'data:' + (rec.m || htmlExtInfo(path).mime) + ';base64,' + rec.b64;
+      }
+      // text assets (svg, …) go in percent-encoded — pure, and immune to btoa's
+      // "characters outside Latin1" throw on UTF-8 content.
+      return 'data:' + htmlExtInfo(path).mime + ';charset=utf-8,' + encodeURIComponent((rec && rec.t) || '');
+    };
+
+    // Layer 1: resolve one reference, warning on a root escape or a missing file.
+    const lookup = (ref, baseDir) => {
+      if (!ref || isAbsoluteRef(ref) || /^data:/i.test(ref)) return null;
+      const p = resolveHtmlPath(baseDir, ref);
+      if (!p) { warnedRef[ref] = true; warn('outside project: ' + ref); return null; }
+      if (!map[p]) { warnedRef[ref] = true; warn('unresolved: ' + ref); return null; }
+      consumed[p] = true;
+      return { path: p, rec: map[p] };
+    };
+
+    // url() / image-set() inside a stylesheet, resolved relative to THAT stylesheet's
+    // directory (not the entry's).
+    const rewriteCss = (css, baseDir) => {
+      let out = String(css == null ? '' : css);
+      if (/@import/i.test(out)) warn('@import is not followed — imported stylesheets will not load in the preview.');
+      out = out.replace(/(-webkit-)?image-set\(([^;{}]*)\)/gi, (m0, pfx, inner) => {
+        const cands = parseImageSet(inner);
+        if (!cands.length) return m0;
+        const picked = pickSrcsetCandidate(cands, '');
+        const hit = picked ? lookup(picked.url, baseDir) : null;
+        if (!hit) return m0;
+        const dropped = [];
+        cands.forEach(c => {
+          if (c === picked) return;
+          const p = resolveHtmlPath(baseDir, c.url);
+          if (p && map[p]) { consumed[p] = true; dropped.push(p); }
+        });
+        if (cands.length > 1) {
+          warn('Responsive variants collapsed for preview: kept ' + hit.path
+            + (dropped.length ? ', dropped ' + dropped.join(', ') : '')
+            + '. All files are still stored in the project.', 'info');
+        }
+        return 'url("' + dataUri(hit.rec, hit.path) + '")';
+      });
+      out = out.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (m0, q, ref) => {
+        const hit = lookup(String(ref).trim(), baseDir);
+        return hit ? 'url("' + dataUri(hit.rec, hit.path) + '")' : m0;
+      });
+      return out;
+    };
+
+    let html = String(b.code || '');
+
+    // 1. the entry's own inline <style> blocks (before <link>, so the CSS injected by
+    //    the link rewrite — already resolved against ITS dir — isn't processed twice)
+    html = html.replace(/<style\b([^>]*)>([\s\S]*?)<\/style\s*>/gi,
+      (m0, attrs, css) => '<style' + attrs + '>' + rewriteCss(css, entryDir) + '</style>');
+
+    // 2. <link rel="stylesheet" href> → <style> with the stylesheet inlined
+    html = html.replace(/<link\b[^>]*>/gi, (tag) => {
+      if (!/rel\s*=\s*['"]?stylesheet/i.test(tag)) return tag;
+      const m = tag.match(/href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+      const ref = m ? (m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2] : m[3]) : '';
+      if (!ref || isAbsoluteRef(ref)) return tag;
+      const hit = lookup(ref, entryDir);
+      if (!hit) return tag;
+      const dir = hit.path.indexOf('/') === -1 ? '' : hit.path.slice(0, hit.path.lastIndexOf('/'));
+      return '<style>\n' + rewriteCss(hit.rec.t || '', dir) + '\n</style>';
+    });
+
+    // 3. <script src> → inline <script>. </script inside the payload MUST be escaped
+    //    or it terminates the wrapper element early.
+    html = html.replace(/<script\b([^>]*?)\ssrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))([^>]*)>\s*<\/script\s*>/gi,
+      (m0, pre, d, s, u, post) => {
+        const ref = d !== undefined ? d : s !== undefined ? s : u;
+        if (!ref || isAbsoluteRef(ref)) return m0;
+        const hit = lookup(ref, entryDir);
+        if (!hit) return m0;
+        const js = String(hit.rec.t || '').replace(/<\/script/gi, '<\\/script');
+        const attrs = (pre + post).replace(/\s(?:defer|async)\b/gi, '');
+        return '<script' + attrs + '>\n' + js + '\n</script>';
+      });
+
+    // 4. media elements: src / srcset / poster → data URIs (srcset collapsed, see §5)
+    html = html.replace(/<(img|source|video|audio)\b([^>]*)>/gi, (m0, tag, attrs) => {
+      const t = tag.toLowerCase();
+      let out = attrs;
+      const getAttr = (name) => {
+        const m = out.match(new RegExp('\\s' + name + '\\s*=\\s*(?:"([^"]*)"|\'([^\']*)\'|([^\\s>]+))', 'i'));
+        if (!m) return null;
+        return m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2] : m[3];
+      };
+      const setAttr = (name, val) => {
+        const v = String(val).replace(/"/g, '&quot;');
+        const re = new RegExp('(\\s' + name + '\\s*=\\s*)(?:"[^"]*"|\'[^\']*\'|[^\\s>]+)', 'i');
+        if (re.test(out)) out = out.replace(re, (mm, p1) => p1 + '"' + v + '"');
+        else out = out.replace(/\s*\/?\s*$/, '') + ' ' + name + '="' + v + '"';
+      };
+      const delAttr = (name) => {
+        out = out.replace(new RegExp('\\s' + name + '\\s*=\\s*(?:"[^"]*"|\'[^\']*\'|[^\\s>]+)', 'gi'), '');
+      };
+
+      const srcRef = getAttr('src');
+      const srcsetRef = getAttr('srcset');
+      const srcTargetPath = (srcRef && !isAbsoluteRef(srcRef)) ? resolveHtmlPath(entryDir, srcRef) : null;
+
+      if (srcsetRef) {
+        const resolved = parseSrcset(srcsetRef).map(c => ({
+          c, path: isAbsoluteRef(c.url) ? null : resolveHtmlPath(entryDir, c.url),
+        }));
+        // one warning per candidate URL that can't be resolved to a project file
+        resolved.forEach(r => {
+          if (isAbsoluteRef(r.c.url)) return;
+          if (!r.path) { warnedRef[r.c.url] = true; warn('outside project: ' + r.c.url); }
+          else if (!map[r.path]) { warnedRef[r.c.url] = true; warn('unresolved: ' + r.c.url); }
+        });
+        const usable = resolved.filter(r => r.path && map[r.path]);
+        if (usable.length) {
+          const srcCand = srcTargetPath ? usable.find(r => r.path === srcTargetPath) : null;
+          const picked = pickSrcsetCandidate(usable.map(r => r.c), srcCand ? srcCand.c.url : '');
+          const keep = usable.find(r => r.c === picked) || usable[0];
+          consumed[keep.path] = true;
+          const dropped = [];
+          resolved.forEach(r => {
+            if (r === keep || !r.path || !map[r.path]) return;
+            consumed[r.path] = true;          // reported by the collapse note, not layer 3
+            dropped.push(r.path);
+          });
+          const uri = dataUri(map[keep.path], keep.path);
+          if (t === 'img') { setAttr('src', uri); delAttr('srcset'); }
+          else { setAttr('srcset', uri); delAttr('src'); }
+          delAttr('sizes');
+          if (resolved.length > 1) {
+            warn('Responsive variants collapsed for preview: kept ' + keep.path
+              + (dropped.length ? ', dropped ' + dropped.join(', ') : '')
+              + '. All files are still stored in the project.', 'info');
+          }
+          return '<' + tag + out + '>';
+        }
+      }
+
+      if (t === 'video') {
+        const poster = getAttr('poster');
+        const ph = poster ? lookup(poster, entryDir) : null;
+        if (ph) setAttr('poster', dataUri(ph.rec, ph.path));
+      }
+      const sh = srcRef ? lookup(srcRef, entryDir) : null;
+      if (sh) setAttr('src', dataUri(sh.rec, sh.path));
+      return '<' + tag + out + '>';
+    });
+
+    // ---- Layer 2: unhandled ref-attribute census ---------------------------------
+    // Any HTML_REF_ATTRS attribute still holding a RELATIVE value, on a (tag, attr)
+    // pair the rewrite table doesn't cover, is reported — <object data>, <embed src>,
+    // <track src>, <form action>, <a href>, style="…url(…)…" and friends.
+    // Hits are COLLECTED, not warned inline: groupRefWarnings folds them into one entry
+    // per form, so a 5-page site sharing a nav gets one note instead of eight lines.
+    const refHits = [];
+    const noteRef = (tag, attr, ref) => {
+      warnedRef[ref] = true;
+      refHits.push({ tag, attr, ref });
+      // A ref that resolves to a REAL project file is now accounted for here, so
+      // layer 3 must not report the same file a second time as "never inlined".
+      const p = resolveHtmlPath(entryDir, ref);
+      if (p && map[p]) consumed[p] = true;
+    };
+    html.replace(/<([a-zA-Z][a-zA-Z0-9-]*)\b([^>]*)>/g, (m0, tag, attrs) => {
+      const t = tag.toLowerCase();
+      HTML_REF_ATTRS.forEach(name => {
+        if (HTML_HANDLED_REFS.indexOf(t + '|' + name) !== -1) return;
+        const m = attrs.match(new RegExp('\\s' + name + '\\s*=\\s*(?:"([^"]*)"|\'([^\']*)\'|([^\\s>]+))', 'i'));
+        if (!m) return;
+        const val = (m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2] : m[3]) || '';
+        if (!val || isAbsoluteRef(val) || /^data:/i.test(val) || warnedRef[val]) return;
+        noteRef(t, name, val);
+      });
+      const sm = attrs.match(/\sstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+      const sv = sm ? (sm[1] !== undefined ? sm[1] : sm[2]) : '';
+      const um = sv ? sv.match(/url\(\s*['"]?([^'")]+)/i) : null;
+      const uref = um ? um[1].trim() : '';
+      if (uref && !isAbsoluteRef(uref) && !/^data:/i.test(uref) && !warnedRef[uref]) {
+        noteRef(t, 'style', uref);
+      }
+      return m0;
+    });
+    groupRefWarnings(refHits).forEach(w => warnings.push(w));
+
+    // ---- Layer 3: unconsumed-file audit (the structural guarantee) ----------------
+    // Whitelist-free and forward-proof: a file sitting in the project that the bundler
+    // never inlined is itself the evidence that some reference form went unhandled.
+    Object.keys(map).forEach(p => {
+      if (consumed[p]) return;
+      warn(p + ' is in the project but was never inlined — it may be referenced in a form the preview doesn’t support.');
+    });
+
+    // ---- Heuristics (Notes) ------------------------------------------------------
+    if (/(?:fetch\s*\(|XMLHttpRequest|\bimport\s*\(|localStorage|sessionStorage)/.test(html)) {
+      warn('Network and storage APIs don’t work in the sandboxed preview (opaque origin + CSP).', 'info');
+    }
+    const remoteScript = /<script\b[^>]*\ssrc\s*=\s*["']?https?:/i.test(html);
+    const remoteStyle = (html.match(/<link\b[^>]*>/gi) || [])
+      .some(tg => /rel\s*=\s*["']?stylesheet/i.test(tg) && /href\s*=\s*["']?https?:/i.test(tg));
+    if (remoteScript || remoteStyle) {
+      warn('Remote scripts and stylesheets are blocked by the app’s CSP; remote images do load.', 'info');
+    }
+
+    return { html, warnings };
+  } catch (e) {
+    return {
+      html: (block && block.code) || '',
+      warnings: [{ level: 'warn', text: 'Bundler error — showing the raw entry file.' }],
+    };
+  }
+}
+
 /* ---------- BLOCK KINDS (unified create + convert) ---------- */
 // Every block is exactly one kind. Centralising this keeps the create menu and
 // the per-block "type" switch in sync, and means a new kind is one row here.
@@ -1095,6 +1867,7 @@ const BLOCK_KINDS = [
   { kind: 'checklist', icon: '☑', label: 'Checklist' },
   { kind: 'csv', icon: '▦', label: 'Table (CSV)' },
   { kind: 'json', icon: '{}', label: 'JSON tree' },
+  { kind: 'html', icon: '▶', label: 'HTML preview' },
 ];
 function blockKind(block) {
   if (block.checklist) return 'checklist';
@@ -1102,6 +1875,9 @@ function blockKind(block) {
   if (block.note) return 'note';
   if (block.csv) return 'csv';
   if (block.json) return 'json';
+  // NOTE: the discriminator is the block.html BOOLEAN, never type === 'html' —
+  // plain CODE blocks legitimately use 'html' as their language and must stay code.
+  if (block.html) return 'html';
   return 'code';
 }
 function newBlockOfKind(kind) {
@@ -1110,6 +1886,7 @@ function newBlockOfKind(kind) {
   if (kind === 'checklist') return newChecklistBlock();
   if (kind === 'csv') return newCsvBlock();
   if (kind === 'json') return newJsonBlock();
+  if (kind === 'html') return newHtmlBlock();
   return newBlock();
 }
 // HTML → plain text preserving line breaks. Done by mapping block-close tags and
@@ -1119,7 +1896,16 @@ function newBlockOfKind(kind) {
 function richToPlainText(html) {
   let s = String(html || '');
   s = s.replace(/<\s*br\s*\/?>/gi, '\n');
-  s = s.replace(/<\/(p|div|li|h[1-6]|blockquote|pre|tr|ul|ol)\s*>/gi, '\n');
+  // An <img> carries its meaning in alt= — keep that instead of dropping the element.
+  s = s.replace(/<img\b[^>]*>/gi, (m) => {
+    const a = /\balt\s*=\s*("([^"]*)"|'([^']*)')/i.exec(m);
+    return a ? (a[2] != null ? a[2] : (a[3] || '')) : '';
+  });
+  // Cells become TAB-separated so a table survives as a real grid (this is what makes
+  // rich→csv convert produce a table rather than one run-on line). Must run BEFORE the
+  // block-close pass, which would otherwise swallow </td> via the generic alternation.
+  s = s.replace(/<\/(td|th)\s*>/gi, '\t');
+  s = s.replace(/<\/(p|div|li|h[1-6]|blockquote|pre|tr|ul|ol|table|thead|tbody|tfoot|caption)\s*>/gi, '\n');
   s = s.replace(/<[^>]+>/g, '');                 // strip remaining tags
   const ta = document.createElement('textarea'); // decode entities (&amp; &lt; …)
   ta.innerHTML = s;
@@ -1146,12 +1932,32 @@ function convertBlock(block, kind) {
   if (blockKind(block) === kind) return;
   const text = blockPlainText(block);
   delete block.note; delete block.rich; delete block.checklist; delete block.items; delete block.csv; delete block.json;
+  delete block.html; delete block.files; delete block.entry; delete block.htmlH;
   if (kind === 'note') { block.note = true; block.type = 'markdown'; block.code = text; }
   else if (kind === 'rich') { block.rich = true; block.type = 'plaintext'; block.code = textToRichHtml(text); }
   else if (kind === 'checklist') { block.checklist = true; block.type = 'checklist'; block.items = textToChecklistItems(text); block.code = ''; }
   else if (kind === 'csv') { block.csv = true; block.type = 'csv'; block.code = text; }
   else if (kind === 'json') { block.json = true; block.type = 'json'; block.code = text; }
+  // the text becomes the ENTRY file's source; a fresh project has no other files
+  else if (kind === 'html') { block.html = true; block.type = 'html'; block.code = text; block.entry = 'index.html'; block.files = []; }
   else { block.type = 'plaintext'; block.code = text; }   // code
+}
+
+// Converting AWAY from an html block keeps only the entry HTML — the other project
+// files are dropped. Confirm first (naming them) when there are any; every convert
+// call site routes through this so the guard can't be bypassed. History is still the
+// undo path, so a plain confirm is enough.
+function confirmKindChange(block, kind, go) {
+  const extra = (blockKind(block) === 'html' && kind !== 'html' && Array.isArray(block.files)) ? block.files.length : 0;
+  if (!extra) { go(); return; }
+  const names = block.files.slice(0, 3).map(f => (f && f.p) || '').filter(Boolean).join(', ');
+  const target = (BLOCK_KINDS.find(k => k.kind === kind) || { label: kind }).label;
+  showConfirm(
+    'Converting to ' + target + ' discards ' + extra + ' other project file' + (extra > 1 ? 's' : '')
+    + (names ? ' (' + names + (extra > 3 ? ', …' : '') + ')' : '')
+    + '. The entry HTML is kept. This can be undone from page History.',
+    { okLabel: 'Convert', danger: false }
+  ).then(ok => { if (ok) go(); });
 }
 
 // Pure: wrap a menu index into [0,n) so ArrowUp/Down cycle past both ends
@@ -1168,6 +1974,38 @@ function miniMenuWrapIndex(i, n) {
 // (icon column only on rows that supply an icon), so no existing menu shifts.
 function miniMenuHasCheck(items) {
   return items.some(it => it && !it.divider && it.checked !== undefined);
+}
+
+// Pure: keep an anchorRect-positioned menu box inside the viewport.
+// It returns the requested {top,left} UNCHANGED whenever the box already fits — the
+// anchorRect contract is "plain position from the caller's rect", and preserving that
+// byte-for-byte in the normal case is the whole point of the mode. Only a genuine
+// overflow moves the box, and then by the minimum needed to bring it back inside with
+// a `pad` margin. It SHIFTS, never flips: an anchorRect carries a bottom edge but not
+// necessarily a usable top edge, so there's nothing to flip around. `.mini-menu` is
+// height-capped (min(70vh,520px)) and scrolls internally, so a shifted menu always has
+// every row reachable. NEVER THROWS.
+const MINI_MENU_PAD = 8;
+function miniMenuClampPos(top, left, w, h, vw, vh, pad) {
+  const p = pad == null ? MINI_MENU_PAD : pad;
+  let t = top, l = left;
+  if (l + w > vw) l = Math.max(p, vw - p - w);
+  else if (l < 0) l = p;
+  if (t + h > vh) t = Math.max(p, vh - p - h);
+  else if (t < 0) t = p;
+  return { top: t, left: l };
+}
+
+// Pure: the same viewport guard for the align:'right' mode, expressed as a SHIFT of the
+// ALREADY-RENDERED box. That mode positions with `left = r.right` plus a CSS
+// translateX(-100%), so the box's visual left edge is `r.right - width`, NOT the `left`
+// property — feeding the raw property into miniMenuClampPos would be wrong in both
+// directions. Measuring the RENDERED rect sidesteps that (and the transform's sub-pixel
+// width) entirely. Returns {dx:0,dy:0} whenever the box already fits, which is what leaves
+// a fitting menu on the exact pixel it has always used. NEVER THROWS.
+function miniMenuShift(top, left, w, h, vw, vh, pad) {
+  const pos = miniMenuClampPos(top, left, w, h, vw, vh, pad);
+  return { dx: pos.left - left, dy: pos.top - top };
 }
 
 // The single accessible popup-menu implementation, anchored to a button.
@@ -1190,9 +2028,20 @@ function miniMenuHasCheck(items) {
 // exactly (zero positional regression is the acceptance criterion):
 //   default            — clamp to the viewport + flip upward near the bottom edge.
 //   opts.align:'right' — right-align under the anchor (openMoreMenu: left=r.right,
-//                        translateX(-100%)) so it tucks under the sidebar.
-//   opts.anchorRect    — plain position from a caller-supplied rect, no clamp/flip
-//                        (the exportMenu submenu case).
+//                        translateX(-100%)) so it tucks under the sidebar. NO clamp
+//                        while the box fits — the position is then byte-identical to
+//                        the right-aligned one. Only a genuine viewport overflow shifts
+//                        it back inside (see miniMenuShift, which clamps the RENDERED
+//                        rect because the transform moves the visual left edge); without
+//                        that, a sidebar narrowed to SIDEBAR_MIN pushed the menu off the
+//                        left edge of the window, where it can't be scrolled to.
+//   opts.anchorRect    — plain position from a caller-supplied rect (the exportMenu /
+//                        colsort / Copy-as cases). No flip, and NO clamp while the box
+//                        fits — the position is then byte-identical to the rect. Only a
+//                        genuine viewport overflow shifts it back inside (see
+//                        miniMenuClampPos); without that, a short window left the last
+//                        rows unreachable (.mini-menu is position:fixed, so the page
+//                        can't be scrolled to them).
 function showMiniMenu(anchorEl, items, opts = {}) {
   const open = document.querySelector('.mini-menu');
   if (open) { const wasMine = open._anchor === anchorEl; (open._close || open.remove).call(open, false); if (wasMine) return; }
@@ -1239,10 +2088,14 @@ function showMiniMenu(anchorEl, items, opts = {}) {
 
   // --- positioning (three preserved modes) ---
   if (opts.anchorRect) {
-    // exportMenu: plain position from the supplied rect (no clamp, no flip).
+    // exportMenu / colsort / Copy-as: plain position from the supplied rect (no flip).
+    // miniMenuClampPos is a no-op while the box fits, so a menu that isn't overflowing
+    // lands on exactly the same pixel as before; only an off-viewport one is pulled back.
     const rect = opts.anchorRect;
-    menu.style.top = Math.round(rect.bottom + 4) + 'px';
-    menu.style.left = Math.round(rect.left) + 'px';
+    const pos = miniMenuClampPos(rect.bottom + 4, rect.left, menu.offsetWidth, menu.offsetHeight,
+                                 window.innerWidth, window.innerHeight);
+    menu.style.top = Math.round(pos.top) + 'px';
+    menu.style.left = Math.round(pos.left) + 'px';
   } else {
     const r = anchorEl.getBoundingClientRect();
     if (opts.align === 'right') {
@@ -1250,6 +2103,26 @@ function showMiniMenu(anchorEl, items, opts = {}) {
       menu.style.top = Math.round(r.bottom + 4) + 'px';
       menu.style.left = Math.round(r.right) + 'px';
       menu.style.transform = 'translateX(-100%)';
+      // Then keep it inside the viewport. The translateX(-100%) means the VISUAL left edge
+      // is (left - width), not the `left` property, so the clamp is measured on the
+      // RENDERED rect. miniMenuShift returns 0/0 while the box fits, and then neither
+      // style is rewritten — a fitting menu is pixel-identical to before, transform
+      // included (that byte-preservation is the mode's contract).
+      const mr = menu.getBoundingClientRect();
+      const s = miniMenuShift(mr.top, mr.left, mr.width, mr.height, window.innerWidth, window.innerHeight);
+      if (s.dy) menu.style.top = Math.round(r.bottom + 4 + s.dy) + 'px';
+      if (s.dx) {
+        // Horizontally, apply the correction as an absolute VISUAL left and drop the
+        // transform rather than nudging `left` by dx: with translateX(-100%), `left` is
+        // the box's RIGHT edge, and a position:fixed box's shrink-to-fit width is bounded
+        // by (viewport - left) — so moving `left` rightwards re-wraps the menu narrower
+        // and taller, and the dx measured from the old width no longer lands it where it
+        // was computed to. Setting the visual left can only give the box MORE room, so the
+        // measured width still holds (it can widen back into the 8px pad at most, never
+        // past the viewport edge).
+        menu.style.transform = 'none';
+        menu.style.left = Math.round(mr.left + s.dx) + 'px';
+      }
     } else {
       const mw = menu.offsetWidth, mh = menu.offsetHeight;
       menu.style.left = Math.round(Math.min(window.innerWidth - 8 - mw, Math.max(8, r.left))) + 'px';
@@ -1264,7 +2137,17 @@ function showMiniMenu(anchorEl, items, opts = {}) {
   if (anchorEl) { if (!anchorEl.hasAttribute('aria-haspopup')) anchorEl.setAttribute('aria-haspopup', 'menu'); anchorEl.setAttribute('aria-expanded', 'true'); }
   let closed = false;
   const off = (e) => { if (!menu.contains(e.target) && e.target !== anchorEl) close(false); };
-  const onScroll = () => close(false);
+  // Scrolling the PAGE dismisses the menu (the anchor moves out from under it) — but the
+  // menu itself is now scrollable (.mini-menu max-height), and arrowing down past the
+  // visible rows scrolls it. That inner scroll is captured here too, so without this
+  // guard keyboard navigation would close the menu on the way to the last item.
+  // (the target is a Node for a real element/document scroll, but `window` for a
+  // synthesized window-dispatched one — Node.contains THROWS on a non-Node)
+  const onScroll = (e) => {
+    const tgt = e && e.target;
+    if (tgt && tgt.nodeType && menu.contains(tgt)) return;
+    close(false);
+  };
   function close(restoreFocus) {
     if (closed) return; closed = true;
     menu.remove();
@@ -1306,7 +2189,7 @@ function makeTypeMenuButton(block) {
   const btn = menuBtn((cur ? cur.label : 'Type') + ' ▾', () => {
     showMiniMenu(btn, BLOCK_KINDS.map(k => ({
       icon: k.icon, label: k.label, active: blockKind(block) === k.kind,
-      onClick: () => { convertBlock(block, k.kind); renderPage(); scheduleSave(); },
+      onClick: () => confirmKindChange(block, k.kind, () => { convertBlock(block, k.kind); renderPage(); scheduleSave(); }),
     })));
   });
   btn.className = 'secondary type-menu';
@@ -1806,6 +2689,74 @@ function createLangPicker(block, onChange) {
 // autosaves and re-renders until the session ends (save or revert).
 const blockBackups = new WeakMap();
 
+// Is a block edit session open on the active page? Derived from the DOM, NOT from a
+// tracked Set: a Set would hold a strong ref to the block object and would go stale
+// the moment an editing block is deleted (splice + renderPage) or the page is
+// re-rendered — permanently suppressing autosave with no way to notice. The DOM is
+// self-healing: renderPage rebuilds the editing state from blockBackups, and a
+// removed block simply isn't in #page any more.
+// `.checklist` is excluded because it is the ONE block kind with no edit session (it
+// is always live-editable, has no Cancel, and so never carries `.viewing`).
+function anyBlockEditing() {
+  try { return !!document.querySelector('#page .block:not(.viewing):not(.checklist)'); }
+  catch (e) { return false; }   // FAIL OPEN: a broken predicate must degrade to SAVING
+}
+
+// Focus left the block entirely → persist NOW (the crash-safety bound while autosave is
+// deferred), but DO NOT end the edit session: sticky editing is deliberate (see the
+// "no blur handler" note on the code textarea), and ending it here would hide
+// Save/Revert mid-click again. Honors the original blur gotcha — a toolbar click inside
+// the block bails via relatedTarget — plus a `.mini-menu` exemption, because a menu
+// opened from THIS block's toolbar lives on document.body and would otherwise read as a
+// departure (one history slot per menu open). The pageDirty guard caps repeated
+// clicking around at ONE write: savePage clears the flag, only a new keystroke re-marks it.
+function wireFocusFlush(el) {
+  el.addEventListener('focusout', (e) => {
+    // The SESSION ENDING is not a departure. Save / Cancel add `.viewing`, which CSS-hides
+    // the focused textarea — the browser then fires focusout with a null relatedTarget, and
+    // without this guard an explicit Save cost TWO writes (its own, plus this flush landing
+    // mid-flight → savePending → a second request) and two history versions.
+    if (el.classList.contains('viewing') || !document.contains(el)) return;
+    if (e.relatedTarget && (el.contains(e.relatedTarget) || e.relatedTarget.closest('.mini-menu'))) return;
+    if (document.querySelector('.mini-menu')) return;
+    // A TEARDOWN is not a departure either. Delete/convert splice the block and call
+    // renderPage(), which does `#page.innerHTML = ''` — and the engine dispatches the
+    // focused button's focusout at the START of that removal, while this element still
+    // reports `document.contains(el) === true` and hasn't gained `.viewing`. The sync
+    // guards above therefore can't see it, and a delete-while-editing cost TWO writes
+    // (this flush, then the delete's own scheduleSave). So re-check the element's state
+    // one task later: by then the teardown has finished and `el` is detached.
+    //   Deferring (rather than a "renderPage is running" flag) keys the decision on the
+    // OBSERVABLE end state instead of on knowing every teardown path, so a future
+    // detach route is covered for free and an engine that ever dispatches this focusout
+    // asynchronously still lands on the same answer.
+    //   It cannot swallow a real departure: the only ways to fail the re-check are
+    // `.viewing` (the session ended → Save wrote, or Cancel ran afterEditSession) and
+    // detached (renderPage ran → its mutation path called scheduleSave). Both persist
+    // by their own route, and the page stays in `pageDirty` regardless.
+    setTimeout(() => {
+      if (el.classList.contains('viewing') || !document.contains(el)) return;
+      if (currentPagePath && pageDirty.has(currentPagePath)) savePage();
+    }, 0);
+  });
+}
+
+// Esc inside an open editor = a quick "done". It MUST route through the Cancel/Revert
+// BUTTON (not a bespoke revert) so the afterEditSession()/pageDirty wiring stays
+// identical across all six edit-session kinds — that button is the one place each kind
+// decides "clean ⇒ just exit" vs "dirty ⇒ restore the backup and stay open".
+// An open ⋯ menu owns Escape (showMiniMenu closes itself on it). It also holds focus
+// while open, so this listener normally can't fire then; the guard is belt-and-braces
+// for a menu opened without moving focus.
+function wireEscapeRevert(surfaceEl, revertBtn) {
+  surfaceEl.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (document.querySelector('.mini-menu')) return;
+    e.preventDefault();
+    revertBtn.click();
+  });
+}
+
 // Editor line metrics. The gutter, the transparent textarea, and the Prism
 // view MUST share these EXACTLY or line numbers/caret drift apart (the Prism
 // theme otherwise forces code to line-height:1.5). They're applied as INLINE
@@ -1985,7 +2936,7 @@ function renderChecklistBlock(block, parentArray, idx) {
       { divider: true },
       ...BLOCK_KINDS.map(k => ({
         icon: k.icon, label: k.label, active: blockKind(block) === k.kind,
-        onClick: () => { convertBlock(block, k.kind); renderPage(); scheduleSave(); },
+        onClick: () => confirmKindChange(block, k.kind, () => { convertBlock(block, k.kind); renderPage(); scheduleSave(); }),
       })),
     ]);
   });
@@ -2089,7 +3040,16 @@ function renderRichBlock(block, parentArray, idx) {
     revertBtn.textContent = dirty ? 'Revert' : 'Cancel';
     revertBtn.title = dirty ? 'Undo changes made since you started editing' : 'Exit edit mode (no changes)';
   }
-  const syncFromSurface = () => { block.code = sanitizeRichHtml(surface.innerHTML); scheduleSave(); refreshRevertLabel(); };
+  // Warn ONCE per block per session when the stored HTML crosses the soft threshold
+  // (a pasted data: image is the usual cause). Never truncates — see RICH_SOFT_WARN.
+  const warnIfBig = () => {
+    if (richWarned.has(block) || (block.code || '').length <= RICH_SOFT_WARN) return;
+    richWarned.add(block);
+    toast('This rich block is ' + htmlBytesLabel((block.code || '').length)
+      + '. It is stored inside the page, and every save keeps up to 20 history versions — so it can use around '
+      + htmlBytesLabel((block.code || '').length * 21) + ' on the server.');
+  };
+  const syncFromSurface = () => { block.code = sanitizeRichHtml(surface.innerHTML); warnIfBig(); scheduleSave(); refreshRevertLabel(); };
   surface.addEventListener('input', syncFromSurface);
   // Tab / Shift+Tab nest & un-nest list items (like a real editor). Only when the
   // caret is inside a list item, so Tab elsewhere still moves focus out normally.
@@ -2171,6 +3131,7 @@ function renderRichBlock(block, parentArray, idx) {
 
   // ---- Edit / Save / Revert / Copy / Duplicate / convert / Delete ----
   function enterEdit() {
+    beforeEditSession();               // BEFORE .viewing drops (the predicate is DOM-derived)
     blockBackups.set(block, block.code || '');
     el.classList.remove('viewing');
     surface.setAttribute('contenteditable', 'true');
@@ -2187,8 +3148,7 @@ function renderRichBlock(block, parentArray, idx) {
     el.classList.add('viewing');
     surface.setAttribute('contenteditable', 'false');
     surface.innerHTML = sanitizeRichHtml(block.code || '') || '<p><br></p>';
-    savePage();
-    toast('Saved');
+    savePage();   // announces 'Saved' itself, once the write is CONFIRMED
   });
   saveBtn.className = 'block-save';
   if (isMobile) { saveBtn.textContent = '✓'; saveBtn.title = 'Save'; }
@@ -2200,7 +3160,7 @@ function renderRichBlock(block, parentArray, idx) {
       surface.innerHTML = sanitizeRichHtml(backup) || '<p><br></p>';
       el.classList.remove('viewing');
       surface.setAttribute('contenteditable', 'true');
-      savePage();
+      afterEditSession();
       refreshRevertLabel();
       surface.focus();
       toast('Reverted');
@@ -2208,9 +3168,11 @@ function renderRichBlock(block, parentArray, idx) {
       blockBackups.delete(block);
       el.classList.add('viewing');
       surface.setAttribute('contenteditable', 'false');
+      afterEditSession();
     }
   });
   revertBtn.className = 'secondary block-revert';
+  wireEscapeRevert(surface, revertBtn);
 
   const copyBtn = mkBtn('Copy', () => {
     copyText(surface.innerText || '').then(ok => { if (ok) recordCopy(block); flashCopied(copyBtn, ok ? 'Copied to clipboard' : 'Copy failed'); });
@@ -2236,7 +3198,7 @@ function renderRichBlock(block, parentArray, idx) {
       { divider: true },
       ...BLOCK_KINDS.map(k => ({
         icon: k.icon, label: k.label, active: blockKind(block) === k.kind,
-        onClick: () => { block.code = sanitizeRichHtml(surface.innerHTML); convertBlock(block, k.kind); renderPage(); scheduleSave(); },
+        onClick: () => { block.code = sanitizeRichHtml(surface.innerHTML); confirmKindChange(block, k.kind, () => { convertBlock(block, k.kind); renderPage(); scheduleSave(); }); },
       })),
     ]);
   });
@@ -2250,6 +3212,7 @@ function renderRichBlock(block, parentArray, idx) {
   toolbar.append(labelInput, spacer, typeBtn, editBtn, saveBtn, revertBtn, copyBtn, dupBtn, overflowBtn, delBtn);
   el.append(toolbar, fmt, surface);
   refreshRevertLabel();
+  wireFocusFlush(el);
   return el;
 }
 
@@ -2356,6 +3319,7 @@ function renderCsvBlock(block, parentArray, idx) {
   });
 
   function enterEdit() {
+    beforeEditSession();               // BEFORE .viewing drops (the predicate is DOM-derived)
     blockBackups.set(block, block.code || '');
     el.classList.remove('viewing');
     refreshRevertLabel();
@@ -2370,8 +3334,7 @@ function renderCsvBlock(block, parentArray, idx) {
     blockBackups.delete(block);
     el.classList.add('viewing');
     renderTable();
-    savePage();
-    toast('Saved');
+    savePage();   // announces 'Saved' itself, once the write is CONFIRMED
   });
   saveBtn.className = 'block-save';
   if (isMobile) { saveBtn.textContent = '✓'; saveBtn.title = 'Save'; }
@@ -2381,14 +3344,16 @@ function renderCsvBlock(block, parentArray, idx) {
     if ((block.code || '') !== backup) {
       block.code = backup; textarea.value = backup;
       el.classList.remove('viewing');
-      renderTable(); autosize(); savePage(); refreshRevertLabel(); textarea.focus();
+      renderTable(); autosize(); afterEditSession(); refreshRevertLabel(); textarea.focus();
       toast('Reverted');
     } else {
       blockBackups.delete(block);
       el.classList.add('viewing');
+      afterEditSession();
     }
   });
   revertBtn.className = 'secondary block-revert';
+  wireEscapeRevert(textarea, revertBtn);
 
   const copyBtn = mkBtn('Copy', () => {
     copyText(block.code || '').then(ok => { if (ok) recordCopy(block); flashCopied(copyBtn, ok ? 'Copied to clipboard' : 'Copy failed'); });
@@ -2406,7 +3371,7 @@ function renderCsvBlock(block, parentArray, idx) {
       { divider: true },
       ...BLOCK_KINDS.map(k => ({
         icon: k.icon, label: k.label, active: blockKind(block) === k.kind,
-        onClick: () => { block.code = textarea.value; convertBlock(block, k.kind); renderPage(); scheduleSave(); },
+        onClick: () => { block.code = textarea.value; confirmKindChange(block, k.kind, () => { convertBlock(block, k.kind); renderPage(); scheduleSave(); }); },
       })),
     ]);
   });
@@ -2420,6 +3385,7 @@ function renderCsvBlock(block, parentArray, idx) {
   toolbar.append(labelInput, spacer, typeBtn, editBtn, saveBtn, revertBtn, copyBtn, dupBtn, overflowBtn, delBtn);
   el.append(toolbar, textarea, view);
   renderTable();
+  wireFocusFlush(el);
   if (!el.classList.contains('viewing')) requestAnimationFrame(autosize);
   return el;
 }
@@ -2608,6 +3574,7 @@ function renderJsonBlock(block, parentArray, idx) {
   });
 
   function enterEdit() {
+    beforeEditSession();               // BEFORE .viewing drops (the predicate is DOM-derived)
     blockBackups.set(block, block.code || '');
     el.classList.remove('viewing');
     refreshRevertLabel();
@@ -2622,8 +3589,7 @@ function renderJsonBlock(block, parentArray, idx) {
     blockBackups.delete(block);
     el.classList.add('viewing');
     renderTree();
-    savePage();
-    toast('Saved');
+    savePage();   // announces 'Saved' itself, once the write is CONFIRMED
   });
   saveBtn.className = 'block-save';
   if (isMobile) { saveBtn.textContent = '✓'; saveBtn.title = 'Save'; }
@@ -2633,14 +3599,16 @@ function renderJsonBlock(block, parentArray, idx) {
     if ((block.code || '') !== backup) {
       block.code = backup; textarea.value = backup;
       el.classList.remove('viewing');
-      renderTree(); autosize(); savePage(); refreshRevertLabel(); textarea.focus();
+      renderTree(); autosize(); afterEditSession(); refreshRevertLabel(); textarea.focus();
       toast('Reverted');
     } else {
       blockBackups.delete(block);
       el.classList.add('viewing');
+      afterEditSession();
     }
   });
   revertBtn.className = 'secondary block-revert';
+  wireEscapeRevert(textarea, revertBtn);
 
   const copyBtn = mkBtn('Copy', () => {
     copyText(block.code || '').then(ok => { if (ok) recordCopy(block); flashCopied(copyBtn, ok ? 'Copied to clipboard' : 'Copy failed'); });
@@ -2673,7 +3641,7 @@ function renderJsonBlock(block, parentArray, idx) {
       { divider: true },
       ...BLOCK_KINDS.map(k => ({
         icon: k.icon, label: k.label, active: blockKind(block) === k.kind,
-        onClick: () => { block.code = textarea.value; convertBlock(block, k.kind); renderPage(); scheduleSave(); },
+        onClick: () => { block.code = textarea.value; confirmKindChange(block, k.kind, () => { convertBlock(block, k.kind); renderPage(); scheduleSave(); }); },
       })),
     ]);
   });
@@ -2687,8 +3655,734 @@ function renderJsonBlock(block, parentArray, idx) {
   toolbar.append(labelInput, spacer, typeBtn, editBtn, saveBtn, revertBtn, treeToggleBtn, copyBtn, dupBtn, overflowBtn, delBtn);
   el.append(toolbar, textarea, view);
   renderTree();
+  wireFocusFlush(el);
   if (!el.classList.contains('viewing')) requestAnimationFrame(autosize);
   return el;
+}
+
+/* ---------- HTML PROJECT (block) ---------- */
+
+// htmlBundleKey → 'running' | 'stopped'. Absent = never mounted, so the preview waits
+// for the block to scroll into view. renderPage() rewrites #page wholesale, so a live
+// iframe can't survive it — the guarantee is over RUN STATE, not DOM state.
+// RULE: any content mutation goes through the block's refreshAfterMutation(), which
+// carries THIS render's run state forward explicitly and rebuilds the view exactly
+// once. htmlBundleKey moving is no longer the enforcement mechanism (it fingerprints
+// binaries now, but the explicit carry is what makes correctness independent of it).
+const htmlRunState = new Map();
+function setHtmlRunState(key, state) {
+  htmlRunState.delete(key);                 // re-insert so the FIFO order is recency
+  htmlRunState.set(key, state);
+  while (htmlRunState.size > 64) htmlRunState.delete(htmlRunState.keys().next().value);
+}
+
+// Preview height, clamped to something sane whatever is stored.
+function htmlHeightPx(block) {
+  const h = Number((block && block.htmlH) || HTML_DEFAULT_H) || HTML_DEFAULT_H;
+  return Math.max(120, Math.min(1200, Math.round(h)));
+}
+
+// Swap which file is the entry: block.code is ALWAYS the entry's source, so the old
+// entry goes back into files[] as text and the new one is pulled out into code.
+function setHtmlEntry(block, path) {
+  const next = normalizeHtmlPath(path || '');
+  if (!next) return;
+  const cur = normalizeHtmlPath(block.entry || '');
+  if (next === cur) return;
+  if (!Array.isArray(block.files)) block.files = [];
+  const i = block.files.findIndex(f => f && normalizeHtmlPath(f.p || '') === next);
+  const rec = i === -1 ? null : block.files.splice(i, 1)[0];
+  if (cur) block.files.push({ p: cur, t: block.code || '' });
+  block.entry = next;
+  block.code = rec ? String(rec.t || '') : '';
+}
+
+// HTML-project block: a small static site stored inline in the page, previewed in a
+// sandboxed iframe. Edit mode is a plain textarea over the ENTRY file only (the CSV /
+// JSON pattern — deliberately NOT the Prism .code-stack overlay, whose ED_* metrics
+// coupling is why per-file editing is a separate phase).
+function renderHtmlBlock(block, parentArray, idx) {
+  const isMobile = document.body.classList.contains('is-mobile');
+  const el = document.createElement('div');
+  el.className = 'block html' + (blockBackups.has(block) ? '' : ' viewing');
+
+  if (!Array.isArray(block.files)) block.files = [];
+
+  const toolbar = document.createElement('div');
+  toolbar.className = 'block-toolbar';
+
+  const labelInput = document.createElement('input');
+  labelInput.className = 'block-label';
+  labelInput.placeholder = 'Label (optional)';
+  labelInput.value = block.label || '';
+  labelInput.addEventListener('input', () => { block.label = labelInput.value; scheduleSave(); });
+
+  const spacer = document.createElement('span');
+  spacer.className = 'spacer';
+
+  // The entry-file source editor (visible only while editing, via CSS).
+  const textarea = document.createElement('textarea');
+  textarea.className = 'html-edit';
+  textarea.value = block.code || '';
+  textarea.spellcheck = false;
+  textarea.setAttribute('autocapitalize', 'off');
+  textarea.setAttribute('autocorrect', 'off');
+  // mobile has no folder picker (.html-upload is hidden there) — don't offer the route
+  textarea.placeholder = (isMobile ? 'Entry HTML — write it here.' : 'Entry HTML — upload a folder, or write it here.')
+    + '\n<!DOCTYPE html>\n<html>…</html>';
+
+  const view = document.createElement('div');
+  view.className = 'html-view';
+
+  function autosize() {
+    textarea.style.height = 'auto';
+    textarea.style.height = Math.min(textarea.scrollHeight + 2, editorCapPx()) + 'px';
+  }
+  textarea._autosize = autosize;
+
+  /* ----- preview mount / unmount (run state, never renderPage) ----- */
+
+  let frameWrap = null, poster = null, frame = null, observer = null;
+  // THIS render's run state — the authority while the block is on screen. htmlRunState
+  // stays the authority only ACROSS renderPage() rebuilds, where the closure is gone.
+  let myState;
+  let lastWarnings = [];        // what renderView last put in the banner
+
+  function mountFrame() {
+    if (!frameWrap || frame) return;
+    if (poster) poster.style.display = 'none';
+    frame = document.createElement('iframe');
+    frame.className = 'html-frame';
+    // SECURITY INVARIANT: allow-scripts WITHOUT allow-same-origin ⇒ opaque origin ⇒
+    // no parent.document, no cookies, no storage; with the inherited CSP, no egress.
+    // Adding allow-same-origin alongside allow-scripts VOIDS the entire sandbox.
+    // This is permanent, not a tuning knob.
+    frame.setAttribute('sandbox', 'allow-scripts');
+    frame.setAttribute('loading', 'lazy');
+    frame.setAttribute('referrerpolicy', 'no-referrer');
+    frame.setAttribute('title', 'HTML preview' + (block.label ? ': ' + block.label : ''));
+    frame.srcdoc = bundleHtmlProject(block).html;
+    frameWrap.appendChild(frame);
+    myState = 'running';
+    setHtmlRunState(htmlBundleKey(block), 'running');
+    syncRunBtn();
+  }
+  function unmountFrame() {
+    if (frame) { frame.remove(); frame = null; }
+    if (poster) poster.style.display = '';
+    myState = 'stopped';
+    setHtmlRunState(htmlBundleKey(block), 'stopped');
+    syncRunBtn();
+  }
+  // THE seam for every content mutation (upload, entry change, file remove, save,
+  // revert). Replaces the old `renderView(); remountFrame();` pairs, which mounted the
+  // iframe twice and made "remember to remount" the only thing keeping run state right.
+  // Deliberately does NOT call scheduleSave() — each caller keeps its own explicit call
+  // so the dirty choke point stays visible at the mutation site.
+  function refreshAfterMutation() {
+    const carry = frame ? 'running' : myState;   // undefined stays undefined → observer re-arms
+    if (frame) { frame.remove(); frame = null; }
+    const key = htmlBundleKey(block);
+    if (carry) setHtmlRunState(key, carry); else htmlRunState.delete(key);
+    renderView();                                // consults that state and mounts at most ONCE
+    // Announce the banner's state on ACTION-DRIVEN re-renders only. The banner itself is
+    // a role="region" (silent at rest) precisely so three html blocks don't fire three
+    // live-region announcements every time a page is opened.
+    if (lastWarnings.length) {
+      const s = htmlWarnSummary(lastWarnings);
+      toast(s.glyph + ' ' + s.text);
+    }
+  }
+
+  function reloadFrame() { if (frame) { frame.remove(); frame = null; } mountFrame(); }
+  const runBtn = mkBtn('▶', () => { if (frame) reloadFrame(); else mountFrame(); });
+  runBtn.className = 'secondary html-run';
+  function syncRunBtn() {
+    runBtn.textContent = frame ? '↻' : '▶';
+    runBtn.title = frame ? 'Reload preview' : 'Run preview';
+    runBtn.setAttribute('aria-label', runBtn.title);
+    stopBtn.disabled = !frame;                   // nothing to stop while idle
+  }
+  const stopBtn = mkBtn('■', () => unmountFrame());
+  stopBtn.className = 'secondary html-stop';
+  stopBtn.title = 'Stop preview';
+  stopBtn.setAttribute('aria-label', 'Stop preview');
+
+  /* ----- the view: warnings + frame + file list ----- */
+
+  // The banner. `budget` caps the rendered list so a pathologically broken project can't
+  // produce a banner taller than the preview; the "+N more" button re-renders the same
+  // box with an unlimited budget, so the tail is REACHABLE rather than merely counted.
+  // Truncation priority (Problems before Notes) is preserved exactly.
+  function renderWarnings(warnings, budgetIn) {
+    if (!warnings.length) return null;
+    const problems = warnings.filter(w => w.level !== 'info');
+    const notes = warnings.filter(w => w.level === 'info');
+    const sum = htmlWarnSummary(warnings);
+    const box = document.createElement('div');
+    box.className = 'html-warn' + (sum.infoOnly ? ' html-warn-info' : '');
+    // role=region (NOT status): a live region present at render would announce on every
+    // page open. Change announcements go through toast() in refreshAfterMutation.
+    box.setAttribute('role', 'region');
+    box.setAttribute('aria-label', 'Preview notes: ' + sum.text);
+    const head = document.createElement('div');
+    head.textContent = sum.glyph + ' ' + sum.text;
+    box.appendChild(head);
+    let budget = budgetIn === undefined ? 12 : budgetIn;
+    const addList = (items, cls, title) => {
+      if (!items.length || budget <= 0) return;
+      const h = document.createElement('div');
+      h.className = 'html-warn-head';
+      h.textContent = title;
+      const ul = document.createElement('ul');
+      if (cls) ul.className = cls;
+      items.slice(0, budget).forEach(w => {
+        const li = document.createElement('li');
+        li.textContent = w.text;                 // data-derived → textContent, never innerHTML
+        ul.appendChild(li);
+      });
+      budget -= Math.min(budget, items.length);
+      box.append(h, ul);
+    };
+    addList(problems, '', 'Problems');
+    addList(notes, 'html-warn-note', 'Notes');
+    const shown = Math.min(budgetIn === undefined ? 12 : budgetIn, warnings.length);
+    if (warnings.length > shown) {
+      const more = mkBtn('+' + (warnings.length - shown) + ' more', () => {
+        const full = renderWarnings(warnings, Infinity);
+        if (full && box.parentNode) box.parentNode.replaceChild(full, box);
+      });
+      more.className = 'secondary html-warn-more';
+      box.appendChild(more);
+    }
+    return box;
+  }
+
+  function renderFiles() {
+    const rows = htmlFileList(block);
+    const wrap = document.createElement('div');
+    wrap.className = 'html-files';
+    // Size header — what the project costs against the 1 MB cap, before you hit it.
+    const size = htmlProjectSize(block);
+    const head = document.createElement('div');
+    head.className = 'html-files-head' + (size.bytes > HTML_SOFT_WARN ? ' over-soft' : '');
+    head.textContent = rows.length + ' file' + (rows.length === 1 ? '' : 's') + ' · '
+      + htmlBytesLabel(size.bytes) + ' of ' + htmlBytesLabel(HTML_MAX_TOTAL);
+    wrap.appendChild(head);
+    rows.forEach(r => {
+      const row = document.createElement('div');
+      row.className = 'html-file-row' + (r.isEntry ? ' is-entry' : '');
+      // the entry marker is its OWN cell (rendered empty on other rows) so every path
+      // shares one left edge instead of the entry's text being indented by the glyph
+      const mark = document.createElement('span');
+      mark.className = 'html-file-mark';
+      mark.textContent = r.isEntry ? '⌁' : '';
+      if (r.isEntry) mark.title = 'Entry file';
+      const name = document.createElement('span');
+      name.className = 'html-file-path';
+      name.textContent = r.p;                                    // all cells via textContent
+      const sz = document.createElement('span');
+      sz.className = 'html-file-size';
+      sz.textContent = htmlBytesLabel(r.bytes);
+      row.append(mark, name, sz);
+      if (!r.isEntry && /\.(html|htm)$/i.test(r.p)) {
+        const mk = mkBtn('Make entry', () => {
+          setHtmlEntry(block, r.p);
+          textarea.value = block.code || '';
+          scheduleSave();
+          refreshAfterMutation();
+          toast('Entry set to ' + r.p);
+        });
+        mk.className = 'secondary html-file-entry';
+        row.appendChild(mk);
+      }
+      if (!r.isEntry) {
+        // no modal — page History is the safety net, same as removing any other content
+        // (block, section, checklist item). The affordance carries the weight instead:
+        // a `danger` button, a real tap target, and a toast naming the recovery path.
+        const rm = mkBtn('✕', () => {
+          const i = block.files.findIndex(f => f && normalizeHtmlPath(f.p || '') === r.p);
+          if (i !== -1) block.files.splice(i, 1);
+          scheduleSave();
+          refreshAfterMutation();
+          toast('Removed ' + r.p + ' — restore from page History');
+        });
+        rm.className = 'danger html-file-del';
+        rm.title = 'Remove ' + r.p;
+        rm.setAttribute('aria-label', 'Remove ' + r.p);
+        row.appendChild(rm);
+      }
+      wrap.appendChild(row);
+    });
+    return wrap;
+  }
+
+  function renderView() {
+    if (observer) { observer.disconnect(); observer = null; }
+    frame = null;
+    view.innerHTML = '';
+    myState = htmlRunState.get(htmlBundleKey(block));
+    lastWarnings = [];
+    const hasEntry = !!(block.code || '').trim();
+    const files = htmlFileList(block);
+
+    if (!hasEntry && !block.files.length) {
+      const empty = document.createElement('div');
+      empty.className = 'html-empty';
+      empty.textContent = htmlEmptyText(isMobile);
+      view.appendChild(empty);
+      syncRunBtn();
+      return;
+    }
+
+    const bundle = bundleHtmlProject(block);
+    const warnings = bundle.warnings.slice();
+    if (!hasEntry) {
+      warnings.unshift({ level: 'warn', text: 'No entry file — pick one with “Make entry”, or edit the entry HTML.' });
+    }
+    lastWarnings = warnings;
+    const warnBox = renderWarnings(warnings);
+    if (warnBox) view.appendChild(warnBox);
+
+    if (hasEntry) {
+      frameWrap = document.createElement('div');
+      frameWrap.className = 'html-frame-wrap';
+      frameWrap.style.height = htmlHeightPx(block) + 'px';
+
+      poster = document.createElement('div');
+      poster.className = 'html-poster';
+      const play = document.createElement('button');
+      play.className = 'secondary html-poster-run';
+      play.textContent = '▶ Run';
+      play.addEventListener('click', () => mountFrame());
+      const cap = document.createElement('div');
+      cap.className = 'html-poster-cap';
+      // The poster is a STOPPED state — say what pressing ▶ will actually do, and that
+      // it runs sandboxed with no network access, rather than repeating a file stat line.
+      cap.textContent = (normalizeHtmlPath(block.entry || '') || 'index.html')
+        + ' · ' + files.length + ' file' + (files.length === 1 ? '' : 's')
+        + ' · runs sandboxed, no network access';
+      poster.append(play, cap);
+      frameWrap.appendChild(poster);
+      view.appendChild(frameWrap);
+      wireResize(frameWrap);
+
+      if (myState === 'running') {
+        mountFrame();                                   // don't make the user click ▶ again
+      } else if (myState !== 'stopped') {
+        observer = new IntersectionObserver(entries => {
+          if (!entries.some(e => e.isIntersecting)) return;
+          observer.disconnect(); observer = null;
+          mountFrame();
+        }, { rootMargin: '200px' });
+        observer.observe(frameWrap);
+      }
+    }
+
+    view.appendChild(renderFiles());
+    syncRunBtn();
+  }
+
+  // The wrap is CSS-resizable; the iframe would swallow the drag, so shield it with
+  // pointer-events:none for the duration and persist the height on release.
+  // COUPLING: offsetHeight (border-box) is read back, not clientHeight, because
+  // style.height was SET as a border-box value — clientHeight excludes the 1px border
+  // on .html-frame-wrap, so every click shrank the stored height by 2px and the preview
+  // crept toward its 120px minimum. If that border ever moves to an inner element, this
+  // reading becomes the wrong one.
+  function wireResize(wrap) {
+    wrap.addEventListener('pointerdown', () => {
+      if (frame) frame.style.pointerEvents = 'none';
+      const startH = wrap.offsetHeight;
+      const up = () => {
+        if (frame) frame.style.pointerEvents = '';
+        const h = wrap.offsetHeight;
+        // a click that isn't a drag writes nothing — no htmlH, no scheduleSave, no
+        // history churn on a page the user only looked at
+        if (h && Math.abs(h - startH) >= 2 && h !== htmlHeightPx(block)) {
+          block.htmlH = h; scheduleSave();
+        }
+        window.removeEventListener('pointerup', up);
+      };
+      window.addEventListener('pointerup', up);
+    });
+  }
+
+  /* ----- toolbar ----- */
+
+  const typeBtn = makeTypeMenuButton(block);
+  typeBtn.addEventListener('mousedown', () => { block.code = textarea.value; }, true);
+
+  function refreshRevertLabel() {
+    const backup = blockBackups.has(block) ? blockBackups.get(block) : (block.code || '');
+    const dirty = (block.code || '') !== backup;
+    revertBtn.textContent = dirty ? 'Revert' : 'Cancel';
+    revertBtn.title = dirty ? 'Undo changes made since you started editing' : 'Exit edit mode (no changes)';
+  }
+
+  textarea.addEventListener('input', () => {
+    block.code = textarea.value; autosize(); scheduleSave(); refreshRevertLabel();
+  });
+
+  function enterEdit() {
+    beforeEditSession();               // BEFORE .viewing drops (the predicate is DOM-derived)
+    blockBackups.set(block, block.code || '');
+    el.classList.remove('viewing');
+    refreshRevertLabel();
+    requestAnimationFrame(() => { autosize(); textarea.focus(); });
+  }
+  const editBtn = mkBtn('Edit', enterEdit);
+  editBtn.className = 'secondary block-edit';
+  editBtn.title = 'Edit the entry HTML';
+  if (isMobile) { editBtn.textContent = '✎'; editBtn.title = 'Edit the entry HTML'; }
+
+  const saveBtn = mkBtn('Save', () => {
+    block.code = textarea.value;
+    blockBackups.delete(block);
+    el.classList.add('viewing');
+    refreshAfterMutation();
+    savePage();   // announces 'Saved' itself, once the write is CONFIRMED
+  });
+  saveBtn.className = 'block-save';
+  if (isMobile) { saveBtn.textContent = '✓'; saveBtn.title = 'Save'; }
+
+  const revertBtn = mkBtn('Cancel', () => {
+    const backup = blockBackups.has(block) ? blockBackups.get(block) : (block.code || '');
+    if ((block.code || '') !== backup) {
+      block.code = backup; textarea.value = backup;
+      el.classList.remove('viewing');
+      refreshAfterMutation(); autosize(); afterEditSession(); refreshRevertLabel(); textarea.focus();
+      toast('Reverted');
+    } else {
+      blockBackups.delete(block);
+      el.classList.add('viewing');
+      afterEditSession();
+    }
+  });
+  revertBtn.className = 'secondary block-revert';
+  wireEscapeRevert(textarea, revertBtn);
+
+  // Copy hands over the BUNDLED document (the thing you'd paste into a file and open).
+  // Deliberately NOT recordCopy(block) — recentCopies is a localStorage array and
+  // parking bundled documents there risks the 5 MB quota.
+  const copyBtn = mkBtn('Copy', () => {
+    copyText(bundleHtmlProject(block).html).then(ok =>
+      flashCopied(copyBtn, ok ? 'Copied bundled HTML' : 'Copy failed'));
+  });
+  copyBtn.className = 'secondary block-copy';
+  copyBtn.title = 'Copy the bundled HTML document to clipboard';
+  if (isMobile) copyBtn.textContent = '⧉';
+
+  const afterUpload = () => { textarea.value = block.code || ''; refreshAfterMutation(); };
+  const uploadBtn = mkBtn('Upload…', () => {
+    uploadHtmlProject(block, { replace: false }, afterUpload);
+  });
+  uploadBtn.className = 'secondary html-upload';
+  uploadBtn.title = 'Upload a project folder';
+
+  const dupBtn = mkBtn('Duplicate', () => duplicateBlock(parentArray, idx));
+  dupBtn.className = 'secondary block-dup';
+
+  const overflowBtn = menuBtn('⋯', () => {
+    showMiniMenu(overflowBtn, [
+      { icon: '❐', label: 'Duplicate block', onClick: () => dupBtn.click() },
+      { icon: '↻', label: 'Reload preview', onClick: () => { if (frame) reloadFrame(); else mountFrame(); } },
+      // Stop lives here at ALL widths; CSS hides the toolbar's ■ on mobile so the phone
+      // row stays five controls (✎ ▶ ⧉ ⋯ ✕) without making Stop unreachable there.
+      { icon: '■', label: 'Stop preview', onClick: () => unmountFrame() },
+      { icon: '↕', label: 'Preview height…', onClick: () => pickHeight() },
+      { icon: '⇪', label: 'Replace project…', onClick: () => replaceProject() },
+      { icon: '⌁', label: 'Set entry file…', onClick: () => pickEntry() },
+      { icon: '⧉', label: 'Copy bundled HTML', onClick: () => copyBtn.click() },
+      { divider: true },
+      ...BLOCK_KINDS.map(k => ({
+        icon: k.icon, label: k.label, active: blockKind(block) === k.kind,
+        onClick: () => { block.code = textarea.value; confirmKindChange(block, k.kind, () => { convertBlock(block, k.kind); renderPage(); scheduleSave(); }); },
+      })),
+    ]);
+  });
+  overflowBtn.className = 'secondary block-overflow';
+  overflowBtn.title = 'More actions';
+
+  function pickEntry() {
+    const cands = htmlFileList(block).filter(r => /\.(html|htm)$/i.test(r.p));
+    if (!cands.length) { toast('No HTML files in this project'); return; }
+    showMiniMenu(overflowBtn, cands.map(r => ({
+      icon: r.isEntry ? '⌁' : '', label: r.p, active: r.isEntry,
+      onClick: () => {
+        if (r.isEntry) return;
+        setHtmlEntry(block, r.p);
+        textarea.value = block.code || '';
+        scheduleSave(); refreshAfterMutation();
+        toast('Entry set to ' + r.p);
+      },
+    })));
+  }
+
+  // Discrete height presets — the reliable route when dragging the corner over an
+  // iframe is awkward (and the only route at phone widths). A submenu anchored to the
+  // ⋯ button rather than inline items: miniMenuHasCheck reserves the 24px icon column
+  // on EVERY row of a checkable menu, so inlining these would shift every other ⋯ item.
+  function pickHeight() {
+    const cur = htmlHeightPx(block);
+    showMiniMenu(overflowBtn, HTML_H_PRESETS.map(p => ({
+      label: p.label + ' (' + p.px + 'px)',
+      checked: cur === p.px,
+      onClick: () => {
+        block.htmlH = p.px;
+        // no remount — the iframe is height:100%, so a running demo keeps running
+        if (frameWrap) frameWrap.style.height = p.px + 'px';
+        scheduleSave();
+      },
+    })));
+  }
+
+  // Replace DISCARDS the current project, so name what's going before opening a picker
+  // the user might otherwise treat as harmless browsing.
+  async function replaceProject() {
+    if ((block.code || '').trim() || block.files.length) {
+      const n = htmlFileList(block).length;
+      const go = await showConfirm('Replace discards the current project (' + n + ' file'
+        + (n === 1 ? '' : 's') + '). It can be recovered from page History.\n\nReplace?',
+        { okLabel: 'Replace', danger: true });
+      if (!go) return;
+    }
+    uploadHtmlProject(block, { replace: true }, afterUpload);
+  }
+
+  const delBtn = mkBtn('Delete', () => { parentArray.splice(idx, 1); renderPage(); scheduleSave(); });
+  delBtn.className = 'danger';
+  if (isMobile) { delBtn.textContent = '✕'; delBtn.title = 'Delete'; }
+
+  toolbar.append(labelInput, spacer, typeBtn, editBtn, saveBtn, revertBtn, runBtn, stopBtn, uploadBtn, copyBtn, dupBtn, overflowBtn, delBtn);
+  el.append(toolbar, textarea, view);
+  wireFocusFlush(el);
+
+  // Drag-and-drop a folder straight onto the block.
+  el.addEventListener('dragover', (e) => { e.preventDefault(); el.classList.add('drop-active'); });
+  el.addEventListener('dragleave', (e) => { if (e.target === el) el.classList.remove('drop-active'); });
+  el.addEventListener('drop', (e) => {
+    e.preventDefault();
+    el.classList.remove('drop-active');
+    const items = e.dataTransfer && e.dataTransfer.items;
+    if (!items || !items.length) return;
+    collectDroppedFiles(items).then(async ({ files: picked, partial }) => {
+      if (!picked.length) return;
+      // A directory reader that errored mid-walk means we're holding an incomplete
+      // folder — say so BEFORE committing rather than importing a broken project.
+      if (partial) {
+        const go = await showConfirm('Some folders couldn’t be fully read — this import may be incomplete.\n\nImport anyway?',
+          { okLabel: 'Import anyway', danger: false });
+        if (!go) return;
+      }
+      commitHtmlUpload(block, picked, { replace: false }, afterUpload);
+    });
+  });
+
+  renderView();
+  if (!el.classList.contains('viewing')) requestAnimationFrame(autosize);
+  return el;
+}
+
+// Walk a DataTransferItemList into { files: [{path, file}], partial }.
+// FileSystemDirectoryReader.readEntries PAGES AT 100 ENTRIES — it must be called
+// repeatedly until it returns an empty array, or a large folder imports partially.
+// `partial` is set when a reader or a file handle errors: the walk still resolves with
+// whatever it got (never rejects), but the caller must not commit it silently.
+async function collectDroppedFiles(items) {
+  const roots = [];
+  for (let i = 0; i < items.length; i++) {
+    const entry = items[i].webkitGetAsEntry && items[i].webkitGetAsEntry();
+    if (entry) roots.push(entry);
+  }
+  const out = [];
+  let partial = false;
+  const readAll = (reader) => new Promise(res => {
+    const acc = [];
+    const step = () => reader.readEntries(batch => {
+      if (!batch.length) { res(acc); return; }     // empty batch = truly done
+      acc.push(...batch);
+      step();
+    }, () => { partial = true; res(acc); });
+    step();
+  });
+  const walk = async (entry, prefix) => {
+    if (!entry) return;
+    if (entry.name.charAt(0) === '.') return;                     // .DS_Store, .git/…
+    const path = prefix ? prefix + '/' + entry.name : entry.name;
+    if (entry.isFile) {
+      const file = await new Promise(res => entry.file(res, () => { partial = true; res(null); }));
+      if (file) out.push({ path, file });
+      return;
+    }
+    if (entry.isDirectory) {
+      const kids = await readAll(entry.createReader());
+      for (const k of kids) await walk(k, path);
+    }
+  };
+  for (const r of roots) await walk(r, '');
+  return { files: out, partial };
+}
+
+// Read a File into the stored shape: text files as `t`, binaries as ONE UNBROKEN LINE
+// of standard base64 under the reserved `b64` key (the shape api.php's search strip
+// depends on). The base64 conversion is 8 KB-chunked — a single .apply() over a
+// 512 KB buffer blows the argument-list limit.
+async function readHtmlFile(path, file) {
+  const info = htmlExtInfo(path);
+  if (info.text) return { p: path, t: await file.text() };
+  const buf = new Uint8Array(await file.arrayBuffer());
+  let bin = '';
+  for (let i = 0; i < buf.length; i += 8192) {
+    bin += String.fromCharCode.apply(null, buf.subarray(i, i + 8192));
+  }
+  return { p: path, m: info.mime, b64: btoa(bin) };
+}
+
+// Open a folder picker and hand the selection to commitHtmlUpload.
+function uploadHtmlProject(block, opts, onDone) {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.multiple = true;
+  input.setAttribute('webkitdirectory', '');
+  input.setAttribute('directory', '');            // Firefox
+  input.style.display = 'none';
+  document.body.appendChild(input);
+  // `change` never fires when the native dialog is dismissed, so the input has to be
+  // cleaned up from `cancel` too — otherwise every abandoned picker leaks a DOM node.
+  const cleanup = () => { if (input.parentNode) input.remove(); };
+  input.addEventListener('change', () => {
+    const picked = Array.from(input.files || []).map(f => ({ path: f.webkitRelativePath || f.name, file: f }));
+    cleanup();
+    if (picked.length) commitHtmlUpload(block, picked, opts || {}, onDone);
+  });
+  input.addEventListener('cancel', cleanup);
+  input.click();
+}
+
+// Build the WHOLE candidate project in a local, check the caps, and only THEN assign
+// onto the block — a rejected upload must leave the block completely untouched.
+async function commitHtmlUpload(block, picked, opts, onDone) {
+  const replace = !!(opts && opts.replace);
+  try {
+    // skip dot-prefixed segments and empty directory entries; they don't count
+    // against the cap either
+    const usable = picked.filter(p =>
+      p && p.file && !String(p.path).split('/').some(seg => seg.charAt(0) === '.'));
+    if (!usable.length) { toast('Nothing to upload'); return; }
+
+    const paths = stripCommonRoot(usable.map(p => p.path));
+    const withPaths = usable.map((p, i) => ({ path: paths[i], file: p.file })).filter(p => p.path);
+
+    let dupes = 0;
+    const byPath = new Map();
+    for (const p of withPaths) {
+      if (byPath.has(p.path)) dupes++;            // last write wins
+      byPath.set(p.path, p.file);
+    }
+    if (dupes) toast(dupes + ' duplicate path' + (dupes > 1 ? 's' : '') + ' — last one kept');
+
+    const allPaths = Array.from(byPath.keys());
+    const found = resolveHtmlEntry(allPaths);
+    let entry = found.entry;
+    if (found.ambiguous) {
+      if (!found.candidates.length) { toast('No .html file found in that folder'); return; }
+      entry = await pickHtmlEntryModal(found.candidates);
+      if (!entry) return;                          // cancelled — block untouched
+    }
+
+    const records = [];
+    for (const [p, f] of byPath) records.push(await readHtmlFile(p, f));
+
+    // candidate list for the cap decision (entry included — it's stored too)
+    const incoming = { entry, code: '', files: [] };
+    records.forEach(r => {
+      if (r.p === entry) incoming.code = r.t || '';
+      else incoming.files.push(r);
+    });
+    // Replace takes the upload wholesale; merge goes through the normative rule, which
+    // keeps EVERYTHING the block already had — an old entry the upload doesn't overwrite
+    // is demoted to a regular file rather than silently disappearing.
+    const merged = replace
+      ? { entry: incoming.entry, code: incoming.code, files: incoming.files, replaced: [], displaced: [], added: [] }
+      : mergeHtmlProject({ entry: block.entry, code: block.code, files: block.files }, incoming);
+    const candidate = merged;
+
+    const sizes = htmlFileList({ entry: candidate.entry, code: candidate.code, files: candidate.files })
+      .map(r => ({ p: r.p, bytes: r.bytes }));
+    const cap = htmlCapCheck(sizes);
+    if (!cap.ok) {
+      const top = cap.offenders.slice(0, 5).map(o => o.p + ' — ' + htmlBytesLabel(o.bytes)).join('\n');
+      // Informational, not a decision: nothing is committed either way, so this is an
+      // acknowledgement (one button) — a Cancel here would imply an alternative outcome.
+      await showAlert('Project not imported.\n\n' + cap.hard.join('\n') + '\n\nLargest files:\n' + top);
+      return;                                      // NOTHING committed
+    }
+    if (cap.soft.length) {
+      const go = await showConfirm(cap.soft.join('\n') + '\n\nUpload anyway?', { okLabel: 'Upload', danger: false });
+      if (!go) return;
+    }
+    // The ONE destructive branch: paths present on both sides lose their old content.
+    // A demote (displaced) deletes nothing, so it doesn't ask. Asked AFTER the cap and
+    // soft-warn checks so a rejected upload never poses a question it will then ignore.
+    if (merged.replaced.length) {
+      const named = merged.replaced.slice(0, 5).join(', ')
+        + (merged.replaced.length > 5 ? ' +' + (merged.replaced.length - 5) + ' more' : '');
+      const go = await showConfirm('This upload overwrites ' + merged.replaced.length + ' file'
+        + (merged.replaced.length === 1 ? '' : 's') + ' already in the project: ' + named
+        + '.\n\nThe previous content can be recovered from page History.\n\nMerge?',
+        { okLabel: 'Merge', danger: true });
+      if (!go) return;                             // block byte-identical, nothing saved
+    }
+
+    block.html = true;
+    block.type = 'html';
+    block.entry = candidate.entry;
+    block.code = candidate.code;
+    block.files = candidate.files;
+    scheduleSave();
+    if (onDone) onDone();
+    toast(sizes.length + ' file' + (sizes.length === 1 ? '' : 's') + ' imported'
+      + (merged.replaced.length ? ' · ' + merged.replaced.length + ' replaced' : '')
+      + ' · entry is now ' + candidate.entry
+      + (merged.displaced.length ? ' (' + merged.displaced.join(', ') + ' kept as a file)' : ''));
+
+    try {
+      if (currentPageData && JSON.stringify(currentPageData).length > HTML_PAGE_WARN) {
+        toast('This page is now very large — the server may reject the save (post_max_size). Consider a smaller project.');
+      }
+    } catch (e) { /* stringify of a huge page can throw — the warning is best-effort */ }
+  } catch (e) {
+    toast('Upload failed — ' + ((e && e.message) || 'unknown error'));
+  }
+}
+
+// Ask which .html file is the entry (uses the shared focus-trapping dialog).
+function pickHtmlEntryModal(candidates) {
+  let chosen = null;                    // submit() takes no args — carry the pick in a closure
+  return showModal((box, submit, cancel) => {
+    const title = document.createElement('div');
+    title.className = 'modal-title';
+    title.textContent = 'Which file is the entry point?';
+    const list = document.createElement('div');
+    list.className = 'modal-list';
+    candidates.forEach(p => {
+      const b = document.createElement('button');
+      b.className = 'secondary';
+      b.textContent = p;
+      b.onclick = () => { chosen = p; submit(); };
+      list.appendChild(b);
+    });
+    const btns = document.createElement('div');
+    btns.className = 'modal-btns';
+    const c = document.createElement('button');
+    c.className = 'secondary';
+    c.textContent = 'Cancel';
+    c.onclick = cancel;
+    btns.appendChild(c);
+    box.append(title, list, btns);
+    setTimeout(() => { const f = list.querySelector('button'); if (f) f.focus(); }, 0);
+  }, () => chosen);
 }
 
 function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh, subsectionsArray) {
@@ -2698,6 +4392,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
   if (block.rich) return renderRichBlock(block, parentArray, idx);
   if (block.csv) return renderCsvBlock(block, parentArray, idx);
   if (block.json) return renderJsonBlock(block, parentArray, idx);
+  if (block.html) return renderHtmlBlock(block, parentArray, idx);
 
   const el = document.createElement('div');
   // stay in edit mode if an edit session backup exists for this block
@@ -2781,6 +4476,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     // (Re)baseline this edit session to the current code, so the button reads
     // "Cancel" until you actually change something — even when re-entering a
     // block you previously edited and clicked away from.
+    beforeEditSession();               // BEFORE .viewing drops (the predicate is DOM-derived)
     blockBackups.set(block, block.code || '');
     el.classList.remove('viewing');
     updatePreview();   // show the raw template (with markers) while editing
@@ -2801,8 +4497,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     renderVarsPanel();          // refresh block-level var fields for added/removed _V_…_V_
     refreshSectionVars();       // …and the section variables panel, if section-owned
     updatePreview();
-    savePage();
-    toast('Saved');
+    savePage();   // announces 'Saved' itself, once the write is CONFIRMED
   });
   saveBtn.className = 'block-save';
   if (isMobile) { saveBtn.textContent = '✓'; saveBtn.title = 'Save'; }
@@ -2830,7 +4525,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
       renderVarsPanel();          // code reverted → refresh var fields
       refreshSectionVars();
       updatePreview();
-      savePage();                 // persist the revert (overrides autosaved edits)
+      afterEditSession();         // persist the revert only if it isn't provably a no-op
       refreshRevertLabel();       // back to "Cancel" now that it's clean
       textarea.focus();
       toast('Reverted');
@@ -2842,6 +4537,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
       else { codeWrap.style.height = ''; userCodeH = 0; }   // drop any manual code-editor resize on exit
       renderVarsPanel();
       updatePreview();
+      afterEditSession();
     }
   });
   revertBtn.className = 'secondary block-revert';
@@ -2900,7 +4596,12 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     const code = block.code || '';
     let parts = code.split(/\n[ \t]*\n[ \t]*\n*/).map(s => s.replace(/^\n+|\n+$/g, '')).filter(s => s.trim() !== '');
     if (parts.length < 2) {
-      const pos = (document.activeElement === textarea) ? textarea.selectionStart : 0;
+      // Use the caret REMEMBERED from the live edit session (lastCaret, recorded by
+      // updateActiveLine), not document.activeElement — by the time this runs the ⋯
+      // menu owns focus. In view mode there is no caret, so 0 keeps the existing
+      // "add a blank line or place the cursor" semantic (as does a caret at 0 or at
+      // the very end — neither is a split point).
+      const pos = el.classList.contains('viewing') ? 0 : lastCaret;
       if (pos > 0 && pos < code.length) parts = [code.slice(0, pos).replace(/\n+$/, ''), code.slice(pos).replace(/^\n+/, '')];
     }
     if (parts.length < 2) { toast('Nothing to split — add a blank line or place the cursor'); return; }
@@ -2960,7 +4661,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     items.push({ divider: true });
     BLOCK_KINDS.forEach(k => items.push({
       icon: k.icon, label: k.label, active: blockKind(block) === k.kind,
-      onClick: () => { convertBlock(block, k.kind); renderPage(); scheduleSave(); },
+      onClick: () => confirmKindChange(block, k.kind, () => { convertBlock(block, k.kind); renderPage(); scheduleSave(); }),
     }));
     // Copy-as formats (replaces the "▾" button, folded into ⋯ on mobile).
     items.push({ divider: true });
@@ -3043,6 +4744,11 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
     }
     updateActiveLine();
   }
+  // Last caret offset seen while this block was in an EDIT session. Split reads it
+  // instead of document.activeElement: its only UI route is the block ⋯ menu, and
+  // showMiniMenu moves focus to its first item on open, so an activeElement check
+  // never matched and caret-Split was dead (it always fell back to pos 0 and refused).
+  let lastCaret = 0;
   // Highlight the gutter number for the caret's line — only while editing.
   function updateActiveLine() {
     const lines = gutter.children;
@@ -3051,6 +4757,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
       return;
     }
     const pos = textarea.selectionStart || 0;
+    lastCaret = pos;   // remembered here, while the textarea still owns the caret
     const idx = (textarea.value.slice(0, pos).match(/\n/g) || []).length;
     for (let i = 0; i < lines.length; i++) lines[i].classList.toggle('active', i === idx);
   }
@@ -3144,11 +4851,9 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
   // while a block sits in edit mode. The old blur handler's side-effects (updateActiveLine/
   // renderVarsPanel/refreshSectionVars/updatePreview) only prepped the view-mode render and
   // already run on Save and on live input, so they're not needed on blur.
-  textarea.addEventListener('keydown', (e) => {
-    // Esc = a quick "done": same path as the Cancel/Revert button (cancels when
-    // clean, reverts when dirty), so blocks don't pile up open without a mouse exit.
-    if (e.key === 'Escape') { e.preventDefault(); revertBtn.click(); }
-  });
+  // Esc = a quick "done" (cancels when clean, reverts when dirty), so blocks don't pile
+  // up open without a mouse exit. Shared with the other five kinds — see wireEscapeRevert.
+  wireEscapeRevert(textarea, revertBtn);
 
   const view = document.createElement('div');
   view.className = 'code-view';
@@ -3231,6 +4936,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
   stack.append(view, textarea);
   codeWrap.append(gutter, stack);
   el.append(toolbar, varsPanel, codeWrap);
+  wireFocusFlush(el);
   // If this block re-rendered while mid-edit (a backup exists → not 'viewing'),
   // fit the editor once it's in the DOM (scrollHeight is 0 until attached).
   if (!el.classList.contains('viewing')) requestAnimationFrame(() => { if (block.note) autosizeNote(); else autosizeCode(); });
@@ -3255,7 +4961,7 @@ function editorCapPx() {
         .forEach(ta => { if (ta._autosize) ta._autosize(); });
       document.querySelectorAll('.block:not(.note):not(.viewing) .code-wrap')
         .forEach(cw => { if (cw._autosize) cw._autosize(); });
-      document.querySelectorAll('.block.csv:not(.viewing) .csv-edit, .block.json:not(.viewing) .json-edit')
+      document.querySelectorAll('.block.csv:not(.viewing) .csv-edit, .block.json:not(.viewing) .json-edit, .block.html:not(.viewing) .html-edit')
         .forEach(ta => { if (ta._autosize) ta._autosize(); });
     }, 120);
   };
@@ -3275,9 +4981,97 @@ function editorCapPx() {
 let pageDirty = new Set();
 
 function scheduleSave() {
-  if (currentPagePath) pageDirty.add(currentPagePath);
-  if (saveTimer) clearTimeout(saveTimer);
+  if (currentPagePath) pageDirty.add(currentPagePath);   // UNCHANGED choke point
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+  // Defer the NETWORK write while a block editor is open, so an edit the user intends
+  // to Cancel never reaches the server and never burns a HISTORY_KEEP slot. Only the
+  // debounced write is skipped — the page stays DIRTY, and every editor assigns
+  // block.code on `input` BEFORE calling scheduleSave, so currentPageData always holds
+  // the live buffer and flushSave (tab switch / unload) still persists it. That
+  // property is what the whole deferral rests on; don't break it.
+  if (anyBlockEditing()) return;
   saveTimer = setTimeout(savePage, 500);
+}
+
+// Whole-page snapshot taken when an edit session begins on an otherwise-clean page.
+// If the page is byte-identical at session end (a Cancel/Revert that undid everything),
+// the page is provably back to the persisted state and the write can be skipped
+// entirely — that is what makes Cancel cost ZERO history versions.
+const SNAPSHOT_MAX = 262144;   // don't stringify a 1 MB html-project page twice per session
+let cleanPageSnapshot = null;
+
+// Serialize a page for identity comparison. Returns null when it can't (cycles) or when
+// it's over `limit` — callers treat null as "can't prove clean". PURE, NEVER THROWS.
+function safeStringify(data, limit) {
+  try { const s = JSON.stringify(data); return (s && s.length <= (limit || SNAPSHOT_MAX)) ? s : null; }
+  catch (e) { return null; }
+}
+
+// Capture the clean baseline as a block edit session BEGINS. Called from each
+// enterEdit BEFORE the element drops `.viewing` — the predicate is DOM-derived, so
+// the order matters (this must see "no editor open yet").
+function beforeEditSession() {
+  if (anyBlockEditing() || !currentPagePath || pageDirty.has(currentPagePath)) return;
+  cleanPageSnapshot = safeStringify(currentPageData);
+}
+
+// Called when a block edit session ENDS (Cancel / completed Revert).
+function afterEditSession() {
+  if (anyBlockEditing()) return;                       // another editor still open → stay deferred
+  if (cleanPageSnapshot != null && safeStringify(currentPageData) === cleanPageSnapshot) {
+    if (currentPagePath) pageDirty.delete(currentPagePath);   // provably back to the persisted state
+  }
+  cleanPageSnapshot = null;
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+  // Deliberately NOT scheduleSave() — that would re-mark the page dirty. scheduleSave
+  // stays the single dirty-marking choke point; this only arms the deferred timer.
+  if (currentPagePath && pageDirty.has(currentPagePath)) saveTimer = setTimeout(savePage, 500);
+}
+
+// Dead-letters WE parked for a rejected save, keyed by page path → dl id. A repeated
+// failure on the same page supersedes our own entry instead of stacking one full-page
+// snapshot per autosave burst (each entry carries the whole page — 1 MB for an
+// html-project page). Only ids this session created are ever replaced: a dead-letter
+// parked by flushQueue is a DIFFERENT op (its own content) and is never touched.
+const saveDeadLetters = new Map();
+
+// A save the SERVER REJECTED. apiFetch deliberately RESOLVES for a reachable server's
+// 4xx (a 4xx is a real response, not "offline" — see the apiFetch gotcha) and for a
+// malformed 200 (core.js tags it `_transient`), so an error body used to fall straight
+// through to `pageDirty.delete()` + toast('Saved'): the user was told the write
+// succeeded, the page went clean, and after a reload the edit existed NOWHERE. Route it
+// into the same anti-silent-loss machinery flushQueue uses:
+//   • `_transient` (unparseable body — usually a passing server hiccup) → the write
+//     QUEUE, whose existing policy retries it 3× across flush cycles then parks it;
+//   • terminal 4xx (invalid path / missing parent folder / missing CSRF header) → parked
+//     STRAIGHT as a dead-letter: it can never succeed as-is, so retrying would only churn.
+// Either way the edit lands in IndexedDB, so it SURVIVES A RELOAD and is reviewable in
+// the dead-letter panel (the red badge / sidebar ⋯ / command palette). Only once it is
+// durably captured elsewhere may the page leave pageDirty — the same rule the offline
+// branch already uses. If even parking fails (IndexedDB unavailable/full) the page stays
+// DIRTY so a later flush retries. NEVER reports success.
+async function handleSaveError(path, res, data) {
+  const reason = (res && res.error) || 'save rejected';
+  // Park EXACTLY the content the rejected request carried (each caller passes the same
+  // object it sent), forced — a replay must not re-conflict on a stale baseMtime.
+  const op = { action: 'save_page', body: { path, data: data || currentPageData, force: true } };
+  try {
+    if (res && res._transient) {
+      await enqueue(op);
+      toast('Save failed: ' + reason + ' — queued to retry');
+    } else {
+      const prev = saveDeadLetters.get(path);
+      const entry = await dlAdd(op, reason, 'terminal');
+      if (entry && entry.id) saveDeadLetters.set(path, entry.id);
+      if (prev) await dlRemove(prev);      // our own superseded snapshot of this page
+      toast('Save failed: ' + reason + ' — kept in unsynced changes');
+    }
+    // An edit that arrived mid-save (savePending) is NOT captured by the op above, so
+    // stay dirty and let the finally-block re-save carry it (mirrors the success path).
+    if (!savePending) pageDirty.delete(path);
+  } catch (e) {
+    toast('Save failed: ' + reason);       // page stays dirty → a later flush retries
+  }
 }
 
 async function savePage() {
@@ -3287,6 +5081,7 @@ async function savePage() {
   // one lands after the first bumped the file's mtime → a false conflict prompt.
   // While a save is in flight, mark dirty and re-save once it returns instead.
   if (saveInFlight) { savePending = true; return; }
+  cleanPageSnapshot = null;   // once we write, the snapshot no longer describes disk
   saveInFlight = true;
   const savedPath = currentPagePath;
   try {
@@ -3294,6 +5089,9 @@ async function savePage() {
     const baseMtime = tab ? tab.baseMtime : null;
     const res = await api('save_page', { path: savedPath, data: currentPageData, baseMtime });
     if (res && res.conflict) { await handleSaveConflict(savedPath, res.mtime); return; }
+    // The server REJECTED the write (4xx body, or a malformed 200) — park/queue it so
+    // the edit is recoverable, and never toast 'Saved'. See handleSaveError.
+    if (res && res.error) { await handleSaveError(savedPath, res, currentPageData); return; }
     if (res && res.offline) {
       // Queued offline: we don't know whether the request actually reached the
       // server before it dropped (a NAS timeout can write the file yet lose the
@@ -3311,7 +5109,14 @@ async function savePage() {
     // the finally-block re-save clears it once THAT save lands, closing any window where
     // an unload could skip a genuinely-dirty page.
     if (!savePending) pageDirty.delete(savedPath);
-    toast('Saved');
+    // savePage is the SINGLE 'Saved' announcer, and it only speaks AFTER the write is
+    // confirmed. The five block-Save handlers used to fire their own synchronous
+    // toast('Saved') beside an un-awaited savePage(): on the healthy path that announced
+    // twice through the aria-live channel, and on a rejected save it announced success a
+    // full request-window BEFORE handleSaveError contradicted it — the exact false-success
+    // the rejected-save fix exists to remove. A queued OFFLINE write is durable but is not
+    // on the server yet, so it says so rather than borrowing "Saved".
+    toast(res && res.offline ? 'Saved offline — will sync' : 'Saved');
   } finally {
     saveInFlight = false;
     // Flush any edits that arrived while the request was outstanding; baseMtime
@@ -3330,6 +5135,11 @@ async function handleSaveConflict(path, diskMtime) {
   );
   if (overwrite) {
     const res = await api('save_page', { path, data: tab ? tab.data : currentPageData, baseMtime: diskMtime, force: true });
+    // Same blind spot as savePage's main path: a FORCED resend the server still rejects
+    // (the folder was deleted meanwhile, a bad path, a missing CSRF header) resolves like
+    // a success. Park it instead of announcing an overwrite that never happened — this is
+    // exactly what flushQueue does with a conflict-force that still errors.
+    if (res && res.error) { await handleSaveError(path, res, tab ? tab.data : currentPageData); return; }
     if (tab && res && res.mtime != null) tab.baseMtime = res.mtime;
     pageDirty.delete(path);
     toast('Saved (overwrote disk version)');
@@ -3355,6 +5165,7 @@ function flushSave(opts) {
   // / unload on an unchanged page must do NOTHING (no forced save → no history
   // snapshot, no mtime bump). Call sites stay unconditional; the gate lives here.
   if (!pageDirty.has(currentPagePath)) return;
+  cleanPageSnapshot = null;   // once we write, the snapshot no longer describes disk
   const path = currentPagePath, data = currentPageData;
   const tab = openPages.find(t => t.path === path);
   if (opts && opts.keepalive) {
@@ -3369,7 +5180,13 @@ function flushSave(opts) {
     const requeue = () => { try { enqueue({ action: 'save_page', body: { path, data, force: true } }); } catch (e) {} };
     try {
       const p = fetch('api.php?action=save_page', { method: 'POST', keepalive: true, headers: apiHeaders(), body });
-      if (p && p.catch) p.catch(requeue);
+      // A REFUSED fetch rejects → requeue. But a fetch that RESOLVES with a 4xx is a
+      // rejected write too (deleted parent folder, bad path, missing CSRF header) and was
+      // just as silently dropped, so requeue on !ok as well: the queue replays it and, if
+      // the server rejects it again, flushQueue parks it as a reviewable dead-letter.
+      // Best-effort by nature — on visibilitychange→hidden (the PRIMARY trigger) the
+      // document is still alive so this handler runs; on beforeunload it may not.
+      if (p && p.then) p.then(r => { if (r && !r.ok) requeue(); }, requeue);
     } catch (e) { requeue(); }
     // No usable response on unload → drop the cached baseMtime so returning to the tab
     // and typing one char doesn't false-conflict against our own keepalive write.
@@ -3378,7 +5195,13 @@ function flushSave(opts) {
     return;
   }
   api('save_page', { path, data, force: true })
-    .then(res => { if (tab && res && res.mtime != null) tab.baseMtime = res.mtime; pageDirty.delete(path); });
+    .then(res => {
+      // Same blind spot as savePage: an error body resolves like a success. Park it and
+      // keep the page dirty rather than clearing the flag on a write that never landed.
+      if (res && res.error) return handleSaveError(path, res, data);
+      if (tab && res && res.mtime != null) tab.baseMtime = res.mtime;
+      pageDirty.delete(path);
+    });
 }
 
 // Persist a dirty page if the tab is hidden/closed. visibilitychange→hidden is the

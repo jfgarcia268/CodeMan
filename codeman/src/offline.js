@@ -340,6 +340,11 @@ async function probeBackend() {
   if (!offlineState) return true;
   try {
     const fresh = await apiFetch('tree');         // reachable? (throws/aborts if not)
+    // apiFetch only THROWS on unreachable/5xx — a 200 with {error:…} or an unparseable
+    // body comes back as an object, so an unguarded write here poisoned the PERSISTED
+    // mirror as well as treeData. Reachable-but-malformed = still not usable: keep the
+    // cache + tree as they are and stay offline so the backoff loop retries.
+    if (!Array.isArray(fresh)) { scheduleReconnect(); return false; }
     await kvSet('tree', fresh);
     setTreeData(fresh); renderTree();
     setOffline(false);                            // clears state + flushes the queue
@@ -422,8 +427,13 @@ async function flushQueue() {
     }
     if (!syncQueue.length) {
       const fresh = await apiFetch('tree');     // reconcile cache with server truth
-      await kvSet('tree', fresh);
-      setTreeData(fresh); renderTree();
+      // Same shape guard as probeBackend: a malformed 200 body must not overwrite the
+      // mirror. The queued writes DID land, so the sync still reports success — only
+      // the reconcile is skipped (the next probe/loadTree picks it up).
+      if (Array.isArray(fresh)) {
+        await kvSet('tree', fresh);
+        setTreeData(fresh); renderTree();
+      }
       if (dead) toast('Synced — ' + dead + ' change' + (dead === 1 ? '' : 's') + ' could not sync (review)');
       else if (conflicts) toast('Synced — ' + conflicts + ' conflict' + (conflicts === 1 ? '' : 's') + ' overwritten (prior versions in History)');
       else toast('Synced');
@@ -433,11 +443,26 @@ async function flushQueue() {
 }
 
 // Keep the IndexedDB mirror current after a successful backend call.
+// NEVER mirror a response the caller can't actually use. apiFetch RESOLVES (rather than
+// throwing) for a reachable server's 4xx body and for a malformed 200 (the `_transient`
+// error object), so an unguarded write here overwrote a GOOD mirror with garbage — and it
+// ran BEFORE the caller could fall back to that mirror. That's what made a malformed
+// `tree` response empty the library even WITH loadTree's fallback: by the time loadTree
+// read the mirror, cacheOnSuccess had already poisoned it. Shape-check per action.
 async function cacheOnSuccess(action, body, query, data) {
   try {
-    if (action === 'tree') await kvSet('tree', data);
-    else if (action === 'col_sorts') await kvSet('colsorts', data);
-    else if (action === 'get_page') { const p = (body && body.path) || qparam(query, 'path'); if (p) { const copy = Object.assign({}, data); delete copy._mtime; await pageSet(p, copy); } }
+    if (data && data.error) return;                       // an error body is not content
+    if (action === 'tree') { if (Array.isArray(data)) await kvSet('tree', data); }
+    else if (action === 'col_sorts') { if (data && typeof data === 'object' && !Array.isArray(data)) await kvSet('colsorts', data); }
+    // get_page is deliberately the LOOSE check: guard strictness is proportional to blast
+    // radius. A non-array `tree` CRASHES navigation, so that one stays strict — but an
+    // unusual-yet-VALID page (a hand-written / imported `{title:"X"}` with no sections) is
+    // not an error response, and demanding sections made it permanently uncacheable:
+    // primeOfflineCache skipped it and it rendered blank offline with no warning. The
+    // guard's job is to reject ERROR bodies (done above, plus the plain-object test here,
+    // which also rejects a malformed array/scalar 200); the render path already tolerates
+    // a missing `sections` (openPage defaults it to []).
+    else if (action === 'get_page') { const p = (body && body.path) || qparam(query, 'path'); if (p && data && typeof data === 'object' && !Array.isArray(data)) { const copy = Object.assign({}, data); delete copy._mtime; await pageSet(p, copy); } }
     else if (action === 'save_page' && body) { const copy = Object.assign({}, body.data); delete copy._mtime; await pageSet(body.path, copy); }
     else if (action === 'delete' && body) await pageDel(body.path);
   } catch (e) {}
@@ -742,8 +767,13 @@ async function mutateTreeCache(action, body) {
     await rekeyCachedPaths(pairs);
   } else if (action === 'reorder') {
     const list = childrenOf(body.parent || ''); if (!list || !Array.isArray(body.order)) return;
-    const key = (n) => n.type === 'folder' ? n.name : n.name + '.json';
-    list.sort((a, b) => body.order.indexOf(key(a)) - body.order.indexOf(key(b)));
+    // Route through the SAME comparator the server uses (tree.js). The old
+    // indexOf-difference sort modelled neither of buildTree's outer tiers: no
+    // folders-before-pages, and an entry absent from `order` scored indexOf === -1 so
+    // it sorted FIRST where the server sorts it LAST. Latent while every reorder came
+    // from a drag (which always sends the full list) — load-bearing now that a
+    // library-shape import sends `order: []` to mean "back to the default order".
+    sortChildrenLikeBuildTree(list, body.order);
   }
   await kvSet('tree', tree);
   // In-place mutation above → route through setTreeData so the folder-aggregate memos

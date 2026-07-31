@@ -98,8 +98,8 @@ story is squarely "non-trivial."
 | `api.php` | Filesystem API: tree, page CRUD, move, reorder, content/block search, metadata index, projects, trash, history, save-conflict detection, find & replace, tag rename, optional password gate. |
 | `vendor/prism/` | Vendored Prism (core + autoloader + grammars + theme) — **no CDN**, works offline. Grammars autoload on demand; an unviewed language won't highlight offline until first rendered. |
 | `vendor/markdown-it/` | Vendored **markdown-it** (v14, single UMD file) — **no CDN**, offline. Backs `renderMarkdown` for **note blocks** (full CommonMark + GFM). Loaded as a static `<script>` before the `src/*.js` modules so `window.markdownit` exists when `editor.js` builds its instance. See the markdown-it gotcha. |
-| `tests.html` | Standalone **client** browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + `richToPlainText`/`convertBlock`/`parseCsv`/`parseJsonSafe`/`jsonPath`/`assembleRestoredTabs`/`uniqueCopyName` + deep-search cap + offline trash/history reducers (snapshots/restores the real IndexedDB cache — incl. `dl:` dead-letter keys — safe to run) + `sanitizeRichHtml` + `flushQueue` replay (FIFO/conflict-force/failure-retains + **dead-letter parking**: terminal/transient-exhausted/conflict-force-error, retry, `__codemanAdoptInto` merge, against stubbed `apiFetch`) + `importPages` negatives. Open it in a browser; ~224 assertions, expect `0 failed`. `window.__testResult = {pass, fail, done}` — CI runs it headless via `.github/scripts/run-client-tests.mjs` and enforces a pass-count FLOOR (bump it there when adding assertions). |
-| `tests-api.sh` | Standalone **server** API tests (bash + curl, no deps). Spins a throwaway `php -S` against a temp `CODEMAN_DATA` dir and asserts api.php behavior the browser can't reach: path-traversal confinement, parent-dir guards, unicode `search_content`, same-second history retention, `empty_trash` history-prune + its traversal guard, save-conflict detection (stale `baseMtime` → conflict + untouched file; `force` → history snapshot), the project-nesting `move` guard, the `rename` traversal guard, the `restore_trash` round-trip, `replace_content` (preview dry-run / literal / regex), `rename_tag` (rename/merge/delete), and the password gate. `bash codeman/tests-api.sh` (exit 0 = green; hunts upward from its port if taken, so parallel/CI runs don't collide). |
+| `tests.html` | Standalone **client** browser tests: pure helpers + merge/markdown/diff/link/block-search/reorder/`pageToHtml` + project helpers (`pathPrefixes`/`projectChain`/`isValidProjectParent`) + `richToPlainText`/`convertBlock`/`parseCsv`/`parseJsonSafe`/`jsonPath`/`assembleRestoredTabs`/`uniqueCopyName` + deep-search cap + offline trash/history reducers (snapshots/restores the real IndexedDB cache — incl. `dl:` dead-letter keys — safe to run) + `sanitizeRichHtml` + `flushQueue` replay (FIFO/conflict-force/failure-retains + **dead-letter parking**: terminal/transient-exhausted/conflict-force-error, retry, `__codemanAdoptInto` merge, against stubbed `apiFetch`) + `importPages` negatives + the **HTML-project** helpers (`normalizeHtmlPath`/`resolveHtmlPath`/`isAbsoluteRef`/`stripCommonRoot`/`htmlExtInfo`/`resolveHtmlEntry`/`htmlFileList`/`htmlProjectSize`/`htmlCapCheck`/`htmlBundleKey`/`parseSrcset`/`serializeSrcset`/`pickSrcsetCandidate`/`parseImageSet`/`setHtmlEntry` + `bundleHtmlProject` incl. its three warning layers + the `blockKind` `block.html`-vs-`type:'html'` trap guard) + the **rendered html-block iframe's sandbox attribute** + `apiFetch`'s network classification (4xx / malformed body / 5xx / timeout / wrong-password token clear, against a stubbed `window.fetch`) + the **rich sanitizer's expanded allowlist** (`richImgSrc`/`richIntAttr`/`richToMarkdown` matrices, the two table invariants, foster-parent + foreign-content guards) + the **autosave-deferral** contract (`anyBlockEditing` incl. a per-`BLOCK_KINDS` pin, `scheduleSave` defers-but-still-marks-dirty, `safeStringify`, `afterEditSession`, the focus-flush **teardown** guard, and **Esc parity** across all six edit-session kinds) + `miniMenuClampPos` (the `anchorRect` viewport clamp: fits-unchanged / overflow / exact-fit boundary) + `miniMenuShift` (the same guard for `align:'right'`, as a `{dx,dy}` on the RENDERED rect: fits-unchanged / left+right overflow / exact-fit boundary / both axes) + **`showMiniMenu` itself** (the pure clamps' WIRING — a real menu opened in all three positioning modes at a fitting AND an overflowing viewport, asserting the applied `top`/`left`/`transform`, incl. `transform:'none'` on the `dx` branch — plus the full ARIA/keyboard/dismissal contract: roles, `aria-expanded` on open AND close, focus-on-open (and on the `checked` row), Arrow wrap, Home/End, Enter/Space, Escape/Tab → focus back on the anchor, outside-click, page-scroll, same-anchor toggle, one menu closing another via `_close`) + **`beforeEditSession` driven through the real `enterEdit`** (the snapshot must be captured, and captured BEFORE `.viewing` drops) + the **per-render-path wiring** (the focus flush asserted THROUGH `renderBlock`; a no-op Revert clearing `pageDirty` in every session-bearing kind; a `.toString()` census that all five paths wire all four hooks) + `anyBlockEditing`'s fail-OPEN catch + the **real `runDeepSearch` render cap** (a stubbed `search_content` returning 500 paths ⇒ 200 rendered + the "first N of M" banner) + `RICH_SOFT_WARN` (warns once, never truncates) + the computed `.modal-title` `white-space` against the real `style.css` + the **malformed-`tree` shape guard** (`setTreeData` rejects every non-array shape and keeps the last good tree; `loadTree` falls back to the offline mirror, flags offline and toasts; navigation afterwards does not throw — the pre-fix code fails 9 of these, one with the live crash `nodes is not iterable`) + **caret-Split through the real `⋯` menu** (rendered block → real Edit → caret at an offset → the menu takes focus → the Split item splits AT the caret, not at 0) + the **rejected-save contract** (the REAL `savePage` against a stubbed `api`: a terminal 4xx parks a forced dead-letter carrying the edit and never toasts "Saved", a repeat supersedes our own entry, a `_transient` body goes to the retry QUEUE instead, and the conflict / conflict-force-rejected / offline-queued / healthy-save branches are each pinned so the new branch can't have reordered them) + the **`importPages` POSITIVE round-trip** (a foldered bundle through the REAL `importPages` against a stub that MODELS api.php's parent guards: the exact create_folder parent at depth 1/2/3 incl. a multi-word name, every page landing, and a failure REPORTED not swallowed — the coverage was negatives-only, which is why D-B1 shipped) + the **offline tree-row Duplicate hit/miss discriminator** (a primed-but-unopened page duplicates through the real `duplicatePageFromTree`→`api()`→`offlineApi`→IndexedDB; a genuine miss is still refused) + the **single-'Saved'-announcer contract** (a real `renderBlock` Save: silent until the api call RESOLVES, exactly one "Saved", none on a rejection, the offline wording, plus a `.toString()` census that no render path re-adds its own `toast('Saved')`) + the **note/rich wide-table geometry** (measured against the real `style.css`: 20 columns keep single-line cells AND scroll, while a 400-char prose token still wraps inside the block — the cell-scoped `overflow-wrap` reset) + the **JSON-bundle scope note** (the REAL `exportAll` announcing via `showAlert` — count + what a bundle does NOT carry, multi-line for `pre-line` — with no toast repeating it, and the REAL `importPages` carrying the short caveat for a bundle but NOT for a single page or a zero-page import) + the **library-shape sidecar** (`defaultChildOrder` against the cross-language `SORT_ORACLE_JSON` corpus that `tests-api.sh` asserts against the REAL `buildTree`; `asciiFold`/`cmpUtf8`/`orderKey`/`isDefaultChildOrder`; `sortChildrenLikeBuildTree` **through the real `mutateTreeCache`**; `safeSidecarPath`'s reject matrix; `buildLibraryMeta` (project flags, `order` omitted-when-default / present-when-dragged, `rootOrder`, colSort + favourites filtering, never-throws) and `readLibraryMeta`'s null contract — plus ten scenarios through the REAL `importPages`: the empty-library round trip (exact create kinds parent-first, the empty folder, the exact `reorder`/`set_col_sort` payloads, favourites merged), no spurious order, the `order:[]` artifact clear, **merge restraint** into a non-empty library, `create_project` never SENT with a plain-folder parent, hostile paths rejected+counted, a layout failure reported, a malformed sidecar degrading to pages-only, an old sidecar-less bundle byte-identical to today, and the stale-`known` retry) + the **SIBLING call sites of the same fixes**, added after a mutation audit found 36 of 128 injected regressions shipping green (`flushSave`'s rejected-save park — the tab-switch half, whose deletion left the whole suite green; the keepalive/unload requeue on a RESOLVED `!ok`; the parked op carrying the REQUEST's page not the tab we switched to; `savePending` retention; a park that THROWS keeping the page dirty; `probeBackend` + `flushQueue`'s reconcile shape guards; the Trash/History panels' "Could not load…"; Find & Replace's open-tab shape guard; `wireFocusFlush`'s two SYNC guards (in-block `relatedTarget`, open `.mini-menu`) each proved suppressing by a control that DOES flush; `folderFailed` reaching the toast; favourites merge-not-replace + the bundle filter; `readLibraryMeta`'s never-throw) + the **second sweep's remaining sibling/control gaps** (`cacheOnSuccess`'s THIRD per-action guard `col_sorts` — five wrong shapes leave the persisted `colsorts` mirror intact, with a positive control that a valid object still refreshes it; Find & Replace's reconcile instrumented so `get_page` must actually be REACHED, plus the positive control that a valid reply REPLACES `tab.data`/`baseMtime`/`currentPageData` — the three "unchanged" assertions there were satisfied by the loop never running at all; and the oracle's `Cap`/`cap` same-type case pair, the only input that reaches `cmpUtf8`'s raw-byte tier) + the **sidecar import/export path's unpinned guards** (`readLibraryMeta`'s `strs()` filter across ALL THREE consumers — a folder's `order`, `rootOrder`, `client.favorites` — asserted on the reader AND on the `reorder` PAYLOAD the real `importPages` sends; `buildLibraryMeta`'s EXPORT-side `dir` normalisation, whose import-side twin was already pinned; the stale-`known` retry in BOTH directions — a non-parent `create_page` rejection rebuilds NO chain and pulls no existing folder into the layout phase, controlled by a genuine `parent folder does not exist` run that DOES rebuild, retry and reorder; and an ORPHAN sidecar folder entry never being SENT, controlled by a legitimate sibling entry in the same run that is) + the **third batch's last four gaps** (the VIEW-mode half of caret-Split's one-line guard — `lastCaret` outlives the edit session, so Split on a read-only block must refuse rather than tear it at a stale offset, driven through the same real `⋯` harness and controlled by the same block re-entered for editing; the client half of the duplicate-`.order.json`-key divergence, FIRST-wins, pinned beside the server's LAST-wins in `tests-api.sh`; and the **`.toast` max-width cap** measured on real geometry against the real `style.css` inside a **375px iframe** — the longest composed import message keeps a 16px gutter on both edges, a wide viewport gets the fixed 460px arm, and the control is that a short `Saved` stays shrink-to-fit, which is what a `width` in place of the `max-width` would break) + the **`commitHtmlUpload` cap-atomicity + upload-time `stripCommonRoot`** (the ORCHESTRATOR the pure html helpers feed, previously uncovered: a merge upload whose file blows the 512 KB per-file cap leaves the block byte-identical — `JSON.stringify` pre === post — and calls no `onDone`, while an under-cap upload strips the shared `up/` root off the stored entry AND file paths; driven through the real async function against File-like `{text()}` descriptors, stubs for toast/showAlert/showConfirm/scheduleSave) + the **offline rename/move re-key APPLY step** (`collectRepathPairs`→`rekeyCachedPaths` over a folder node, the exact pipeline `mutateTreeCache` runs: the cached page BODY and its per-page `history:<path>` log both move to the new key and the old keys are gone — the compute step was tested, the apply step had none). Open it in a browser; **932 assertions**, expect `0 failed`. `window.__testResult = {pass, fail, done}` — CI runs it headless via `.github/scripts/run-client-tests.mjs`, which asserts `pass === FLOOR` **exactly** (not `>=`: a `>=` floor is silent when a change deletes 5 assertions and adds 6 — so bump FLOOR whenever the total moves, in either direction) and fails on any uncaught page error. |
+| `tests-api.sh` | Standalone **server** API tests (bash + curl, no deps). Spins a throwaway `php -S` against a temp `CODEMAN_DATA` dir and asserts api.php behavior the browser can't reach: path-traversal confinement, parent-dir guards (`create_page`/`save_page`/**`create_folder`**), unicode `search_content`, same-second history retention, `empty_trash` history-prune + its traversal guard, save-conflict detection (stale `baseMtime` → conflict + untouched file; `force` → history snapshot), the project-nesting `move` guard, the `rename` traversal guard, the `restore_trash` round-trip, `replace_content` (preview dry-run / literal / regex), `rename_tag` (rename/merge/delete), the **create-then-save stub guard** (create_page→save_page leaves ZERO history versions and no listed version whose restore would empty the page, while a deliberately-emptied page and a title-only page still version normally, and — the FAIL-OPEN half — prior on-disk content that will not DECODE is never read as the stub, so a corrupt/externally-edited page is snapshotted rather than discarded, and — the EXACT-KEYS half — a prior page carrying an EXTRA top-level key alongside an empty `sections` and a filename-derived title is not the stub either, so its first real save still reaches history), the **library-shape restore's server-side contract** (`buildTree`'s default child order against the shared `SORT_ORACLE_JSON` corpus created DIRECTLY ON DISK — the cross-language half of the comparator-parity proof; `reorder {order: []}` proved behaviourally identical to having no `.order.json` at all, which is what makes the artifact-clear defensible; and a PIN that `create_folder` on an ALREADY-EXISTING folder still `prependOrder`s it, so the client-side skip is understood as the fix and a future server change is caught; plus the server side of the **duplicate-`.order.json`-key divergence** — `array_flip` keeps the LAST occurrence, the client's `sortChildrenLikeBuildTree` the FIRST, so both are pinned rather than left to drift), and the password gate. `bash codeman/tests-api.sh` (exit 0 = green; hunts upward from its port if taken, so parallel/CI runs don't collide). |
 
 **No build step.** The `src/*.js` files are plain classic scripts sharing one global scope;
 the load order in `index.html` *is* the dependency order. Edit a file, reload the browser.
@@ -137,7 +137,10 @@ the load order in `index.html` *is* the dependency order. Edit a file, reload th
   `items:[{text,done}]`), **csv** (`csv:true`, raw CSV text in `code` rendered as a table in
   view mode — `parseCsv`/`renderCsvBlock` in `editor.js`), **json** (`json:true`, raw JSON text
   in `code` rendered as a collapsible copy-path tree in view mode — `parseJsonSafe`/
-  `renderJsonBlock` in `editor.js`). `blockKind()` derives the kind;
+  `renderJsonBlock` in `editor.js`), **html** (`html:true`, a small static web project stored
+  INLINE — `entry` + the entry's source in `code` + every other file in `files:[{p,t}|{p,m,b64}]`
+  + `htmlH` preview height — rendered by `bundleHtmlProject`/`renderHtmlBlock` into a sandboxed
+  `<iframe srcdoc>`). `blockKind()` derives the kind;
   `convertBlock()` switches a block to any other kind carrying text across.
 - **Legacy shape:** older sections wrapped content in `tabs:[{name,blocks,subsections}]`.
   The tabs feature was removed, but `sectionContent(section)` transparently reads both
@@ -151,6 +154,24 @@ the load order in `index.html` *is* the dependency order. Edit a file, reload th
 - **Manual child order** per folder in `.order.json` (array of child names in display
   order); `buildTree` sorts folders-before-pages then by this order. New folders/projects
   are prepended. Drag-to-sort writes it via the `reorder` action.
+- **The `All pages → JSON` bundle carries a library-shape SIDECAR.** The bundle stays
+  `{ "<path>.json": pageData, … }` plus **one** extra key `__codeman_meta` (`LIBRARY_META_KEY`,
+  features.js) — deliberately **not** `*.json`, because every page key is, which is what makes an
+  OLD client skip it for free via its existing `!Array.isArray(data.sections)` guard **without
+  counting a failure** (forward compat by construction, no version sniff anywhere). It holds
+  `{format:'codeman-library', v, app, exportedAt, counts, folders:[{path,project?,order?}],
+  rootOrder?, colSort, client:{favorites}}`, built by the **pure** `buildLibraryMeta(nodes,
+  colSortMap, favSet, appVersion, nowIso)` from data already in memory (`treeData` carries
+  `project` per folder and arrives in the server's **persisted** order — not the Miller view;
+  verified live against an active `⇅` sort) ⇒ **zero new network I/O**, and restored by
+  `importPages` through the **existing** `create_folder`/`create_project`/`reorder`/`set_col_sort`
+  actions ⇒ **zero new `api.php` actions**, so the CSRF allowlist and its desktop parity invariant
+  are byte-unchanged. `folders` enumerates EVERY folder, which is what fixes the long-standing
+  **empty-folder drop** (the old import derived folders from page-path segments, so a folder with
+  no descendant page existed in no bundle key at all). `readLibraryMeta` **never throws** (the
+  `parseCsv`/`parseJsonSafe` contract): a missing/wrong-`format`/non-array-`folders` sidecar returns
+  `null` and the import degrades to exactly today's pages-only behaviour. `buildLibraryMeta` is
+  try-wrapped at both ends — **an export-side sidecar failure must never cost the user their pages**.
 
 ---
 
@@ -324,8 +345,26 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
 - **Testing.** Two automated suites: open `codeman/tests.html` in a browser (client units, expect
   `0 failed`) and run `bash codeman/tests-api.sh` (server API, exit 0). **Both run in CI on every
   push/PR** (`.github/workflows/tests.yml` — the client suite headless via
-  `.github/scripts/run-client-tests.mjs`, which also enforces a pass-count FLOOR, plus a grep
-  `invariants` job). The **full set of regression
+  `.github/scripts/run-client-tests.mjs`, which enforces an EXACT pass count + zero page errors, plus
+  a grep `invariants` job — **12** invariants (all enumerated in `docs/TEST_CASES.md` § How to run):
+  SW version single-sourcing (`importScripts('version.js')` must be a LIVE statement, not a mention in
+  a comment, AND `CACHE_VERSION` must be built from `self.CODEMAN_VERSION` — the old bare substring
+  match was satisfied by a commented-out call, verified), api.php never precached, atomic
+  JSON writes (no `copy(`/`fwrite(`/bare `file_put_contents(`), **no `allow-same-origin` in
+  `codeman/`**, `index.html` keeps its CSP meta, the single `setTreeData` write point, CSRF
+  allowlist parity, the **edit-session wiring census** (exact call-site counts in `editor.js`:
+  `beforeEditSession()`=5, `afterEditSession()`=10 (2 per path), `wireEscapeRevert(`/`wireFocusFlush(`=6
+  each = 5 calls + 1 definition — an EXACT count, because losing one hook from one render path is
+  per-kind DRIFT no single behavioural assertion can see), **`afterEditSession` never calls
+  `scheduleSave(`** (scoped to its body — that call would re-mark the page dirty), **no
+  `renderPage()` inside `renderHtmlBlock`** outside the two lines that deliberately tear the block down
+  (allowlisted by `convertBlock` / `parentArray.splice` — a stray one silently kills a live iframe,
+  which no assertion can observe), and the **default-child-order oracle parity** (`SORT_ORACLE_JSON`
+  extracted from `tests.html` AND `tests-api.sh` and compared — editing one copy alone leaves both
+  suites self-consistently green while `defaultChildOrder` silently drifts from `buildTree`, which
+  costs the user their manual folder order on the next restore). Every invariant is verified to FIRE on an injected violation; note
+  the runner's shell is `bash -eo pipefail`, so a local reproduction must use the same flags or a
+  multi-grep step passes on its last line only.). The **full set of regression
   test cases lives in [docs/TEST_CASES.md](docs/TEST_CASES.md)**, split into a **Core** tier (run every
   regression) and an **Extended/release-gate** tier (cross-browser, packaged/Windows builds, CI,
   real-device, perf-at-scale, desktop native dialogs — run on demand). **Full regression is run by the
@@ -434,15 +473,50 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   re-click), the outside-`mousedown`-closes handler, close-on-scroll, and the "don't
   `preventDefault` the toolbar mousedown" rule are all preserved; opening one menu closes any other
   via its `_close` (clears that anchor's `aria-expanded` + listeners — no stale `.remove()` bypass).
-  **Three positioning modes, each byte-preserving a prior behavior (zero positional regression is
-  the whole point):** *default* = viewport clamp + upward flip near the bottom edge; *`opts.align:
-  'right'`* = right-align under the anchor (`left=r.right; translateX(-100%)`, the `openMoreMenu`/
-  sidebar behavior); *`opts.anchorRect`* = plain top/left from a caller-supplied rect, no clamp/flip
-  — used by the `exportMenu` submenu (passed the **visible** `headerMoreBtn` on the mobile page-header
-  path, never a hidden `exportBtn` at 0,0), the **colsort** menu (its original plain top/left), and
-  the **Copy-as** submenu (which pre-computes its bespoke `left=max(8, r.right−200)` clamp into the
-  rect so it lands identically). The
+  **Three positioning modes, each byte-preserving a prior behavior WHERE THE MENU FITS (zero
+  positional regression in the normal case is the whole point):** *default* = viewport clamp +
+  upward flip near the bottom edge; *`opts.align: 'right'`* = right-align under the anchor
+  (`left=r.right; translateX(-100%)`, the `openMoreMenu`/sidebar behavior), **with no clamp while
+  the box fits** — the transform means the visual left edge is `left − width`, so the guard measures
+  the **rendered rect** via the pure `miniMenuShift(top,left,w,h,vw,vh,pad)` (= `miniMenuClampPos`
+  expressed as a `{dx,dy}`), and when it returns `0/0` neither style is rewritten (a fitting menu is
+  pixel-identical, transform included). A real overflow — the sidebar dragged to `SIDEBAR_MIN`=200
+  pushed the menu to `left:−71`, clipped off-screen — is corrected **horizontally by setting the
+  absolute VISUAL left and dropping the transform**, NOT by nudging `left` by `dx`: a `position:fixed`
+  box's shrink-to-fit width is bounded by `viewport − left`, so moving `left` rightwards re-wraps the
+  menu narrower/taller and invalidates the `dx` computed from the old width (measured: 233×277 →
+  180×324). Setting the visual left can only give it more room;
+  *`opts.anchorRect`* = plain top/left from a caller-supplied rect, **no flip, and no clamp while
+  the box fits** — used by the `exportMenu` submenu (passed the **visible** `headerMoreBtn` on the
+  mobile page-header path, never a hidden `exportBtn` at 0,0), the **colsort** menu (its original
+  plain top/left), and the **Copy-as** submenu (which pre-computes its bespoke
+  `left=max(8, r.right−200)` clamp into the rect so it lands identically). **Two of those `anchorRect`
+  call sites are DEAD in the shipped CSS and must not be documented or tested as live positioning:**
+  the block-kind `.type-menu` submenu and the Copy-as `.copy-as` submenu both anchor to their own
+  trigger, and both triggers are `display:none` at **every** width (the unconditional `.block-toolbar`
+  declutter rules) — the block `⋯` menu **rebuilds** both as its own items precisely because a hidden
+  button's rect is invalid. The code is correct and worth keeping (it's the fallback if a trigger is
+  ever un-hidden), but the *positional* behavior is unreachable: only the exportMenu and colsort
+  `anchorRect` paths are user-observable. `anchorRect` mode passes
+  through the pure `miniMenuClampPos(top,left,w,h,vw,vh,pad)`, which **returns its input unchanged
+  unless the box genuinely overflows** — so every fitting menu is still on the exact prior pixel
+  (proved by a full 4-viewport before/after rect sweep), while a short window no longer strands the
+  last rows out of reach (`.mini-menu` is `position:fixed`, so the page cannot be scrolled to them).
+  It **shifts, never flips**: an `anchorRect` carries a bottom edge but not necessarily a usable
+  top. The height cap (`max-height:min(70vh,520px)` + internal scroll) is what bounds `offsetHeight`
+  and makes the clamp tractable — don't remove it. The
   `.mini-menu-opt:focus-visible` ring (inset offset) is the keyboard affordance; no change at rest.
+  **Both clamps are now pinned at the WIRING level, not just as pure math.** Unit-testing
+  `miniMenuClampPos`/`miniMenuShift` in isolation left both fixes DELETABLE with a green build
+  (mutation-proved: `if (s.dx) → if (false && s.dx)`, and passing the raw rect straight through, both
+  shipped green). The suite now opens a REAL menu in each of the three modes at a fitting AND an
+  overflowing viewport and asserts the applied `top`/`left`/`transform` — the **fitting** assertions are
+  the load-bearing half (they ARE the "zero positional regression" contract), the overflowing ones catch
+  a deleted clamp. The box is sized by a scoped test-only `.mini-menu` rule (tests.html doesn't load
+  `style.css`) and `innerWidth`/`innerHeight` are `Object.defineProperty`-stubbed. A new positioning
+  mode needs the same fit + overflow pair or it is unguarded. The ARIA/keyboard/dismissal contract is
+  covered the same way (it had ZERO automated coverage before — the suite named `showMiniMenu` exactly
+  once, in a comment).
 - **The code-block `⋯` overflow menu now declutters BOTH desktop and mobile** (was mobile-only
   before the UI/UX pass). The secondary actions — `#` lines / `$` vars / Duplicate / Split /
   `⤵ To subsection` / block-kind `.type-menu` / copy-as `.copy-as` — are hidden by **unconditional**
@@ -461,6 +535,25 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   route through `duplicateBlock`/`duplicateSection` (deep-copy + splice **below** the source, not
   push-to-end) so a copy lands directly beneath its original and `pendingRevealObj`/`revealNewEl`
   pulse it into view.
+  **Corollary — a hidden-and-proxied action MUST NOT read `document.activeElement`.** `showMiniMenu`
+  moves focus to its first item on open, so by the time a proxied handler runs, the menu owns focus.
+  **Split** was the casualty: it read `document.activeElement === textarea ? textarea.selectionStart :
+  0`, which — now that `.block-split` is hidden at every width and the `⋯` menu is the ONLY route —
+  never matched. `pos` was always 0, so caret-Split silently refused with "add a blank line or place
+  the cursor" *at a cursor the user had just placed*: a shipped feature that was dead on both desktop
+  and mobile. Fix: `renderBlock` keeps a `lastCaret`, recorded in `updateActiveLine` (which already
+  runs on the textarea's keyup/click/focus/select **and** on `input` via `updateGutter`, and already
+  bails while `.viewing`) — i.e. captured while the textarea still owns the caret. Split reads
+  `el.classList.contains('viewing') ? 0 : lastCaret`, preserving the existing semantic that view mode,
+  caret-at-0 and caret-at-end are all "no split point". Any future menu-proxied action that needs
+  selection/focus state must capture it the same way, at the source.
+- **Line endings are normalized to LF on the first edit+save — intended, not a bug.** `block.code` is
+  written from `<textarea>.value`, and the DOM API normalizes `\r\n` → `\n` on read; a CRLF-bearing
+  block (imported, or written through the API) therefore re-saves as LF. Viewing costs nothing (open +
+  Cancel is a no-op — `flushSave` is dirty-guarded). This is standard editor behavior and is
+  **deliberately not "fixed"**: a CR-restoring save pass would have to guess the file's original
+  convention, would fight the platform on every keystroke path, and would risk mixed endings. Don't add
+  one.
 - **ALL block kinds get the icon toolbar (not just code/note).** `renderChecklistBlock` and
   `renderRichBlock` mirror the same mobile treatment: Edit→`✎`/Save→`✓` (rich), Copy→`⧉`, Delete→`✕`,
   label on its own row, and a `.block-overflow` (`⋯`) that folds Duplicate + the block-kind convert
@@ -501,6 +594,130 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   `⊞` expands-all (NOT the per-node ▾/▸ markers). The button **hides** when the view has no container
   nodes (scalar/empty/invalid). A capture-phase `toggle` listener on the view re-syncs the glyph when a
   single node is hand-toggled; `renderTree()` calls `syncTreeToggle` at its end.
+- **HTML-project block = the CSV/JSON pattern + a sandboxed iframe.** The whole project lives inline
+  in the page JSON, so history/trash/duplicate/conflict-save/offline/export need ZERO new plumbing —
+  paid for with a hard cap (`HTML_MAX_TOTAL` 1 MB / `HTML_MAX_FILE` 512 KB / `HTML_MAX_FILES` 50,
+  soft-warn at 256 KB), because every byte is multiplied **×21** on disk (current + 20 history
+  versions). **`block.code` IS the entry file's source** and `files` holds only NON-entry files — so
+  `blockPlainText`, `convertBlock`, `search_blocks`, `replace_content` and the block filter all work
+  unchanged. Five load-bearing rules:
+  **(1) `blockKind()` discriminates on the `block.html` BOOLEAN, never `type === 'html'`** — existing
+  CODE blocks legitimately use `html` as their language and would be silently reinterpreted as
+  projects (pinned by a tests.html regression guard).
+  **(2) The iframe is `sandbox="allow-scripts"` WITHOUT `allow-same-origin`** ⇒ opaque origin ⇒ no
+  `parent.document`, no cookies/storage, and (with the inherited CSP) no egress. Adding
+  `allow-same-origin` alongside `allow-scripts` **voids the entire sandbox — permanent invariant, not
+  a tuning knob.** `allow-modals` is deliberately omitted (`alert()` no-ops); adding it later is safe.
+  **This is now GUARDED in three places** (it used to be documentation only — widening it left every
+  assertion green): a CI `invariants` grep fails on `allow-same-origin` anywhere in `codeman/` (bare
+  comments excepted — they're what document it), `tests.html` asserts the **rendered** iframe's
+  `sandbox` attribute is exactly `allow-scripts` (plus `srcdoc`-only, `no-referrer`), and a string
+  assertion pins the same posture on `pageToHtml`'s export path.
+  **(3) `bundleHtmlProject` MUST NEVER THROW** (the `parseCsv`/`parseJsonSafe` contract) and must
+  never render a blank block — it's try-wrapped and falls back to the raw entry + a warning. It's
+  regex-based, deliberately NOT `DOMParser`, so the author's exact document survives.
+  **(4) The three-layer warning system is the trust guarantee:** layer 1 warns per unresolvable/
+  root-escaping ref; layer 2 is a declared `HTML_REF_ATTRS` × `HTML_HANDLED_REFS` census that catches
+  ref-bearing forms the rewrite table doesn't cover (`<object data>`, `<form action>`, `style=
+  "…url(…)"`); **layer 3 is the unconsumed-file audit** — any file in `files` the bundler never
+  inlined warns, which is whitelist-free and forward-proof (the evidence IS the unused file). Don't
+  weaken layer 3 to a whitelist; it's what makes an unhandled reference form structurally unable to
+  fail silently.
+  **(5) NO html-block mutation may call `renderPage()`** — it rewrites `#page` wholesale and would
+  kill a live iframe. Every in-block mutation (upload, file remove, entry change, height drag, entry
+  edit) updates its own subtree, calls `remountFrame()` **and `scheduleSave()`** (the `pageDirty`
+  contract — a path that forgets it silently fails to persist on tab switch/unload). Only
+  convert/delete/duplicate call `renderPage()`. **Now grep-guarded** (`no html-block mutation calls
+  renderPage`): the CI job awks `renderHtmlBlock`'s body and permits `renderPage()` ONLY on a line that
+  also contains `convertBlock` or `parentArray.splice` (the convert + delete teardowns) — same shape as
+  the `writeJsonAtomic` primitive ban with its two allowlisted lines. It guards a failure NO assertion
+  can observe: a live iframe silently killed by `#page.innerHTML = ''`. `htmlRunState` (module-scope Map, FIFO-capped at 64)
+  keys `htmlBundleKey` → `'running'|'stopped'`; **binaries hash by base64 LENGTH only**, which is
+  safe ONLY because every explicit mutation calls `remountFrame()` directly.
+  Other traps that bit during implementation: `readEntries` **pages at 100 entries** — loop until it
+  returns an empty array or a large folder imports partially; base64 conversion is **8 KB-chunked**
+  (one `.apply()` over 512 KB blows the argument-list limit); the cap check is **atomic** (build the
+  whole candidate, check, only then assign — a rejected upload leaves the block untouched);
+  `</script>` inside inlined JS is escaped to `<\/script`; binaries are stored as **one unbroken
+  base64 line** under the reserved key `b64`, which is the shape `api.php`'s `search_content` strip
+  depends on (both the raw fast path AND the decoded fallback blank those spans, or encoded image
+  data produces false search hits). The block uses a **plain `.html-edit` textarea**, never the Prism
+  `.code-stack` overlay — zero contact with `ED_*`/`autosizeCode`/`syncScroll`, which is exactly why
+  editing NON-entry files is deferred to a phase 2 with its own design pass.
+- **`sanitizeRichHtml` is a THREE-table, deny-by-default sanitizer** (`RICH_ALLOWED` tags kept /
+  `RICH_DANGEROUS` tags dropped WITH their subtree / `RICH_ATTRS` per-tag attribute allowlist +
+  `RICH_GLOBAL_ATTRS` for the value-filtered `style`). A tag named nowhere is **unwrapped** (lossless
+  for its text) — do NOT change unknown-tags to *drop*, that's a silent data-loss path. Five
+  load-bearing points: **(1)** the tag lookup **UPPERCASES `node.tagName`** — foreign content
+  (SVG/MathML, incl. an `<svg><script>`) reports a *lowercase* local name, so the raw lookup missed
+  `'SVG'` entirely and merely unwrapped it, leaking the payload's text; **(2)** the **FULL table set**
+  is allowlisted incl. `CAPTION/COLGROUP/COL` — the output is a *string* re-parsed by
+  `surface.innerHTML`, and an unwrapped caption's text becomes a direct `<table>` child that the
+  second parse **foster-parents OUT of the table**, silently relocating content; **(3)** `richImgSrc`
+  accepts **only** `https:` and non-vector `data:image/…;base64,…` — the scalable-vector MIME is
+  absent ON PURPOSE (script-bearing format ⇒ a permitted data: src is an XSS primitive); control/
+  whitespace chars are stripped before the scheme test (`java\tscript:`); a rejected `src` is REMOVED,
+  not blanked (an empty `src` re-requests the page); **(4)** deny-by-default is what makes `on*` (and
+  every FUTURE handler) impossible without enumerating it — the pure `richIntAttr` bounds
+  `width/height/colspan/rowspan/span`; **(5)** it is wrapped in `try/catch` and **must never throw** —
+  it degrades to `&<>`-escaped inert text, never to raw HTML and never to `''`. Both Sets must stay
+  **single-line literals**: the `rich-sanitizer` CI invariant greps the `const RICH_ALLOWED` line for
+  script-bearing tag names and bans any `svg` reference on a `richImgSrc` line. Consumers:
+  `richToPlainText` maps `</td>|</th>` → TAB (so rich→csv convert yields a real table) and `<img>` →
+  its `alt`; `richToMarkdown`/`richTableToGfm` (features.js) emit GFM tables — `pageToMarkdown` used
+  to read `innerText` off a **detached** div, which has no layout, so every rich block exported as one
+  run-on line. Data-URL images are a page-bloat vector (×21 on disk); `RICH_SOFT_WARN` (256 KB) is a
+  **soft toast only, never a truncation** — a hard cap could only lose content.
+- **Autosave is DEFERRED while a block edit session is open (`anyBlockEditing()`).** `scheduleSave()`
+  still adds to `pageDirty` on its first line, **unconditionally** — the choke-point contract and its
+  `tests.html` regression guard are byte-identical; only the 500 ms `setTimeout(savePage)` is skipped
+  (early-return **before** arming the timer, NOT a guard inside `savePage` — that would break the
+  `saveInFlight`/`savePending` re-save path). The predicate is **DOM-derived**
+  (`#page .block:not(.viewing):not(.checklist)`) and **fails OPEN** (`catch → false` ⇒ save): a
+  tracked Set would go stale when an editing block is deleted and would suppress autosave forever.
+  `.checklist` is excluded because it's the ONE kind with no edit session. **`flushSave` is
+  deliberately NOT gated** — every editor assigns `block.code` on `input` *before* calling
+  `scheduleSave`, so `currentPageData` always holds the live buffer and tab-switch/unload still
+  commits it; gating that would turn a retention win into DATA LOSS. Cancel is free because
+  `beforeEditSession()` snapshots the clean page (`safeStringify`, capped at `SNAPSHOT_MAX`, captured
+  BEFORE `.viewing` drops since the predicate is DOM-derived) and `afterEditSession()` clears
+  `pageDirty` when the page is byte-identical at session end — it **arms `saveTimer` directly and must
+  NEVER call `scheduleSave`**, which would re-mark dirty. Wired into all **SIX** session-bearing
+  render paths (code + note share `renderBlock`; rich, csv, json, html-entry); Esc routes through the
+  Cancel/Revert button, so wiring those covers it — via the shared **`wireEscapeRevert(surfaceEl,
+  revertBtn)`**, called once per session-bearing render path (it used to be an inline handler on the
+  code/note textarea ONLY, so Esc silently did nothing in rich/csv/json/html). **Esc must always
+  `revertBtn.click()`, never a bespoke revert** — that button is where each kind decides clean-exit
+  vs restore-backup and calls `afterEditSession()`; a second implementation drifts per kind. It bails
+  while a `.mini-menu` is open (the menu owns Escape).
+  `wireFocusFlush(el)` is a focus-departure **FLUSH, not a session end** — sticky editing stays; it
+  bails on an in-block `relatedTarget` (the original toolbar-click gotcha) and on an open
+  `.mini-menu` (which lives on `document.body`, so opening the `⋯` would otherwise burn a history
+  slot). **A TEARDOWN is not a departure either, and the sync guards CANNOT see it:** delete/convert
+  splice the block then `renderPage()`, whose `#page.innerHTML = ''` makes Blink dispatch the focused
+  Delete button's `focusout` at the START of `RemoveChildren` — while `document.contains(el)` is
+  still `true` and `.viewing` is still absent. So the decision is **deferred one task**
+  (`setTimeout(…,0)`) and the `.viewing`/`document.contains` pair is **re-checked there**; by then
+  the teardown has finished and `el` is detached. Deferring keys on the OBSERVABLE end state rather
+  than on enumerating teardown paths (a "renderPage is running" flag would miss any future detach
+  route, and would break if an engine ever dispatched that focusout asynchronously). It can't swallow
+  a real departure: both failure modes (`.viewing` ⇒ Save wrote / Cancel ran `afterEditSession`;
+  detached ⇒ the mutation path called `scheduleSave`) persist by their own route, and the page stays
+  in `pageDirty` regardless. Without it, delete-while-editing cost TWO writes and two history
+  versions. **Accepted regression:** un-Saved text lives only in tab
+  memory between commit points (Save / focus departure / `visibilitychange→hidden` / `beforeunload`).
+  **Guarded three ways now, because the hooks are pure WIRING and wiring rots silently** (all
+  mutation-proved to have shipped green before): (a) `beforeEditSession` is exercised through the REAL
+  `enterEdit` — an emptied body AND the call MOVED below `el.classList.remove('viewing')` both left the
+  old suite green, since it set `cleanPageSnapshot` by hand and only called `afterEditSession`; (b) the
+  focus flush is asserted THROUGH `renderBlock` (not on a synthetic `<div>`) and a no-op Revert must
+  clear `pageDirty` in EVERY session-bearing kind (that's what catches losing one `afterEditSession`
+  call from one kind); (c) a CI `edit-session wiring census` counts the call sites EXACTLY
+  (`beforeEditSession()`=5 · `afterEditSession()`=10 · `wireEscapeRevert(`=`wireFocusFlush(`=6 incl. the
+  definition) and a second invariant greps `afterEditSession`'s BODY for `scheduleSave(` — the
+  "never call scheduleSave" rule has no observable behavioural difference, so a grep is the only guard
+  that can exist for it. Adding or removing a session-bearing render path means updating BOTH the
+  census counts and the tests.html census.
 - **Sidebar tree is keyboard-operable + ARIA (a11y pass).** `#tree` is `role="tree"`; rows
   (`.tree-row`) and Miller folder cards (`.subfolder-card`) are `role="treeitem"` with a
   `data-path`, `aria-label`, roving `tabindex` (exactly one row is `tabindex=0` via
@@ -538,7 +755,15 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   before. On open a `setTimeout(0)` moves focus inside only if `buildBody` didn't already (its own
   `setTimeout(0)` focus registers first, so this is a fallback); a dialog with no focusable control
   focuses the `tabIndex=-1` box itself. Every themed confirm/prompt AND the palette's Move-to picker
-  inherit this. `focusTrapNextIndex` is pure → unit-tested. Toast + the `flashCopied` bubble are
+  inherit this. **`showAlert(message)` is the acknowledgement variant** — one button, resolves
+  `undefined` (the caller can't branch on it, which is the point). Use it for INFORMATIONAL modals;
+  `showConfirm` there renders a dead "Cancel" beside "OK" that implies an outcome the caller doesn't
+  offer (the html-block over-cap rejection was the one such site). Everything else in the codebase
+  using `showConfirm` is a genuine two-outcome decision — checked, don't convert them.
+  **`.modal-title` is `white-space: pre-line`** so a `\n`-separated message (the over-cap rejection's
+  file list) keeps its line breaks; `pre-line` still collapses space runs and wraps normally, so the
+  single-line messages every other caller passes render exactly as before — a modal message is a
+  plain string, never markup. `focusTrapNextIndex` is pure → unit-tested. Toast + the `flashCopied` bubble are
   `role="status" aria-live="polite"` (the offline badge's channel) — one announces per action
   (flashCopied shows the bubble OR falls back to toast, never both).
 - **Delete buttons are de-emphasized at rest.** `button.danger` is neutral (`#3a3d41` / dim-red
@@ -567,11 +792,78 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   re-fetches every open page after the server write (`get_page` → reset `tab.data`/`tab.baseMtime`,
   re-render the active page), mirroring what Find & Replace's replace-all already does — otherwise an
   open tab's stale in-memory `currentPageData` would silently re-save the OLD tag on the next autosave.
-  Any new bulk server-side mutation of page content needs the same open-tab reconciliation.
+  Any new bulk server-side mutation of page content needs the same open-tab reconciliation. **Both
+  reconciliation loops must shape-guard the `get_page` reply** (`if (!d || d.error) continue`) — Find &
+  Replace's loop assigned the reply straight into `tab.data`, so a reachable-but-wrong response would
+  have installed an error body as the tab's page content. Same one-line class as the `api()`-consumer
+  sweep; a reachable-but-wrong response is not a connectivity error and nothing upstream catches it.
+- **`importPages` builds parent folders by TRACKING the parent, never by string surgery — and a
+  failed page is REPORTED (features.js).** The original loop derived each `create_folder` parent as
+  `acc.slice(0, acc.lastIndexOf('/')) || ''`; on the FIRST path segment `acc` has no `/`, so
+  `lastIndexOf` returned `-1` and `slice(0, -1)` **dropped the last character** — `"Notes"` was created
+  under a parent named `"Note"`, `"DZ"` under `"D"`, `"QA Kinds"` under `"QA Kind"` (only 1-char names
+  accidentally worked). Three failures compounded into **silent data loss on the documented backup
+  path**: (1) `api.php`'s `create_folder` did `mkdir($path, 0777, true)` with **no parent check**, so
+  the bogus parent was *materialised* (`{"ok":true}`) instead of rejected — it now mirrors
+  `create_page`/`save_page` with `404 'parent folder does not exist'`, which also closes an
+  independent hole (any client bug or crafted request could litter the confined data root with
+  arbitrary nested folders); (2) the later `create_page {parent:'Notes'}` legitimately failed and the
+  loop `continue`d **without counting it**; (3) the toast said `Imported N pages` regardless. Measured:
+  a real 14-page `All pages → JSON` bundle restored into an EMPTY root imported **2** pages and left
+  `ROOT/B/BZ` + `ROOT/D/DZ` behind. **Invisible when re-importing into the SAME library** (the real
+  top-level folders already exist), which is why it survived from the initial release. Import now
+  reports `Imported N pages, M failed` and checks `save_page`'s reply too. A non-page-shaped bundle
+  value is still skipped silently (it isn't a page) — that's the existing negatives' contract.
 - **`tests.html` seeds via the namespaced wrappers.** Since `offline.js` keys IndexedDB per server,
   the offline-reducer tests must seed/read/snapshot/restore through `kvGet/kvSet/kvDel` +
   `pageGet/pageSet/pageDel` (NOT raw `idbGet/idbSet('kv'|'pages', …)`), or they'd miss the active
   namespace AND fail to restore the real cache. Keep that contract when adding offline tests.
+- **A JSON bundle is page CONTENT only, and both ends must SAY so (features.js).** `exportAll`'s
+  bundle is `{path: pageData}`, so everything the library's SHAPE lives in — the `.project` markers,
+  `.order.json`, `.colsort.json`, `.trash`, `.history` — is absent from a restore. `Exported N pages`
+  / `Imported N pages` were unqualified success claims over that, and a restored library (plain
+  folders, no history) is indistinguishable from a failed restore. Two constants,
+  `BUNDLE_SCOPE_NOTE` / `BUNDLE_SCOPE_SHORT`, are the single wording source. **Export gets the
+  `showAlert`, import gets the toast** — export is where the belief "I have a backup" forms (init.js's
+  offline-only desktop nudge sends users straight into `exportAll`, and on that machine IndexedDB is
+  the only other copy), so it must be unmissable and acknowledge-only (nothing to decide, the file is
+  already downloaded); `exportAll` no longer toasts a second success line. The import note is gated on
+  `isBundle && n` — a **single-page** import (the `This page → JSON` counterpart) has no library shape
+  to lose, and "0 pages" is a different message. `.toast` gained a `max-width` + wrap: it was
+  unbounded, and a sentence-length toast ran off the left edge at 375px. Keep the wording accurate —
+  page content IS byte-perfect; the note says what's missing, never that the restore failed.
+- **An assertion must CALL production code, and coverage of a pure helper is not coverage of its
+  caller.** A suite audit by **mutation testing** (inject a realistic single-point regression, run the
+  suite, see if it goes red) found **10 of 20** injected regressions shipping green at a fully-green
+  suite. Every one had the same two shapes: **(1) a tautology** — the deep-search-cap "test"
+  re-implemented `all.slice(0, DEEP_MATCH_CAP)` *inside its own expectation*, so it passed with the cap
+  deleted; **(2) coverage of the pure part only** — `miniMenuClampPos`/`miniMenuShift`,
+  `afterEditSession` and `wireFocusFlush` were all exercised in isolation while the WIRING that calls
+  them (`showMiniMenu`'s three modes, each render path's `enterEdit`/Revert) was untested, so both menu
+  clamp fixes and `beforeEditSession` could be deleted outright. Two rules fall out: **drive the real
+  entry point** (click the rendered Edit/Revert button, open a real menu, call `runDeepSearch` against a
+  stubbed `api`) rather than the helper it delegates to; and where a rule has **no observable
+  behavioural difference** (`afterEditSession` must not route through `scheduleSave`; no `renderPage()`
+  inside `renderHtmlBlock`; a hook wired once per render path) a **scoped CI grep is the only guard that
+  can exist** — write it, allowlist by what the line does, and prove it fires by injecting the
+  violation. **When adding an assertion, prove it fails on the regression it is meant to catch** —
+  otherwise the gap is still open, just now with a green tick over it. (Local reproduction of an
+  invariant must use `bash -eo pipefail`, the runner's shell: without `-e` a multi-grep step only
+  reports its LAST line's status.)
+  **A SECOND audit (128 mutations over the next six commits) found 36 more survivors, and they had
+  ONE recurring shape: "primary site pinned, sibling call sites in the same comment paragraph
+  unpinned."** The rejected-save fix names three call paths (`savePage`, `handleSaveConflict`'s
+  forced resend, `flushSave`) — only the first two were asserted, so deleting `flushSave`'s
+  `res.error` line left the suite fully green while the tab-switch half of a **silent-edit-loss**
+  fix was gone. The malformed-tree fix names three writers (`cacheOnSuccess`, `probeBackend`,
+  `flushQueue`'s reconcile) — only the first was asserted. **So: when a fix names N call sites,
+  write N assertions**, and prefer a comment that ENUMERATES them (they become the checklist). Two
+  corollaries found in the same pass: a guard whose failure mode is also caught by an outer
+  `try/catch` needs an input that reaches ONLY that guard, or the assertion passes with it deleted
+  (`readLibraryMeta`'s `Array.isArray(m.folders)` needs an array-LIKE with a `.map`, and its
+  `Array.isArray(m)` needs an array CARRYING `format` — a plain string/`[]` is rejected by the catch
+  or the format check either way); and a **suppression** guard needs a paired control that does the
+  same thing WITHOUT the suppressing condition, or "0 saves" proves only that nothing ever fired.
 - **iOS home-screen PWA top inset:** `body.is-mobile .main` gets `padding-top:env(safe-area-inset-top)`
   + a `#1b1b1b` background (the tab-bar colour) so the tab bar/header clear the Dynamic Island in
   standalone mode (status bar is `black-translucent`, `viewport-fit=cover`). The floating ☰ is
@@ -693,7 +985,10 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   broad term on a large library would otherwise paint thousands of sidebar rows synchronously (~1.5s
   at 1200 pages). `updateSearchCapNote` (tree.js, called from `renderTree`) shows the
   `#searchCapNote` "Showing first N of M — refine your search" banner when capped, hidden otherwise.
-  It's a render cap, not a server cap (search_content still scans everything) — don't remove it.
+  It's a render cap, not a server cap (search_content still scans everything) — don't remove it. The
+  cap is now driven through the REAL `runDeepSearch` against a stubbed `search_content` (500 paths ⇒ 200
+  rendered + `deepMatchTotal` 500 + the banner); the case it replaced re-implemented
+  `all.slice(0, DEEP_MATCH_CAP)` INSIDE its own expectation, so deleting the cap left it green.
 - **`setTreeData(t)` is the SINGLE write point for `treeData` (tree.js) — no bare `treeData = …`
   survives outside it (grep-verified).** It sets the global AND calls `invalidateTreeMemos()`, which
   drops the `folderCounts`/`folderMeta` WeakMap caches (memoized by node identity — those aggregates
@@ -707,6 +1002,37 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   `treeData =` in `codeman/src/` outside the declaration + `setTreeData` definition — mirroring the
   `writeJsonAtomic` invariant; keep source comments free of a literal `treeData =` token so they
   don't trip it.
+  **It is ALSO the single SHAPE guard: `treeData` must stay an ARRAY, and a non-array write is
+  REJECTED (returns `false`) rather than applied.** Being the choke point is what makes one guard
+  cover all five writers. The bug it closes: `api()` only falls back to the IndexedDB mirror when
+  `apiFetch` **throws**, so a *reachable* server answering **200 with a non-array body** —
+  `{"error":…}`, `null`, or an unparseable body (→ the `_transient` error object) — sailed straight
+  into `treeData`. The library rendered as the EMPTY onboarding state, the offline mirror was
+  **BYPASSED** (a user with a perfectly good cache saw nothing), and the next navigation threw
+  `TypeError: folderChildren(...).find is not a function` from `nodeAtPath`. So: **a bad shape is a
+  FAILURE, never "the library is empty"** — `loadTree` checks the return, reads `offlineApi('tree')`,
+  calls `setOffline(true)` (which starts the self-healing probe loop) and toasts. The two offline.js
+  sites that call `apiFetch('tree')` directly (`probeBackend`, `flushQueue`'s reconcile) need their
+  OWN `Array.isArray` check as well, because they `kvSet('tree', fresh)` — an unguarded write there
+  poisoned the **PERSISTED** mirror, not just the in-memory global; `probeBackend` stays offline and
+  re-schedules, `flushQueue` skips only the reconcile (its writes did land). **The load-bearing one
+  is `cacheOnSuccess` (offline.js), found only by live-testing the fix:** `api()` runs it BEFORE
+  returning, so the malformed body overwrote `kv.tree` and the library still went empty *with*
+  `loadTree`'s fallback in place — the mirror was already poisoned by the time the fallback read it.
+  It now refuses to mirror anything with an `.error`, and shape-checks per action — **with strictness
+  proportional to blast radius**, which is the design rule, not an inconsistency: `tree` must be an
+  array (a non-array there CRASHES navigation) and `col_sorts` a plain object, but `get_page` only has
+  to be a **plain object** (not an array/scalar). The stricter `Array.isArray(data.sections)` it
+  originally carried over-reached: a hand-written or imported `{title:"NoSect"}` is an unusual-yet-VALID
+  page, not an error body, and demanding `sections` made it permanently uncacheable — `primeOfflineCache`
+  silently skipped it and it came up empty offline with no warning. The guard's job is to reject ERROR
+  bodies; the render path already tolerates a missing `sections` (`openPage` defaults it to `[]`).
+  **A fallback is only as good as the cache behind it: never let a failed response write the mirror.** Same class, same fix, in
+  the two array-returning panels that were unguarded: **Trash** and **History** normalize a non-array
+  response and say "Could not load…" instead of "empty"/"no versions" (deep search, block search and
+  the tags panel were already `Array.isArray`-guarded). Any new consumer that assumes an API response
+  shape needs the same one-line guard — a reachable-but-wrong response is not a connectivity error and
+  nothing upstream will catch it for you.
 - **Single-column tree is LAZY-built — a collapsed folder's `.tree-children` is left unbuilt
   (`data-lazy="1"`, empty) and constructed on first expand (tree.js `renderTreeNode` folder branch +
   its `toggleExpand`).** This is what stops the sidebar scaling with library size (collapsed
@@ -726,6 +1052,20 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   double-click or N calls in one tick would each pass the "already open?" check before any push and
   create duplicate tabs. An in-flight `_openingPages` Map (editor.js) makes concurrent opens of the
   same path reuse one fetch/tab. Don't drop it.
+- **`create_folder`/`create_project` MUST check `mkdir()`'s return — mirror `create_page`'s write
+  check (api.php).** Both got the missing-parent precondition but not the write-failure check, so a
+  failing `mkdir()` (an over-long name, permissions, disk full) still ran `prependOrder` and echoed
+  `{"ok":true}` — and the raw PHP `mkdir(): File name too long` warning leaked into the body (invalid
+  JSON → the client false-trips `_transient`), while the parent's `.order.json` gained a phantom entry
+  for a directory that never existed (a silent reshuffle of the user's manual sort order). Fixed both
+  ways: `mkdir` is now `@`-suppressed and its result checked (`!@mkdir(...) → jsonError('failed to
+  create folder/project', 500)`, before `prependOrder`), AND **`safeName()` caps a segment at 255
+  bytes** (`strlen`, the FS per-name limit) so the over-long name is rejected up front — belt-and-
+  suspenders that also protects `create_page`/`save_page`/`rename`/`move`. `tree.js`'s inline-create
+  input carries `maxLength=255` as UI defense-in-depth. Any new `mkdir`/write path needs the same
+  return check — an unchecked fs op that leaks a warning is invalid JSON AND may still report success.
+  Pinned by tests-api (over-long name → clean JSON error, no dir, no order pollution; a 255-byte name
+  still succeeds).
 - **`writeJsonAtomic($path, $json)` is the SINGLE write path for every JSON file (api.php).** All
   page/metadata writes (`save_page`, `create_page`, `replace_content`, `rename_tag`, `writeOrder`,
   `writeColSorts`, `flushIndex`, `snapshotHistory`, the trash `.meta`) go through it: write a
@@ -733,9 +1073,47 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   target (atomic on POSIX → a crash mid-write can never truncate a page). **The temp name MUST be
   unique** — a fixed `<path>.tmp` would let two concurrent `save_page`s clobber each other's temp
   before either renames (defeating the LOCK_EX serialization). The dot prefix keeps an orphaned temp
-  invisible to `buildTree`. A **CI invariant** greps that no bare `file_put_contents(…, json_encode(…))`
-  survives outside the helper — route new JSON writes through it. (Linux/macOS only; Windows can't
-  `rename()` over an existing file, but api.php never runs there.)
+  invisible to `buildTree`. (Linux/macOS only; Windows can't `rename()` over an existing file, but
+  api.php never runs there.) **The CI invariant now bans the write PRIMITIVES, not one shape.** The
+  old grep only matched an inline `file_put_contents(…, json_encode(…))` — which is why
+  `restore_history` slipped through for a whole release writing a live page with a raw **`copy()`**
+  (a crash mid-copy truncates it: precisely the failure the helper exists to prevent), and why the
+  split form (`$j = json_encode(…); file_put_contents($p, $j);`) would too. The `invariants` job now
+  fails on ANY `copy(`/`fwrite(`/`fputs(`/`file_put_contents(` in `api.php` outside two allowlisted
+  lines (the helper's own temp write, and the EMPTY `.project` marker) — every write shape, however
+  many lines it spans, has to end in one of those primitives. Route new writes through the helper;
+  don't extend the allowlist without a very good reason.
+- **`snapshotHistory` version keys must never go BACKWARDS (api.php).** The key is the page's mtime
+  (second-granularity), bumped to the next free integer on collision. Once a page hits `HISTORY_KEEP`
+  (20), the prune frees the LOW keys again — so a burst of same-second saves (autosave is
+  per-keystroke) restarted at the page mtime, landed on a just-freed low key, and the next prune
+  deleted the version *just written*: every save after the cap was silently discarded and history
+  froze at the first 20. Fixed by starting at `max(mtime, highest existing key + 1)`, and by pruning
+  with a **numeric** `usort` on the basename rather than a lexicographic `sort()` of full paths
+  (which only happened to work while every key had the same digit count). Pinned by a tests-api case
+  (25 saves → exactly 20 versions, extremes assert the surviving window is the NEWEST 20).
+- **`snapshotHistory` must NOT version the `create_page` stub as a page's FIRST entry (api.php).**
+  `create_page` writes `{"title":…,"sections":[]}` and any create-then-immediately-save sequence
+  (`importPages` restoring a bundle, `duplicatePageFromTree`, a queued create+save replaying on
+  reconnect) saves the real content one call later — so the stub got snapshotted, and **after
+  restoring a JSON backup every page's ENTIRE history was that one 47-byte empty version.** The
+  History panel presented it as a normal restorable version with a blue Restore button, and restoring
+  it EMPTIED the page — while the real prior versions had never been in the bundle. Worse than no
+  history: a loaded gun where the safety net should be. The guard lives in `snapshotHistory`, NOT in
+  the importer, because the root cause is the create-then-save sequence, not import. **Both
+  conditions are load-bearing and together bound it to a page's very first snapshot of content
+  nobody authored:** (1) the page has **no versions yet** — anything ever saved is untouched, so a
+  page a user DELIBERATELY emptied still versions normally (its real content is already in history,
+  and the empty state it was emptied *into* is snapshotted by the next save like any other content);
+  and (2) `isCreatePageStub($old, basename($path,'.json'))` — structural (not a byte compare, so
+  re-formatting can't break it) and exact on all three counts: EXACTLY the keys `title`+`sections`,
+  `sections` empty, and **the title `create_page` itself derived from the filename**. That title
+  check is not decoration — dropping it makes the rule "any empty-sections page", which silently
+  discards every authored title of a page renamed but never given a section, and **fails 28 existing
+  tests-api assertions** (measured). Fail OPEN: snapshotting a stub is noise, failing closed loses
+  data — never widen this, and never suppress a snapshot of content a user could have authored.
+  Pinned by tests-api (zero versions after create→save · no listed version would destroy the page ·
+  the next save DOES version · deliberately-emptied · title-only), which go RED on removal.
 - **`.index.json` is read LAZILY via `loadIndex()` (api.php).** Only the three index-using actions
   — `tree`, `rebuild_index`, `list_tags` — call `loadIndex()` (idempotent, guarded by `$indexLoaded`);
   EVERY other request skips the (potentially large) index read entirely. `list_tags` is now
@@ -784,7 +1162,10 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
 - **Dead-letter queue = the anti-silent-loss guarantee (offline.js + features.js).** A queued write
   the server *rejects* (terminal 4xx, a `_transient` error that outlives 3 retries, or a conflict-force
   that still errors) is **parked** as a dead-letter, NEVER `shift()`-dropped (that bare shift was the
-  bug). Each is its own kv entry keyed `kvKey('dl:'+id)` = `<NS>\x1F dl:<id>` — so retry is
+  bug). **It is no longer only a REPLAY mechanism:** a live, ONLINE save the server rejects parks here
+  too (editor.js `handleSaveError` — see the rejected-save gotcha), so the panel is the one recovery
+  surface for "the server refused this write", offline or not.
+  Each is its own kv entry keyed `kvKey('dl:'+id)` = `<NS>\x1F dl:<id>` — so retry is
   **namespace-locked by construction** (the `dl*` helpers + `kvEnumerate('dl:')` only ever touch the
   ACTIVE namespace; a parked op can't replay against the wrong server, same guarantee as the queue).
   Key shape is shared with the **now-live** per-page `history:<path>` keys (`<NS>\x1F<kind>:<suffix>`)
@@ -831,10 +1212,174 @@ changes; `CLAUDE.md` stays the code/architecture reference, `docs/TEST_CASES.md`
   a new mutation path that forgets it will silently fail to persist on switch/unload. That contract is
   locked by a `tests.html` regression guard (`scheduleSave` marks dirty · `flushSave` writes a dirty
   page but not a clean one · clears on success); keep `scheduleSave` the single choke point.
+- **A save the SERVER REJECTED must be PARKED, never announced as "Saved" (editor.js
+  `handleSaveError`).** `apiFetch` deliberately RESOLVES a reachable server's 4xx (a 4xx is a real
+  response, not "offline") and a malformed 200 (core.js tags it `_transient`) — so for a long time
+  `savePage` handled `res.conflict` and `res.offline` but had **no `res.error` branch**, and an error
+  body fell straight through to `pageDirty.delete()` + `toast('Saved')`. Measured: another device
+  deletes the open page's folder → `404 {"error":"parent folder does not exist"}` → the client says
+  **"Saved"**, the page goes clean, queue 0, dead-letters 0, **zero page errors**, and after a reload
+  the edit exists NOWHERE. (It was masked for a while by `cacheOnSuccess` accidentally mirroring the
+  attempted write; hardening THAT correctly — never mirror a response the caller can't use — is what
+  made the loss total. Don't "fix" it there.) The rule now: **an error response routes into the same
+  anti-silent-loss machinery `flushQueue` uses** — a `_transient` goes to the write QUEUE (its
+  existing 3-attempt-then-park policy owns transients), a terminal 4xx is parked STRAIGHT as a
+  `dl:` dead-letter (it can never succeed as-is), and `pageDirty` is cleared ONLY because the edit is
+  now durably in IndexedDB — the identical justification as the `offline` branch. If parking itself
+  throws, the page stays DIRTY. Two corollaries: the parked op is `force:true` (a replay must not
+  re-conflict on a dead `baseMtime`), and repeated failures on one page **supersede our own** previous
+  entry via the `saveDeadLetters` path→id map (each entry is a FULL page snapshot, up to 1 MB for an
+  html project — one per autosave burst would flood both IndexedDB and the panel; only ids this
+  session created are replaced, never a `flushQueue`-parked op, which is a different op with different
+  content). **THREE call paths reach the same server action and all three needed it:** `savePage`,
+  `handleSaveConflict`'s forced resend (a rejected force must not claim "Saved (overwrote disk
+  version)"), and `flushSave` — whose non-keepalive `.then` cleared `pageDirty` unconditionally, and
+  whose keepalive path only caught a REFUSED fetch (`p.catch`), not one that RESOLVES with a 4xx (now
+  `p.then(r => !r.ok && requeue())` — on `visibilitychange→hidden`, the primary trigger, the document
+  is still alive so it runs; on `beforeunload` it may not, which is best-effort by nature). A future
+  branch on a save response must decide error-vs-success explicitly; "not conflict, not offline"
+  is NOT "success".
+- **`savePage` is the SINGLE 'Saved' announcer — a render path must NEVER toast it (editor.js).** All
+  five block-Save handlers used to do `savePage(); toast('Saved');` with `savePage()` **un-awaited**, so
+  the announcement raced the write: on the healthy path "Saved" fired **twice** through the
+  `role=status aria-live=polite` channel, and on a rejection the FALSE "Saved" landed first and was only
+  contradicted a full request-window later — partly undoing the rejected-save fix above. The handlers
+  now just call `savePage()`, which toasts after the write is confirmed (and stays silent on the
+  `res.error`/`res.conflict` early-returns). The `saveInFlight` re-save path still announces, because
+  the finally-block re-save runs the same code. The offline branch says **"Saved offline — will sync"**:
+  a queued write is durable but is not on the server, and borrowing the plain "Saved" made the amber
+  badge the only hint. Guarded behaviourally (a real `renderBlock` Save: silent-until-resolved, exactly
+  once, none on rejection) **and** by a `.toString()` census over the five render paths — the per-kind
+  drift has no other observable signature, same reasoning as the edit-session wiring census.
+- **Offline tree-row Duplicate must ask the MIRROR, not the response (editor.js
+  `duplicatePageFromTree`).** The hit/miss discriminator was `d._mtime == null` — but `cacheOnSuccess`
+  **deletes** `_mtime` before mirroring (offline.js) and `offlineApi`'s miss placeholder is
+  `{title, sections:[], _mtime:null}`, so a genuine cache **HIT was byte-indistinguishable from a
+  miss** and the guard rejected BOTH: the `❐` on a tree row was dead offline for every page not
+  currently open, defeating the advertised `primeOfflineCache` / "Download for offline". It now tests
+  `await pageGet(node.path)` — presence in the mirror is the actual question. Don't reintroduce a
+  response-shape test: the placeholder is deliberately shaped like a real empty page, and the loose
+  `cacheOnSuccess` `get_page` guard means a cached page may legitimately lack `sections` too.
+- **Prose `overflow-wrap: anywhere` must be RESET on table cells (style.css).** `.block.note
+  .code-view` and `.rich-surface` set `overflow-wrap: anywhere` so a long unbroken token wraps instead
+  of blowing the block out (TC-hscroll-11) — but that property **inherits**, so it reached `<th>`/`<td>`,
+  and `anywhere` (unlike `break-word`) **contributes its break opportunities to MIN-CONTENT sizing**.
+  Every column therefore collapsed to ~one character, the auto table layout always shrank to fit, and
+  the `overflow-x:auto` on those `display:block` tables was **unreachable** (measured at 1440px: 20
+  columns → 45×70px cells, `scrollWidth == clientWidth`, no scrollbar until 30 columns had already been
+  crushed). Cells now set `overflow-wrap: break-word; word-break: normal` — min-content-neutral, so
+  columns keep their natural width and a wide table genuinely overflows and scrolls (20 columns →
+  80×31px, `1711 > 939`). **Scope the reset to cells only; the prose `anywhere` is deliberate.**
+  **`word-break: break-word` is the DEPRECATED ALIAS for `word-break: normal` + `overflow-wrap:
+  anywhere` — so it causes the identical defect under a different property name; never put it on a
+  table cell.** That is exactly what `.csv-table` carried, which is why the CSV block stayed broken
+  for two releases after note/rich were fixed (and why an early draft of this note wrongly cited
+  `.csv-table` as the reference implementation — it was the *last* victim). Measured pre-fix at
+  1440px: 20 columns → 45×59–75px cells, `.csv-table-wrap` `scrollWidth 939 == clientWidth`; at 390px,
+  31×171px cells. The reference implementation is the **declaration**, identical in all three places
+  (`.block.note .code-view`, `.rich-surface`, `.csv-table` cells): `overflow-wrap: break-word;
+  word-break: normal` — plus `white-space: pre-wrap` on CSV cells, which is orthogonal (embedded
+  newlines) and min-content-neutral. `pageToHtml`'s export CSS never set `anywhere` **nor**
+  `word-break`, so the export path had nothing to fix — its `table.csv` already scrolled correctly,
+  i.e. the in-app view was worse than its own exported copy. **Don't mirror the reset into the export
+  CSS**; there is nothing there to reset.
 - **`navigator.storage.persist()` on boot (init.js) + `apiHeaders()` single header attach point
   (core.js).** Persist keeps the IndexedDB mirror/queue/dead-letters from being evicted under storage
   pressure (best-effort, no prompt). `apiHeaders()` is the ONE place request headers are built — both
   `apiFetch` and the keepalive unload-save use it, so auth (and future request-ids) can't drift.
+- **`defaultChildOrder` (tree.js) must reproduce `buildTree`'s comparator EXACTLY — pinned by a
+  shared, cross-language ORACLE, not by construction.** The library-shape sidecar **omits** a
+  folder's `order` whenever the client thinks the children are already in the server's default
+  order, which is the whole of the order-drift mitigation (a folder the user never dragged must not
+  gain an `.order.json` artifact on restore). **The direction of an error is asymmetric:** a false
+  *"non-default"* verdict writes an order array that reproduces the same visible order (harmless); a
+  false *"default"* verdict **DROPS the user's manual order** (data loss). So the JS side mirrors
+  `api.php:373-384` tier for tier: (1) folders before pages; (2) **ASCII-only** case fold + **UTF-8
+  BYTE** compare — `asciiFold` + `cmpUtf8`, because PHP's `strcasecmp` folds ASCII only (locale-
+  independent since 8.2) while JS `toLowerCase()` folds **Unicode** (`'İ'`→`'i̇'`, `'Σ'`→`'σ'`) and
+  JS `'<'` is UTF-16 **code-unit** order, not byte order; (3) raw-name byte order for a `strcasecmp`
+  tie (= `scandir`'s ascending sort, which PHP 8's **stable** `usort` preserves) — tier 3 only fires
+  for two siblings differing solely in case, which is impossible on a case-INSENSITIVE volume
+  (macOS/APFS, the usual dev machine) but **entirely reachable on the documented Linux/Docker
+  deployment**, where `Alpha/` and `alpha/` coexist. It is NOT merely there to make the JS side a
+  total order: losing it there is a false "already default" verdict, i.e. the data-LOSING direction,
+  same as the emoji case. `decorateChild` runs `TextEncoder` **O(n)**,
+  not O(n log n). **The two comparators are in different languages and cannot call each other**, so
+  both are pinned to ONE hard-coded oracle string `SORT_ORACLE_JSON` (an adversarial 20-name corpus:
+  `ZZ`'s position discriminates case-insensitive folding from byte order, `Ångström`/`Émile` exercise
+  the non-ASCII byte path, `10x`/`2x` digits, folders+pages the type tier — **and the
+  SUPPLEMENTARY-PLANE pair `Ｗide` (U+FF37) + `😀emoji` (U+1F600), which is the only input in the
+  corpus that can catch `cmpUtf8` regressing to a plain JS `<`**: byte order puts `Ｗide` first
+  (0xEF < 0xF0), UTF-16 code-unit order puts the emoji first (0xD83D < 0xFF37). Everything else is
+  BMP, where the two orderings agree — so an **emoji-named folder** was the single input that could
+  silently drop a user's manual order, in the data-losing direction, and the corpus had none;
+  **plus the SAME-TYPE case pair `Cap` + `cap`, the only input that reaches tier 3 at all** (the
+  type tier ties, `asciiFold` makes tier 2 tie, so only the raw bytes can order them — `'C'` 0x43 <
+  `'c'` 0x63). They are listed in the corpus in the OPPOSITE order deliberately: in oracle order the
+  `a.i - b.i` index tie-break reproduces the right answer and tier 3 stays deletable):
+  `tests.html` asserts it
+  against `defaultChildOrder`, `tests-api.sh` asserts it against the **REAL `buildTree`** over the
+  same names created **directly on disk** (not via `create_folder`, whose `prependOrder` would
+  install an order file and defeat the point) — **except that `Cap`/`cap` cannot both exist on a
+  case-insensitive volume, so `tests-api.sh` probes the test volume and drops `cap` from its
+  EXPECTED slice when the volume folds case; the oracle LITERAL is byte-identical either way (that
+  is what invariant 11 compares), and the CI runner is Linux so the pair is exercised on every
+  push. A macOS-only local run leaves the server half of that one pair unproved — verified against
+  a case-sensitive APFS disk image, where the full oracle matches the real `buildTree`** — and a
+  **12th CI invariant** extracts the literal from
+  both files and fails the build if they diverge, because editing one copy alone leaves BOTH suites
+  self-consistently green. `sortChildrenLikeBuildTree` is the same comparator plus the order-index
+  tier (unlisted ⇒ `Infinity`, matching `PHP_INT_MAX`), and `offline.js`'s cached `reorder` routes
+  through it: its old `indexOf`-difference sort modelled **neither** outer tier (no folders-first,
+  and an entry absent from `order` scored `-1` so it sorted **first** where the server sorts it
+  **last**) — latent while every reorder came from a drag, load-bearing now that an import sends
+  `order: []` to mean "back to the default order".
+  **One KNOWN divergence remains, deliberately pinned rather than "fixed": a name listed TWICE in the
+  same order array.** `sortChildrenLikeBuildTree` builds its index with `if (!idx.has(k))` (FIRST
+  occurrence wins) while `buildTree` builds it with `array_flip`, which for a duplicated value keeps
+  the LAST — so `["C.json","A.json","C.json"]` means C-then-A on the client and A-then-C on the
+  server. Nothing in production emits a duplicate (a drag sends the full unique child list;
+  `buildLibraryMeta` reads unique on-disk names), so it is reachable only through a hand-edited or
+  hand-merged `.order.json` / a hand-built bundle, and the blast radius is one folder's order in the
+  OFFLINE CACHED tree until the next `tree` fetch reconciles it — no data loss in either direction,
+  unlike the `defaultChildOrder` tiers above. Both behaviours therefore have an assertion (client in
+  `tests.html`, server in `tests-api.sh`) so that whichever way a future change goes it is a decision,
+  not a drift. Do NOT "align" one side without deciding which is correct and moving both.
+- **`importPages` applies layout ONLY to folders the import itself CREATED — and `create_folder`
+  prependOrders UNCONDITIONALLY (`api.php:795-796`), so "created" has to be decided CLIENT-side.**
+  `create_folder`/`create_project` return `{ok:true}` whether or not the directory already existed,
+  so there is **no server signal**; the pre-import `treeData` snapshot (`known`/`knownProjects`) is
+  the only discriminator available, and it is the right one — it is the same tree the user is looking
+  at. Two consequences: (a) the folder phase **skips `create_folder` entirely** for a known-existing
+  folder, which is not an optimisation — the unconditional `prependOrder` meant the old import
+  **jumped every existing ancestor to the top of its parent's order, once per page**, so a merging
+  user's sidebar silently reshuffled; the page loop's segment build skips the same way (and this
+  SHRINKS the offline write queue rather than growing it); (b) the layout phase's targets are
+  `created` ∪ (`wasEmpty` ? `{''}` : `{}`) — the root is the one carefully-bounded exception, because
+  restoring into an empty data root cannot order top-level items without it and an empty library has
+  nothing of the user's to disturb. **Never upgrade an existing plain folder to a project** (it
+  changes nesting legality for the whole subtree and could strand an existing child project), and
+  **never SEND `create_project` with a plain-folder parent** — validate client-side and downgrade to
+  `create_folder`, so the server guard is never exercised as an error path. That downgrade is
+  counted in its OWN `downgraded` tally, **not** in `shapeFailed`: nothing was lost (the folder and
+  every page in it landed, only the project marker didn't), and reporting it as
+  `1 shape item failed` is what a merging user reads as data loss on the documented backup path. It
+  gets its own toast clause. A
+  `reorder` is sent only when the sidecar recorded an order, or when the target gained a created
+  **sub-folder** (⇒ `order: []`, which `buildTree` treats as identical to no `.order.json` — pinned
+  in `tests-api.sh`, and the only way to clear `prependOrder`'s artifact since no action deletes an
+  order file); a leaf folder holding only pages gets **nothing** (`create_page` never prependOrders).
+  Because `known` is a snapshot it can be **stale**, so a `create_page` that 404s on its parent
+  rebuilds that page's whole chain once and retries once — a second failure counts exactly as before.
+  **That retry must stay narrow — the `parent folder does not exist` test is load-bearing, not
+  cosmetic.** Made unconditional, ANY `create_page` rejection (quota, a name the server dislikes, a
+  disk error) re-`create_folder`s the whole chain, which both jumps every existing ancestor to the
+  top of its parent (the unconditional `prependOrder` again) and re-marks it `created` — pulling a
+  folder this import never made into the Phase-4 layout targets and **breaking merge restraint on a
+  failed page**. Both directions are pinned in tests.html, each serving as the other's control.
+  Every failure is counted and surfaced (`folderFailed`/`shapeFailed`/`shapeSkipped`), and the
+  `existing folder(s) left as-is` clause is the honesty obligation: it is what tells a merging user
+  **why** their sidebar did not change.
 - **Release checklist — bump `version.js` for any client-shipping phase.** A phase that changes
   `codeman/src/*.js`, `style.css`, or `index.html` (like this one) ships new SW-precached assets — the
   `version.js` bump (→ new `CACHE_VERSION`) is what busts the old service-worker cache. Do it as part
@@ -910,10 +1455,16 @@ the server URL or `{offlineOnly:true}`.
   step): inline `onclick=` handlers, the inline `<script>` loaders, and the inline `ED_*` element
   styles. All vendored/executable code is same-origin `'self'` (the Prism autoloader injects
   same-origin `<script src>`; `?v=` cache-bust queries don't change the source origin; markdown-it +
-  the SW are same-origin). **`img-src` includes `https:`** so remote https images referenced in note/
-  rich blocks render (a self-hosted snippet manager legitimately references remote images; plain
+  the SW are same-origin). **`pageToHtml`'s standalone export now emits the SAME CSP `<meta>`** —
+  without it an export carrying a live HTML-project iframe would be strictly LESS restrictive than
+  the app itself; `'unsafe-inline'` there covers the export's own inline `<style>`. **`img-src`
+  includes `https:` + `data:`** so remote https images referenced in **note** blocks — and, since the
+  D-1 sanitizer pass, images in **rich** blocks too (that sentence was aspirational before: `IMG`
+  wasn't in `RICH_ALLOWED`, so a pasted rich image was deleted) — render. A self-hosted snippet
+  manager legitimately references remote images; plain
   `http:`/other schemes stay blocked — no mixed content, marginal exfil risk under the trusted
-  single-user model). At the release cut the **NAS nginx** deployment must ALSO send this header +
+  single-user model. **`richImgSrc` enforces exactly this policy client-side** (`https:` +
+  non-SVG `data:image`), so a stored rich block can never carry a src the CSP would block anyway. At the release cut the **NAS nginx** deployment must ALSO send this header +
   `X-Content-Type-Options: nosniff` in `default.conf` (can't be set from a `<meta>`; deployment step).
 - **Projects nest only in projects:** `create_project` and `move` reject placing a `.project`
   folder anywhere except the root or inside another project (a parent with its own `.project`

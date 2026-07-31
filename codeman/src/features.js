@@ -32,9 +32,13 @@ function fmtTime(ts) {
 async function openTrash() {
   openPanel('Trash', async (body, foot, close) => {
     body.innerHTML = '<div class="panel-loading">Loading…</div>';
-    const items = await api('list_trash');
+    // A malformed/non-array response ({error:…}, an unparseable body) is a FAILURE, not
+    // an empty trash — normalize like the tags panel does so .length/.forEach below
+    // can't throw, and say which of the two it was.
+    const raw = await api('list_trash');
+    const items = Array.isArray(raw) ? raw : [];
     body.innerHTML = '';
-    if (!items.length) { body.innerHTML = '<div class="panel-empty">Trash is empty</div>'; }
+    if (!items.length) { body.innerHTML = '<div class="panel-empty">' + (Array.isArray(raw) ? 'Trash is empty' : 'Could not load the trash') + '</div>'; }
     items.forEach(it => {
       const row = document.createElement('div'); row.className = 'panel-row';
       const info = document.createElement('div'); info.className = 'panel-row-info';
@@ -192,9 +196,12 @@ function openDeadLetterInspect(it) {
 async function openHistory(path) {
   openPanel('History — ' + nameFromPath(path), async (body, foot, close) => {
     body.innerHTML = '<div class="panel-loading">Loading…</div>';
-    const versions = await api('list_history', undefined, 'path=' + encodeURIComponent(path));
+    // Same shape guard as the trash/tags panels: a non-array response must not read as
+    // "no versions" (that hides a real failure behind a reassuring empty state).
+    const raw = await api('list_history', undefined, 'path=' + encodeURIComponent(path));
+    const versions = Array.isArray(raw) ? raw : [];
     body.innerHTML = '';
-    if (!versions.length) { body.innerHTML = '<div class="panel-empty">No saved versions yet</div>'; return; }
+    if (!versions.length) { body.innerHTML = '<div class="panel-empty">' + (Array.isArray(raw) ? 'No saved versions yet' : 'Could not load history') + '</div>'; return; }
     versions.forEach((v, i) => {
       const row = document.createElement('div'); row.className = 'panel-row';
       const info = document.createElement('div'); info.className = 'panel-row-info';
@@ -742,6 +749,7 @@ function openReplace() {
       for (const tab of openPages) {
         if (!changed.has(tab.path)) continue;
         const d = await api('get_page', undefined, 'path=' + encodeURIComponent(tab.path));
+        if (!d || d.error) continue;   // a reachable-but-wrong response is not content (cf. applyRename)
         const m = d._mtime != null ? d._mtime : null; delete d._mtime;
         tab.data = d; tab.baseMtime = m;
         if (tab.path === activePath) currentPageData = d;
@@ -766,6 +774,39 @@ function download(filename, text, mime) {
   a.href = url; a.download = filename;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// One rich-block <table> → a GFM table. Row 0 is the header (GFM requires one, and a
+// pasted table often has no <thead>); ragged rows are padded to the widest row. Cells
+// are read with textContent — NEVER innerHTML — so nothing from the block can execute
+// or leak markup into the export. MERGED CELLS DEGRADE TO ONE COLUMN: GFM has no
+// colspan, so that loss is correct rather than a bug.
+function richTableToGfm(tableEl) {
+  const cell = (v) => String(v == null ? '' : v).replace(/\|/g, '\\|').replace(/\s*\n\s*/g, ' ').trim();
+  const rows = [...tableEl.querySelectorAll('tr')].map(tr => [...tr.children].map(td => cell(td.textContent)));
+  const cols = rows.reduce((m, r) => Math.max(m, r.length), 0);
+  if (!cols) return '';
+  const fmt = (r) => '| ' + Array.from({ length: cols }, (_, c) => (r || [])[c] || '').join(' | ') + ' |';
+  const out = [fmt(rows[0]), '| ' + Array.from({ length: cols }, () => '---').join(' | ') + ' |'];
+  for (let r = 1; r < rows.length; r++) out.push(fmt(rows[r]));
+  return out.join('\n');
+}
+
+// Rich HTML → Markdown: top-level <table> children become GFM tables, everything else
+// falls through to richToPlainText. NEVER THROWS — any failure degrades to
+// richToPlainText of the whole input.
+function richToMarkdown(html) {
+  try {
+    const tpl = document.createElement('template');
+    tpl.innerHTML = sanitizeRichHtml(html || '');
+    const out = [];
+    [...tpl.content.childNodes].forEach(n => {
+      if (n.nodeType === 1 && n.tagName === 'TABLE') { const g = richTableToGfm(n); if (g) out.push(g); return; }
+      const s = richToPlainText(n.nodeType === 1 ? n.outerHTML : (n.textContent || ''));
+      if (s.trim()) out.push(s);
+    });
+    return out.join('\n\n').trim();
+  } catch (e) { return richToPlainText(html); }
 }
 
 // Render a page's sections/blocks to Markdown (headings + fenced code).
@@ -800,10 +841,24 @@ function pageToMarkdown(data) {
           out.push('```json');
           out.push(ok ? formatJson(value) : (b.code || ''));
           out.push('```', '');
+        } else if (b.html) {
+          // HTML-project block: the entry file fenced, then a plain listing of the
+          // project's files (an interactive preview has no Markdown equivalent)
+          out.push('```html');
+          out.push(b.code || '');
+          out.push('```', '');
+          const files = htmlFileList(b);
+          if (files.length) {
+            out.push('_Project files:_');
+            files.forEach(f => out.push('- ' + f.p + (f.isEntry ? ' (entry)' : '') + ' — ' + htmlBytesLabel(f.bytes)));
+            out.push('');
+          }
         } else if (b.rich) {
-          // rich-text blocks hold HTML — emit the plain text for Markdown
-          const tmp = document.createElement('div'); tmp.innerHTML = b.code || '';
-          out.push((tmp.innerText || '').trim(), '');
+          // Rich blocks hold HTML: tables become GFM, everything else plain text.
+          // (This used to read innerText off a DETACHED div — which has no layout, so
+          // every block boundary collapsed and the whole block exported as one run-on
+          // line. richToMarkdown/richToPlainText work on the markup, not on layout.)
+          out.push(richToMarkdown(b.code || ''), '');
         } else if (b.note) {
           // note blocks are already Markdown — emit verbatim, not fenced
           out.push(b.code || '', '');
@@ -858,6 +913,15 @@ function pageToHtml(data) {
       parts.push('<pre class="code"><code>' + html + '</code></pre>');
       return;
     }
+    if (b.html) {
+      // the bundled project, live in the export too — same sandbox posture as the app
+      // (allow-scripts WITHOUT allow-same-origin ⇒ opaque origin). esc() escapes
+      // & < > " which is exactly what a double-quoted srcdoc needs.
+      parts.push('<iframe class="htmlproj" sandbox="allow-scripts" loading="lazy" '
+        + 'style="height:' + (b.htmlH || 320) + 'px" title="HTML preview" srcdoc="'
+        + esc(bundleHtmlProject(b).html) + '"></iframe>');
+      return;
+    }
     const lang = langPrism(b.type);
     let html;
     try { const g = Prism.languages[lang]; html = g ? Prism.highlight(code, g, lang) : esc(code); }
@@ -898,6 +962,12 @@ function pageToHtml(data) {
     '.rich ul ul{list-style:circle}.rich ul ul ul{list-style:square}.rich ol ol{list-style:lower-alpha}.rich ol ol ol{list-style:lower-roman}',
     '.rich blockquote{border-left:3px solid #0e639c;margin:8px 0;padding:4px 12px;color:#aaa}',
     '.rich a{color:#4ea0e0}',
+    '.rich table{border-collapse:collapse;margin:10px 0;display:block;overflow-x:auto;font-size:13px}',
+    '.rich th,.rich td{border:1px solid #3a3d41;padding:5px 10px;text-align:left;vertical-align:top}',
+    '.rich thead th{background:#2d2d30;color:#fff;font-weight:600}',
+    '.rich caption{color:#888;font-size:12px;padding:4px}',
+    '.rich img{max-width:100%;height:auto;border-radius:4px;margin:4px 0}',
+    '.rich :is(h5,h6){font-size:13px;margin:10px 0 5px;color:#fff}',
     'ul.todo{list-style:none;padding-left:4px;margin:8px 0}ul.todo li{margin:4px 0}ul.todo li.done{color:#777;text-decoration:line-through}ul.todo input{margin-right:8px}',
     '.csv-wrap{overflow-x:auto;border:1px solid #333;border-radius:6px;margin:8px 0}',
     'table.csv{border-collapse:collapse;width:100%;font-size:13px}',
@@ -905,6 +975,7 @@ function pageToHtml(data) {
     'table.csv thead th{background:#2d2d30;color:#fff;font-weight:600}',
     'table.csv tbody tr:nth-child(even) td{background:rgba(255,255,255,.02)}',
     '.csv-empty{color:#888;font-style:italic}',
+    'iframe.htmlproj{display:block;width:100%;border:1px solid #333;border-radius:6px;background:#fff;margin:8px 0}',
     '.xlink{color:#8a7bd8}',
     'a{color:#4ea0e0}',
     // prism-tomorrow token colors (compact subset)
@@ -917,7 +988,13 @@ function pageToHtml(data) {
     '.token.function,.token.class-name{color:#f08d49}',
     '.token.regex,.token.important,.token.variable{color:#e90}'
   ].join('');
-  return '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'
+  // The export can embed a live HTML-project iframe, so it must carry the SAME CSP as
+  // the app — without this the standalone file would be strictly LESS restrictive than
+  // CodeMan itself. 'unsafe-inline' is required for the export's own inline <style>.
+  const exportCsp = '<meta http-equiv="Content-Security-Policy" content="default-src \'self\'; '
+    + 'script-src \'self\' \'unsafe-inline\'; style-src \'self\' \'unsafe-inline\'; '
+    + 'img-src \'self\' data: https:; object-src \'none\'; base-uri \'none\'">';
+  return '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">' + exportCsp + '<meta name="viewport" content="width=device-width,initial-scale=1"><title>'
     + esc(data.title || 'CodeMan') + '</title><style>' + css + '</style></head><body><h1>'
     + esc(data.title || 'Untitled') + '</h1>' + parts.join('\n') + '</body></html>';
 }
@@ -989,7 +1066,85 @@ function exportCurrentPage(fmt) {
   toast('Exported ' + base);
 }
 
-// Export every page as one JSON bundle ({ path: pageData }).
+// What an "All pages → JSON" bundle does and does not carry. Stated in full at export,
+// because that is the moment a user forms the belief that they have a backup (the
+// offline-only desktop nudge in init.js sends them straight here), and abbreviated at
+// import, where it explains what they're looking at. Three strings, ONE story:
+//   NOTE        — export, always: pages AND the library's shape restore; trash and
+//                 history do not.
+//   SHORT       — import of a bundle with NO sidecar (an old file): pages only.
+//   SHORT_SHAPE — import of a bundle WITH the sidecar: shape came too.
+const BUNDLE_SCOPE_NOTE = 'Every page restores exactly as it is now.\n'
+  + "The bundle also carries the library's shape — project markers, manual folder order, "
+  + 'column sort and favourites — so restoring into an empty library rebuilds it.\n'
+  + 'Trash and version history are not included.';
+const BUNDLE_SCOPE_SHORT = 'a JSON bundle carries page content only, not project markers, '
+  + 'manual order, trash or history';
+const BUNDLE_SCOPE_SHORT_SHAPE = 'trash and version history are not included';
+
+// The sidecar key. Deliberately NOT *.json: every page key in a bundle ends in .json,
+// so a non-.json key is unambiguously not a page — which is also what makes an OLD
+// client skip it for free (its `!Array.isArray(data.sections)` guard) without counting
+// a failure. No path separators and no leading '.', so it can never collide with a
+// safeName-legal page path.
+const LIBRARY_META_KEY = '__codeman_meta';
+
+// PURE over its arguments (no globals) so tests.html can drive it with a synthetic
+// tree, and ZERO network I/O — everything it needs is already in memory: treeData
+// already carries `project` per folder and already arrives in the server's effective
+// (persisted) order, colSort and favorites are live module globals.
+// Never throws (the parseCsv/parseJsonSafe/bundleHtmlProject contract): on any
+// surprise it returns null and the caller ships the pages without a sidecar.
+function buildLibraryMeta(nodes, colSortMap, favSet, appVersion, nowIso) {
+  try {
+    const folders = [], pagePaths = new Set();
+    (function walk(list) {
+      (list || []).forEach((n) => {
+        if (!n) return;
+        if (n.type === 'folder') {
+          const kids = n.children || [];
+          const e = { path: n.path };
+          if (n.project) e.project = true;                       // omitted when false
+          // Recorded ONLY where it differs from buildTree's default — a folder the
+          // user never dragged must not gain an .order.json on restore.
+          if (!isDefaultChildOrder(kids)) e.order = childOrderKeys(kids);
+          folders.push(e);
+          walk(kids);
+        } else if (n.type === 'page') pagePaths.add(n.path);
+      });
+    })(nodes);
+    // Enumerated folder paths + '' (the root) — the only keys a colsort may name.
+    const known = new Set(folders.map((f) => f.path)); known.add('');
+    const colSortOut = {};
+    Object.keys(colSortMap || {}).forEach((k) => {
+      const p = colSortMap[k];
+      if (!known.has(k) || !p || !['name', 'lang', 'kind'].includes(p.field)) return;
+      colSortOut[k] = { field: p.field, dir: p.dir === 'desc' ? 'desc' : 'asc' };
+    });
+    const meta = {
+      format: 'codeman-library',   // self-identifying; import REQUIRES this exact value
+      v: 1,                        // sidecar schema version (NOT a bundle version)
+      app: String(appVersion || ''),
+      exportedAt: String(nowIso || ''),
+      // Provenance/audit ONLY — never control flow. Nothing may "validate" against it.
+      counts: { pages: pagePaths.size, folders: folders.length },
+      folders,
+      colSort: colSortOut,
+      // Per-browser state, fenced off from the data-root shape. Sorted for a stable
+      // diff; recentCopies deliberately stays out (ephemeral noise, not curation).
+      client: { favorites: [...(favSet || [])].filter((p) => pagePaths.has(p)).sort() },
+    };
+    // The root has no folder entry, so its order is its own field — omitted entirely
+    // when the root is already in the default order.
+    if (!isDefaultChildOrder(nodes || [])) meta.rootOrder = childOrderKeys(nodes || []);
+    return meta;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Export every page as one JSON bundle ({ path: pageData }) plus the optional
+// library-shape sidecar.
 async function exportAll() {
   toast('Bundling…');
   const paths = [...collectPagePaths(treeData, new Set())];
@@ -999,8 +1154,70 @@ async function exportAll() {
     delete d._mtime;
     bundle[p] = d;
   }
+  // A sidecar failure must NEVER cost the user their page bundle — the pages are the
+  // irreplaceable part. On any trouble, omit the key and say so in the wording.
+  let meta = null;
+  try {
+    meta = buildLibraryMeta(treeData, colSort, favorites, (self.CODEMAN_VERSION || ''), new Date().toISOString());
+  } catch (e) { meta = null; }
+  if (meta) bundle[LIBRARY_META_KEY] = meta;
   download('codeman-export-' + paths.length + '-pages.json', JSON.stringify(bundle, null, 2), 'application/json');
-  toast('Exported ' + paths.length + ' pages');
+  // showAlert, not toast: this one must not be missed. A transient toast that says
+  // "Exported N pages" is what let a bundle be mistaken for a full backup. Acknowledge
+  // -only (one button) — there is nothing to decide, the file is already downloaded.
+  await showAlert('Exported ' + paths.length + ' page' + (paths.length === 1 ? '' : 's') + '.\n\n'
+    + (meta ? BUNDLE_SCOPE_NOTE
+            : 'Every page restores exactly as it is now.\n'
+              + "The library's shape could not be read, so this bundle carries page content only — "
+              + 'project markers, manual folder order, column sort, trash and version history '
+              + 'are not included.'));
+}
+
+// Read the optional library-shape sidecar out of a parsed bundle. NEVER THROWS (the
+// parseCsv/parseJsonSafe contract) — returns a NORMALISED meta, or null when there is
+// no sidecar or it is unreadable, in which case the import degrades to exactly today's
+// pages-only behaviour. Located by EXACT key match, then validated on `format`; there
+// is deliberately no version sniff, so an unrecognised future `v` is simply ignored.
+// Per-FOLDER-ENTRY validation is deliberately NOT done here: a bad entry must be
+// COUNTED and reported by the import (D-B1), not silently dropped.
+function readLibraryMeta(parsed) {
+  try {
+    const m = parsed && parsed[LIBRARY_META_KEY];
+    if (!m || typeof m !== 'object' || Array.isArray(m)) return null;
+    if (m.format !== 'codeman-library') return null;
+    if (!Array.isArray(m.folders)) return null;
+    const strs = (a) => (Array.isArray(a) ? a.filter((s) => typeof s === 'string') : null);
+    const folders = m.folders.map((f) => (f && typeof f === 'object' && !Array.isArray(f)
+      // `path` is passed through UNCHANGED (not coerced) so a non-string is rejected
+      // and counted by safeSidecarPath rather than becoming the string "undefined".
+      ? { path: f.path, project: !!f.project, order: strs(f.order) }
+      : { path: null, project: false, order: null }));
+    const colSortIn = (m.colSort && typeof m.colSort === 'object' && !Array.isArray(m.colSort)) ? m.colSort : {};
+    const colSort = {};
+    Object.keys(colSortIn).forEach((k) => {
+      const p = colSortIn[k];
+      if (!p || typeof p !== 'object' || !['name', 'lang', 'kind'].includes(p.field)) return;
+      colSort[k] = { field: p.field, dir: p.dir === 'desc' ? 'desc' : 'asc' };
+    });
+    const favs = (m.client && typeof m.client === 'object') ? strs(m.client.favorites) : null;
+    return { folders, colSort, rootOrder: strs(m.rootOrder), favorites: favs || [] };
+  } catch (e) {
+    return null;
+  }
+}
+
+// Client-side path guard for anything a sidecar names, so the server's safeName /
+// safePath rejections are never exercised as an error path. Mirrors safeName per
+// segment: no empty segment, no '.'/'..', no leading '.', no path separator inside a
+// segment. Returns the cleaned path, or null.
+function safeSidecarPath(p) {
+  if (typeof p !== 'string') return null;
+  const segs = p.replace(/^\/+|\/+$/g, '').split('/');
+  if (!segs.length) return null;
+  for (const s of segs) {
+    if (!s || s === '.' || s === '..' || s[0] === '.' || s.includes('\\')) return null;
+  }
+  return segs.join('/');
 }
 
 // Import a single page JSON, or a bundle ({path: data}), creating pages.
@@ -1013,26 +1230,199 @@ function importPages() {
     let parsed;
     try { parsed = JSON.parse(await file.text()); } catch (e) { toast('Invalid JSON'); return; }
     if (!parsed || typeof parsed !== 'object') { toast('Invalid JSON'); return; } // falsy-but-valid JSON (null/false/0) has no pages
-    const items = (parsed && parsed.sections) // single page
-      ? { [nameFromPath(file.name)]: parsed }
-      : parsed; // assume bundle of { path: data }
-    let n = 0;
+    const isBundle = !(parsed && parsed.sections); // a single page carries `sections`; a bundle is { path: data }
+    const items = isBundle
+      ? parsed
+      : { [nameFromPath(file.name)]: parsed };
+
+    /* ---- Phase 0 — the optional library-shape sidecar ----------------------------
+       `hasSidecar` separates "an old bundle, nothing to restore" (say nothing) from
+       "a sidecar is present but unreadable" (say so). */
+    const hasSidecar = isBundle && parsed[LIBRARY_META_KEY] !== undefined;
+    const meta = isBundle ? readLibraryMeta(parsed) : null;
+    if (isBundle) delete items[LIBRARY_META_KEY]; // belt-and-braces: the shape guard below skips it anyway
+
+    /* ---- Phase 1 — snapshot, BEFORE any write -----------------------------------
+       `known` is the "created by this import" oracle. There is no server signal for it
+       — create_folder/create_project both return {ok:true} whether or not the directory
+       already existed — so the pre-import client snapshot is the only discriminator
+       available, and it is the right one: it is the same treeData the user is looking
+       at. Everything the layout phase touches is gated on it, which is what makes
+       "import into a non-empty library never disturbs existing folders" true. */
+    const wasEmpty = !treeData.length;
+    const preFolders = collectFolderPaths(treeData, []);
+    const known = new Set(preFolders.map((f) => f.path));
+    const knownProjects = new Set(preFolders.filter((f) => f.project).map((f) => f.path));
+    const created = new Set();
+    let n = 0, failed = 0, folderFailed = 0, shapeFailed = 0, shapeSkipped = 0, layoutOps = 0;
+    // Counted SEPARATELY from shapeFailed: a project restored as a plain folder is the
+    // merge-restraint rule working as designed, not a failure. Folded into the failure
+    // count it read as "1 shape item failed", which is what a merging user takes for
+    // data loss on the documented backup path — the folder and every page in it landed.
+    let downgraded = 0;
+
+    /* ---- Phase 2 — folders, BEFORE pages ---------------------------------------- */
+    if (meta) {
+      // Sorted by segment count so parents always precede children even if the file
+      // was hand-edited (the array is already top-down; the sort is the defence).
+      const entries = meta.folders.slice()
+        .sort((a, b) => String(a.path || '').split('/').length - String(b.path || '').split('/').length);
+      for (const f of entries) {
+        const p = safeSidecarPath(f.path);
+        if (!p) { shapeFailed++; continue; }
+        // Already there ⇒ touch NOTHING. Not even create_folder: api.php's
+        // create_folder calls prependOrder UNCONDITIONALLY (:795-796), so re-creating a
+        // folder that exists jumps it to the top of its parent's order — which is how
+        // today's import silently reshuffles a merging user's sidebar. And never
+        // upgrade an existing plain folder to a project: that changes nesting legality
+        // for its whole subtree and could strand an existing child project.
+        if (known.has(p)) { shapeSkipped++; continue; }
+        const parts = p.split('/'); const name = parts.pop(); const parent = parts.join('/');
+        if (parent && !known.has(parent)) { shapeFailed++; continue; }
+        let asProject = !!f.project;
+        if (asProject && parent && !knownProjects.has(parent)) {
+          // A project may only live at the root or inside another project. Create it as
+          // a PLAIN folder rather than SEND create_project with a plain-folder parent —
+          // the server guard must never be exercised as an error path. Reported as a
+          // DOWNGRADE, not a failure: nothing was lost, only the project marker.
+          asProject = false; downgraded++;
+        }
+        const res = await api(asProject ? 'create_project' : 'create_folder', { parent, name });
+        if (res && res.error) { folderFailed++; continue; }
+        known.add(p); created.add(p);
+        if (asProject) knownProjects.add(p);
+      }
+    }
+
+    /* ---- Phase 3 — pages -------------------------------------------------------- */
     for (const [rel, data] of Object.entries(items)) {
-      if (!data || !Array.isArray(data.sections)) continue;
+      if (!data || !Array.isArray(data.sections)) continue;   // not a page shape — nothing to import
       const clean = rel.replace(/\.json$/, '');
       const parts = clean.split('/');
       const name = parts.pop();
       const parent = parts.join('/');
-      // build any missing parent folders
-      let acc = '';
-      for (const seg of parts) { acc = acc ? acc + '/' + seg : seg; await api('create_folder', { parent: acc.slice(0, acc.lastIndexOf('/')) || '', name: seg }); }
-      const res = await api('create_page', { parent, name });
-      if (res && res.error) continue;
-      await api('save_page', { path: (parent ? parent + '/' : '') + name + '.json', data });
+      // Build any missing parent folders top-down, tracking the parent EXPLICITLY (`up`)
+      // instead of deriving it from the accumulated path by string surgery. The old form
+      // (`parent: acc.slice(0, acc.lastIndexOf('/')) || ''`) had no '/' in `acc` on the FIRST
+      // segment, so lastIndexOf returned -1 and slice(0,-1) dropped the last character:
+      // "Notes" was created under a parent named "Note". api.php's create_folder happily
+      // materialised that non-existent parent, the later create_page {parent:'Notes'} failed,
+      // and the failure was swallowed — a restore into an EMPTY data root silently lost every
+      // foldered page. Invisible when re-importing into the same library (the real top-level
+      // folders already exist), which is why it survived so long.
+      // …and SKIP the create for a segment already known to exist. create_folder
+      // prependOrders UNCONDITIONALLY, so the old unconditional call re-jumped every
+      // existing ancestor to the top of its parent's order once PER PAGE. Skipping is
+      // also what keeps `created` an honest "this import made it" set.
+      let up = '', built = true;
+      for (const seg of parts) {
+        const next = up ? up + '/' + seg : seg;
+        if (!known.has(next)) {
+          const mk = await api('create_folder', { parent: up, name: seg });
+          if (mk && mk.error) { built = false; break; }
+          known.add(next); created.add(next);
+        }
+        up = next;
+      }
+      if (!built) { failed++; continue; }
+      let res = await api('create_page', { parent, name });
+      if (res && res.error) {
+        // `known` is a pre-import snapshot, so it can be STALE (another device deleted
+        // the folder meanwhile). Rebuild this page's whole chain once, ignoring `known`,
+        // then retry once — a second failure counts exactly as it did before.
+        if (parts.length && /parent folder does not exist/i.test(String(res.error))) {
+          let up2 = '';
+          for (const seg of parts) {
+            const mk = await api('create_folder', { parent: up2, name: seg });
+            if (mk && mk.error) break;
+            up2 = up2 ? up2 + '/' + seg : seg;
+            known.add(up2); created.add(up2);
+          }
+          res = await api('create_page', { parent, name });
+        }
+        if (res && res.error) { failed++; continue; }
+      }
+      // A failed save must be REPORTED, not swallowed: a success toast over partial data
+      // loss is the whole defect — this is the documented backup/restore path.
+      const saved = await api('save_page', { path: (parent ? parent + '/' : '') + name + '.json', data });
+      if (saved && saved.error) { failed++; continue; }
       n++;
     }
+
+    /* ---- Phase 4 — layout, AFTER every page has landed --------------------------
+       `reorder` is meaningless before the pages exist, because the order array names
+       them. Targets = the folders THIS import created, plus the root when the library
+       was empty: the root is never "created", yet restoring into an empty data root
+       cannot put top-level items in order without it — and an empty library is exactly
+       the case where none of the user's own structure can be disturbed. */
+    if (meta) {
+      const targets = new Set(created);
+      if (wasEmpty) targets.add('');
+      const orderFor = new Map();
+      meta.folders.forEach((f) => { const p = safeSidecarPath(f.path); if (p && f.order) orderFor.set(p, f.order); });
+      if (meta.rootOrder) orderFor.set('', meta.rootOrder);
+      // A folder that gained a created SUB-folder carries prependOrder's reverse-creation
+      // artifact in its .order.json, so it needs clearing even with no recorded order.
+      const gainedSubfolder = new Set();
+      created.forEach((p) => gainedSubfolder.add(p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : ''));
+      for (const target of targets) {
+        // Recorded order ⇒ restore it. No recorded order but a created sub-folder ⇒
+        // send [], which is behaviourally identical to no .order.json at all (pinned in
+        // tests-api.sh) and clears the artifact. Otherwise send NOTHING — so a leaf
+        // folder holding only pages gains no .order.json whatsoever (create_page never
+        // prependOrders, so there is nothing there to clear).
+        let order = null;
+        if (orderFor.has(target)) order = orderFor.get(target);
+        else if (gainedSubfolder.has(target)) order = [];
+        else continue;
+        const res2 = await api('reorder', { parent: target, order });
+        if (res2 && res2.error) shapeFailed++; else layoutOps++;  // {ok:true,offline:true} is not a failure
+      }
+      for (const key of Object.keys(meta.colSort)) {
+        if (!targets.has(key)) continue;
+        const res2 = await api('set_col_sort', { parent: key, field: meta.colSort[key].field, dir: meta.colSort[key].dir });
+        if (res2 && res2.error) shapeFailed++; else layoutOps++;
+      }
+
+      /* ---- Phase 5 — favourites -------------------------------------------------
+         MERGED (union) into favorites, never replaced — import is a merge tool — and
+         filtered to pages actually in this bundle, so a restore can't resurrect stars
+         for pages that do not exist. */
+      let starred = 0;
+      const bundleKeys = new Set(Object.keys(items));
+      meta.favorites.forEach((p) => { if (bundleKeys.has(p) && !favorites.has(p)) { favorites.add(p); starred++; } });
+      if (starred) saveFavorites();
+    }
+
+    /* ---- Phase 6 — refresh and report -------------------------------------------
+       loadTree() re-reads the whole tree, which is the refresh-after-bulk-mutation
+       obligation. No open tab's currentPageData is touched by the layout phase (it
+       writes directory metadata only — .project/.order.json/.colsort.json), so the
+       tag-manager-style open-tab reconciliation is deliberately NOT needed here. */
     await loadTree();
-    toast('Imported ' + n + ' page' + (n === 1 ? '' : 's'));
+    // Name what a bundle did and did not carry, so a restored library is understood as
+    // the bundle's scope rather than a failed restore. Bundle-only and only when
+    // something actually landed: a single-page import (This page → JSON) has no library
+    // shape to lose, and "0 pages" is a different message.
+    let msg = 'Imported ' + n + ' page' + (n === 1 ? '' : 's') + (failed ? ', ' + failed + ' failed' : '');
+    if (meta) {
+      msg += ' · restored ' + created.size + ' folder' + (created.size === 1 ? '' : 's')
+           + ', ' + layoutOps + ' layout setting' + (layoutOps === 1 ? '' : 's');
+      const bad = shapeFailed + folderFailed;
+      if (bad) msg += ', ' + bad + ' shape item' + (bad === 1 ? '' : 's') + ' failed';
+      // A deliberate, safe downgrade must be DISTINGUISHABLE from a failure: the folder
+      // and its pages are all there, it just isn't marked as a project (a project cannot
+      // sit inside a plain folder). Said plainly, in its own clause.
+      if (downgraded) msg += ' · ' + downgraded + ' project' + (downgraded === 1 ? '' : 's')
+        + ' restored as a plain folder (a project cannot sit inside a plain folder)';
+      // The honesty obligation of "layout applies only to folders this import created":
+      // this clause is what tells a merging user WHY their sidebar did not change.
+      if (shapeSkipped) msg += ' · ' + shapeSkipped + ' existing folder' + (shapeSkipped === 1 ? '' : 's') + ' left as-is';
+    } else if (hasSidecar) {
+      msg += ' · library shape could not be read';
+    }
+    const note = (isBundle && n) ? ' — ' + (meta ? BUNDLE_SCOPE_SHORT_SHAPE : BUNDLE_SCOPE_SHORT) + '.' : '';
+    toast(msg + note);
   };
   inp.click();
 }

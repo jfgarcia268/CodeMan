@@ -145,9 +145,11 @@ const API_TIMEOUT_MS = 9000; // abort a hung request so the retry/offline path c
 // marker, and the content type can't drift between apiFetch, flushQueue's replay,
 // and the keepalive unload-save in editor.js. X-CodeMan-Request is a same-origin
 // CSRF signal attached at SEND time — so even queues parked by an older client pick
-// it up on replay. NOTE: this release only SENDS it; api.php does NOT yet enforce it
-// (server enforcement is a later release, so in-flight offline queues aren't rejected).
-// The desktop proxy DOES require it on mutating actions (it always sends it).
+// it up on replay. api.php ENFORCES it deny-by-default: only the read-only actions in
+// its $csrfReadOnly allowlist may run header-less, so any action added later is
+// fail-CLOSED. A missing header on a write is a clean 403 (dead-lettered, recoverable),
+// and `CODEMAN_CSRF=off` is the break-glass for a straggler-client migration window.
+// The desktop proxy requires it on mutating actions too (it always sends it).
 function apiHeaders() {
   const h = { 'Content-Type': 'application/json', 'X-CodeMan-Request': '1' };
   if (authToken) h['X-CodeMan-Auth'] = authToken;
@@ -398,4 +400,25 @@ function showConfirm(message, { okLabel = 'Delete', danger = true } = {}) {
     setTimeout(() => ok.focus(), 0);
   }, () => true) // submit resolves true; cancel/esc/backdrop resolve null (falsy)
     .then(v => v === true);
+}
+
+// Themed acknowledgement: ONE button, no choice to make. For informational modals
+// (e.g. "the upload was rejected, here's why") — showConfirm there renders a dead
+// "Cancel" beside "OK" that implies an alternative outcome the caller doesn't have.
+// Resolves when dismissed (button / Enter / Escape / backdrop) — the caller can't
+// branch on it, which is the point.
+function showAlert(message, { okLabel = 'OK' } = {}) {
+  return showModal((box, submit) => {
+    const m = document.createElement('div');
+    m.className = 'modal-title';
+    m.textContent = message;
+    const btns = document.createElement('div');
+    btns.className = 'modal-btns';
+    const ok = document.createElement('button');
+    ok.textContent = okLabel;
+    ok.onclick = submit;
+    btns.append(ok);
+    box.append(m, btns);
+    setTimeout(() => ok.focus(), 0);
+  }, () => true).then(() => undefined);
 }

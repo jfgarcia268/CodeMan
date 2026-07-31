@@ -266,6 +266,15 @@ then `$_SERVER`, then falls back to the local `structures/` dir.
 Just back up the `CODEMAN_DATA` directory — it's all plain `.json` files. The app also
 keeps a soft-delete `.trash/` and per-page `.history/` (last 20 versions) inside it.
 
+If you can't reach the data directory (the desktop app in offline-only mode is the usual
+case), use **`⋯` ▸ Export ▸ All pages → JSON** instead. That single file carries **every
+page's content** plus the **library's shape** — which folders are projects, the manual
+order you arranged by dragging, per-column sort preferences, empty folders, and your
+favourites — and **`⋯` ▸ Import…** rebuilds all of it in an empty library. **Trash and
+version history are not in the bundle** (nothing in the API can write them back); for
+those, copy `CODEMAN_DATA`. Importing into a library you already have is a merge: your
+existing folders keep their own order, sort and project markers untouched.
+
 ### 3. Use it in a browser
 
 Open `http://<host>/codeman/` in any modern browser. That's it — create projects,
