@@ -17,7 +17,11 @@
 # restore_history (atomic write, never a raw copy over the live page), HISTORY_KEEP
 # pruning keeping the 20 NEWEST versions, contentFileIterator never descending into
 # .history/.trash, rebuild_index, reorder, col_sorts/set_col_sort (incl. the ""
-# root key), and the optional password gate (header-only; ?token= no longer accepted).
+# root key), the prompt library (prompt_library / save_prompt_library: CSRF allowlist,
+# strict null-baseMtime conflict, validation, 1 MB cap, keep-20 history, unreadable =
+# 422, unreachable via any path action) + prompt BLOCKS on the server (replace_content
+# counts parts not the mirror, rename_tag untouched, search_blocks rows, tree langs),
+# and the optional password gate (header-only; ?token= no longer accepted).
 #
 #   Run:  bash codeman/tests-api.sh           (exit 0 = all green)
 #         bash codeman/tests-api.sh 8099       (override the starting port;
@@ -724,6 +728,180 @@ cs=$(curl -sG "$BASE" --data-urlencode "action=col_sorts")
 eqs "an unknown sort field clears the entry (back to manual)" "$cs" "{}"
 r=$(post set_col_sort '{"parent":"../escape","field":"name"}')
 has "set_col_sort traversal parent → invalid path" "$(body "$r")" '"error":"invalid path"'
+
+# --- prompt library: prompt_library / save_prompt_library (.prompt-library.json) -----
+# One hidden root file, written whole, conflict-checked (STRICTER than save_page: a null
+# baseMtime against an existing file is a conflict — the first-create race), validated,
+# size-capped, every overwrite snapshotted into .prompt-library-history (keep 20), and
+# unreachable through every path-taking action.
+PL="$DATA/.prompt-library.json"; PLH="$DATA/.prompt-library-history"
+jp() { php -r "\$d=json_decode(stream_get_contents(STDIN),true); echo $1;"; }   # jp '<php expr over $d>'
+plsave() { post save_prompt_library "$1"; }
+plpart() { printf '{"id":"%s","slot":"%s","name":"%s","text":"%s"}' "$1" "$2" "$3" "$4"; }
+r=$(curl -s -w $'\n%{http_code}' "$BASE?action=prompt_library")
+eqs "prompt_library: header-less read is allowlisted → 200" "$(code "$r")" "200"
+eqs "prompt_library: absent file → empty library + null mtime/rev" "$(body "$r")" '{"v":1,"parts":[],"_mtime":null,"_rev":null}'
+r=$(curl -s -w $'\n%{http_code}' -X POST -H "Content-Type: application/json" -d '{"data":{"v":1,"parts":[]},"baseMtime":null}' "$BASE?action=save_prompt_library")
+eqs "save_prompt_library: header-less write → 403 (never allowlisted)" "$(code "$r")" "403"
+test ! -e "$PL" && ok "save_prompt_library: rejected write created no file" || bad "save_prompt_library: rejected write created no file" "file exists"
+r=$(plsave "{\"data\":{\"v\":1,\"parts\":[$(plpart p_role0000001 role 'Reviewer' 'You are a reviewer.')]},\"baseMtime\":null}")
+has "save_prompt_library: first create with baseMtime null → ok" "$(body "$r")" '"ok":true'
+m1=$(body "$r" | jp '$d["mtime"]')
+[ -n "$m1" ] && [ "$m1" -gt 0 ] 2>/dev/null && ok "save_prompt_library: returns the new mtime" || bad "save_prompt_library: returns the new mtime" "[$(body "$r")]"
+test ! -e "$PLH" && ok "save_prompt_library: a first create snapshots nothing (no prior file)" || bad "save_prompt_library: a first create snapshots nothing" "history dir exists"
+r=$(curl -s "$BASE?action=prompt_library")
+eqs "prompt_library: read returns the saved part" "$(printf '%s' "$r" | jp '$d["parts"][0]["id"]')" "p_role0000001"
+eqs "prompt_library: read carries the file mtime" "$(printf '%s' "$r" | jp '$d["_mtime"]')" "$m1"
+prev=$(cat "$PL")
+sleep 1   # second-granularity mtime — make the next write observably newer
+r=$(plsave "{\"data\":{\"v\":1,\"parts\":[$(plpart p_role0000001 role 'Reviewer' 'v2')]},\"baseMtime\":$m1}")
+has "save_prompt_library: correct baseMtime → ok" "$(body "$r")" '"ok":true'
+m2=$(body "$r" | jp '$d["mtime"]')
+eqs "save_prompt_library: the overwrite left exactly 1 history version" "$(ls "$PLH" 2>/dev/null | wc -l | tr -d ' ')" "1"
+eqs "save_prompt_library: the version is byte-equal to the overwritten file" "$(cat "$PLH"/*.json)" "$prev"
+h0=$(cksum < "$PL")
+r=$(plsave "{\"data\":{\"v\":1,\"parts\":[]},\"baseMtime\":$m1}")
+has "save_prompt_library: stale baseMtime → conflict" "$(body "$r")" '"conflict":true'
+eqs "save_prompt_library: the conflict reports the current mtime" "$(body "$r" | jp '$d["mtime"]')" "$m2"
+eqs "save_prompt_library: a conflict leaves the file untouched" "$(cksum < "$PL")" "$h0"
+r=$(plsave '{"data":{"v":1,"parts":[]},"baseMtime":null}')
+has "save_prompt_library: null baseMtime against an EXISTING file → conflict (create race)" "$(body "$r")" '"conflict":true'
+eqs "save_prompt_library: the create-race conflict wrote nothing" "$(cksum < "$PL")" "$h0"
+nb=$(ls "$PLH" | wc -l | tr -d ' ')
+r=$(plsave "{\"data\":{\"v\":1,\"parts\":[$(plpart p_role0000001 role 'Reviewer' 'forced')]},\"baseMtime\":null,\"force\":true}")
+has "save_prompt_library: force → ok" "$(body "$r")" '"ok":true'
+eqs "save_prompt_library: force snapshots the overwritten version" "$(ls "$PLH" | wc -l | tr -d ' ')" "$((nb+1))"
+r=$(plsave '{"data":{"v":1,"parts":[]}}')
+eqs "save_prompt_library: missing baseMtime KEY → 400" "$(code "$r")" "400"
+has "save_prompt_library: missing baseMtime names the field" "$(body "$r")" 'baseMtime'
+h1=$(cksum < "$PL"); mcur=$(curl -s "$BASE?action=prompt_library" | jp '$d["_mtime"]')
+for bad_doc in \
+  '{"v":1,"parts":"x"}|parts not an array' \
+  '{"v":1,"parts":[{"id":"p_a","slot":"bogus","name":"n","text":"t"}]}|unknown slot' \
+  '{"v":1,"parts":[{"id":"","slot":"role","name":"n","text":"t"}]}|empty id' \
+  '{"v":1,"parts":[{"id":"a/b","slot":"role","name":"n","text":"t"}]}|id with a slash' \
+  '{"v":1,"parts":[{"id":"p_a","slot":"role","name":"n","text":"t"},{"id":"p_a","slot":"role","name":"m","text":"u"}]}|duplicate id' \
+  '{"v":1,"parts":[{"id":"p_a","slot":"role","name":5,"text":"t"}]}|numeric name' \
+  '{"v":1,"parts":[{"id":"p_a","slot":"role","name":"n","text":"t","tags":"x"}]}|tags not a list' \
+  '[{"id":"p_a","slot":"role","name":"n","text":"t"}]|data is a list'; do
+  doc="${bad_doc%%|*}"; what="${bad_doc##*|}"
+  r=$(plsave "{\"data\":$doc,\"baseMtime\":$mcur}")
+  eqs "save_prompt_library: invalid ($what) → 400" "$(code "$r")" "400"
+done
+eqs "save_prompt_library: every invalid document left the file untouched" "$(cksum < "$PL")" "$h1"
+r=$(plsave "{\"data\":{\"v\":1,\"parts\":[$(plpart p_task0000001 task 'T' 'task text')]},\"baseMtime\":$mcur}")
+has "save_prompt_library: the task slot is accepted (server side)" "$(body "$r")" '"ok":true'
+php -r '$p=[];for($i=0;$i<40;$i++)$p[]=["id"=>"p_big$i","slot"=>"role","name"=>"n$i","text"=>str_repeat("x",30000)];echo json_encode(["data"=>["v"=>1,"parts"=>$p],"baseMtime"=>null,"force"=>true]);' > "$TMP/big.json"
+h2=$(cksum < "$PL")
+r=$(curl -s -w $'\n%{http_code}' -H "X-CodeMan-Request: 1" -X POST -H "Content-Type: application/json" --data-binary @"$TMP/big.json" "$BASE?action=save_prompt_library")
+eqs "save_prompt_library: over 1 MB → 413" "$(code "$r")" "413"
+eqs "save_prompt_library: an over-cap write left the file untouched" "$(cksum < "$PL")" "$h2"
+# keep-20 through the SHARED writeHistoryVersion core (the page-history keep-20 + stub
+# cases above guard the other caller of the refactor)
+i=1; while [ "$i" -le 25 ]; do
+  plsave "{\"data\":{\"v\":1,\"parts\":[$(plpart p_role0000001 role "v$i" 'x')]},\"baseMtime\":null,\"force\":true}" >/dev/null
+  i=$((i+1))
+done
+eqs "prompt library history: 25 saves prune to exactly 20 versions" "$(ls "$PLH" | wc -l | tr -d ' ')" "20"
+has "prompt library history: the NEWEST version is the one before the last save (v24)" "$(cat "$PLH/$(ls "$PLH" | sort -n | tail -1)")" '"name": "v24"'
+has "prompt library history: the OLDEST surviving version is v5" "$(cat "$PLH/$(ls "$PLH" | sort -n | head -1)")" '"name": "v5"'
+# unreachable through every path-taking action
+r=$(post get_page '{"path":".prompt-library.json"}');                  has "get_page .prompt-library.json → invalid path" "$(body "$r")" '"error":"invalid path"'
+r=$(post get_page '{"path":".prompt-library-history/x.json"}');        has "get_page .prompt-library-history/… → invalid path" "$(body "$r")" '"error":"invalid path"'
+r=$(post delete '{"path":".prompt-library.json"}');                    has "delete .prompt-library.json → invalid path" "$(body "$r")" '"error":"invalid path"'
+test -f "$PL" && ok "delete of the library file was refused (file still there)" || bad "delete of the library file was refused" "file gone"
+r=$(curl -sG "$BASE" --data-urlencode "action=list_history" --data-urlencode "path=../.prompt-library-history")
+eqs "list_history cannot reach .prompt-library-history" "$r" "[]"
+r=$(curl -s "$BASE?action=tree");                                       hasnt "tree never lists the library file" "$r" 'prompt-library'
+plsave "{\"data\":{\"v\":1,\"parts\":[$(plpart p_role0000001 role 'Only' 'zqlibonlytoken')]},\"baseMtime\":null,\"force\":true}" >/dev/null
+r=$(curl -sG "$BASE" --data-urlencode "action=search_content" --data-urlencode "q=zqlibonlytoken")
+eqs "search_content never matches inside the library file" "$r" "[]"
+# an unreadable file is an ERROR (422), never "empty" — and is never overwritten blind
+cp "$PL" "$TMP/pl.bak"; printf '{not json' > "$PL"
+r=$(curl -s -w $'\n%{http_code}' "$BASE?action=prompt_library")
+eqs "prompt_library: unreadable file → 422" "$(code "$r")" "422"
+has "prompt_library: 422 body is the clean error" "$(body "$r")" '"error":"prompt library is unreadable"'
+r=$(plsave '{"data":{"v":1,"parts":[]},"baseMtime":null}')
+has "save_prompt_library: null baseMtime over an unreadable file → conflict" "$(body "$r")" '"conflict":true'
+eqs "save_prompt_library: the unreadable file was not overwritten" "$(cat "$PL")" '{not json'
+printf '{"v":1}' > "$PL"
+r=$(curl -s -w $'\n%{http_code}' "$BASE?action=prompt_library")
+eqs "prompt_library: a document without parts → 422" "$(code "$r")" "422"
+printf '{"v":1,"parts":{"a":1}}' > "$PL"
+r=$(curl -s -w $'\n%{http_code}' "$BASE?action=prompt_library")
+eqs "prompt_library: an OBJECT-shaped parts → 422 (not read as a list)" "$(code "$r")" "422"
+cp "$TMP/pl.bak" "$PL"
+
+# --- the _rev conflict token (sha1 of the file bytes): same-second saves can't clobber
+r=$(curl -s "$BASE?action=prompt_library"); rv=$(printf '%s' "$r" | jp '$d["_rev"]')
+eqs "prompt_library: _rev is the sha1 of the file bytes" "$rv" "$(php -r 'echo sha1(file_get_contents($argv[1]));' "$PL")"
+r=$(plsave "{\"data\":{\"v\":1,\"parts\":[$(plpart p_rev000000001 role 'R1' 'first')]},\"baseRev\":\"$rv\"}")
+has "save_prompt_library: matching baseRev → ok" "$(body "$r")" '"ok":true'
+eqs "save_prompt_library: the response rev equals the new file's sha1" "$(body "$r" | jp '$d["rev"]')" "$(php -r 'echo sha1(file_get_contents($argv[1]));' "$PL")"
+h4=$(cksum < "$PL")
+r=$(plsave "{\"data\":{\"v\":1,\"parts\":[$(plpart p_rev000000002 role 'R2' 'second')]},\"baseRev\":\"$rv\"}")
+has "save_prompt_library: a SAME-SECOND save on the old rev → conflict (mtime can't see it)" "$(body "$r")" '"conflict":true'
+eqs "save_prompt_library: …and the file is untouched" "$(cksum < "$PL")" "$h4"
+has "save_prompt_library: the conflict carries the current rev" "$(body "$r")" "\"rev\":\"$(php -r 'echo sha1(file_get_contents($argv[1]));' "$PL")\""
+r=$(plsave '{"data":{"v":1,"parts":[]},"baseRev":null}')
+has "save_prompt_library: baseRev null against an existing file → conflict" "$(body "$r")" '"conflict":true'
+# empty objects survive a round trip (assoc decoding used to turn {} into [])
+mrev=$(curl -s "$BASE?action=prompt_library" | jp '$d["_rev"]')
+r=$(plsave "{\"data\":{\"v\":1,\"ext\":{},\"parts\":[{\"id\":\"p_obj000000001\",\"slot\":\"role\",\"name\":\"O\",\"text\":\"o\",\"meta\":{}}]},\"baseRev\":\"$mrev\"}")
+has "save_prompt_library: a doc with empty {} values saves" "$(body "$r")" '"ok":true'
+r=$(curl -s "$BASE?action=prompt_library")
+has "prompt_library: a top-level unknown {} round-trips as {} (not [])" "$r" '"ext":{}'
+has "prompt_library: a part-level unknown {} round-trips as {}" "$r" '"meta":{}'
+r=$(plsave "{\"data\":{\"v\":1,\"parts\":{}},\"baseRev\":null,\"force\":true}")
+eqs "save_prompt_library: parts:{} (an OBJECT) → 400" "$(code "$r")" "400"
+cp "$TMP/pl.bak" "$PL"
+
+# --- prompt BLOCKS on the server: Find & Replace (parts counted, mirror not), --------
+#     rename_tag untouched, search_blocks rows, tree langs
+post create_page '{"name":"PromptPg","parent":""}' >/dev/null
+post save_page '{"path":"PromptPg.json","data":{"title":"PromptPg","sections":[{"title":"S","collapsed":false,"tags":["zqtag"],"blocks":[{"type":"prompt","label":"","prompt":true,"format":"xml","parts":[{"slot":"task","ref":null,"text":"zqalpha","on":true}],"varValues":{},"code":"<task>\nzqalpha\n</task>"},{"type":"bash","label":"","code":"zqalpha zqalpha"},{"type":"note","label":"","note":true,"prompt":true,"code":"note zqbeta","parts":[{"slot":"task","text":"zqgamma"}]}],"subsections":[]}]}}' >/dev/null
+r=$(post replace_content '{"find":"zqalpha","replace":"x","preview":true}')
+has "replace preview: a prompt counts its PART hit once, not part + mirror (1 + code block 2 = 3)" "$(body "$r")" '"totalMatches":3'
+r=$(post replace_content '{"find":"task","replace":"y","preview":true}')
+has "replace preview: a hit only in the <task> wrapper counts 0" "$(body "$r")" '"totalMatches":0'
+h3=$(cksum < "$DATA/PromptPg.json")
+sleep 1
+r=$(post replace_content '{"find":"task","replace":"y"}')
+has "replace: wrapper-only literal changes no page" "$(body "$r")" '"changedPages":0'
+eqs "replace: wrapper-only literal did not rewrite the page" "$(cksum < "$DATA/PromptPg.json")" "$h3"
+r=$(post replace_content '{"find":"zqalpha","replace":"zqomega"}')
+has "replace: a part hit rewrites the page" "$(body "$r")" '"changedPages":1'
+pg=$(cat "$DATA/PromptPg.json")
+eqs "replace: the part text was rewritten" "$(printf '%s' "$pg" | jp '$d["sections"][0]["blocks"][0]["parts"][0]["text"]')" "zqomega"
+eqs "replace: the mirror is NOT regexed (the client re-derives it)" "$(printf '%s' "$pg" | jp 'json_encode($d["sections"][0]["blocks"][0]["code"])')" '"<task>\nzqalpha\n<\/task>"'
+eqs "replace: …the block is flagged mirrorStale instead" "$(printf '%s' "$pg" | jp 'json_encode($d["sections"][0]["blocks"][0]["mirrorStale"] ?? null)')" "true"
+eqs "replace: a code block gets no mirrorStale flag" "$(printf '%s' "$pg" | jp 'json_encode($d["sections"][0]["blocks"][1]["mirrorStale"] ?? null)')" "null"
+r=$(curl -sG "$BASE" --data-urlencode "action=search_content" --data-urlencode "q=zqomega")
+has "search_content still finds the replaced PART text while the mirror is stale" "$r" 'PromptPg.json'
+eqs "replace: code-block counting unchanged" "$(printf '%s' "$pg" | jp '$d["sections"][0]["blocks"][1]["code"]')" "zqomega zqomega"
+blk() { php -r '$d=json_decode(file_get_contents($argv[1]),true); echo json_encode($d["sections"][0]["blocks"]);' "$DATA/PromptPg.json"; }
+b0=$(blk)
+r=$(post rename_tag '{"from":"zqtag","to":"zqtag2"}')
+has "rename_tag ran on the prompt page" "$(body "$r")" '"pages":1'
+eqs "rename_tag leaves a prompt block byte-identical" "$(blk)" "$b0"
+r=$(curl -sG "$BASE" --data-urlencode "action=search_blocks" --data-urlencode "q=zqomega")
+eqs "search_blocks: the prompt row carries prompt:true" "$(printf '%s' "$r" | jp 'json_encode($d[0]["prompt"] ?? null)')" "true"
+eqs "search_blocks: the prompt row carries its parts" "$(printf '%s' "$r" | jp '$d[0]["parts"][0]["text"]')" "zqomega"
+eqs "search_blocks: the prompt row carries its format" "$(printf '%s' "$r" | jp '$d[0]["format"]')" "xml"
+has "search_blocks: varValues serialises as an OBJECT, not []" "$r" '"varValues":{}'
+hasnt "search_blocks: a code row has no prompt key" "$(printf '%s' "$r" | jp 'json_encode($d[1])')" '"prompt"'
+r=$(curl -sG "$BASE" --data-urlencode "action=search_blocks" --data-urlencode "q=zqgamma")
+eqs "search_blocks: prompt+note flags = a NOTE — its leftover parts are not searched" "$r" "[]"
+# part-text match while the mirror lacks the term (an older client left it stale)
+post save_page '{"path":"PromptPg.json","data":{"title":"PromptPg","sections":[{"title":"S","collapsed":false,"tags":[],"blocks":[{"type":"prompt","label":"","prompt":true,"parts":[{"slot":"task","text":"zqpartonly"}],"code":"stale"}],"subsections":[]}]}}' >/dev/null
+r=$(curl -sG "$BASE" --data-urlencode "action=search_blocks" --data-urlencode "q=zqpartonly")
+has "search_blocks: matches a prompt on part text even when code lacks it" "$r" '"prompt":true'
+post save_page '{"path":"PromptPg.json","data":{"title":"PromptPg","sections":[{"title":"S","collapsed":false,"tags":[],"blocks":[{"type":"note","label":"","note":true,"prompt":true,"code":"zqbeta","parts":[]}],"subsections":[]}]}}' >/dev/null
+r=$(curl -sG "$BASE" --data-urlencode "action=search_blocks" --data-urlencode "q=zqbeta")
+hasnt "search_blocks: a prompt flag beside note:true is not flagged a prompt" "$r" '"prompt"'
+post save_page '{"path":"PromptPg.json","data":{"title":"PromptPg","sections":[{"title":"S","collapsed":false,"tags":[],"blocks":[{"type":"prompt","label":"","prompt":true,"parts":[],"code":""}],"subsections":[]}]}}' >/dev/null
+r=$(curl -s "$BASE?action=tree")
+has "tree: a prompt page's langs include \"prompt\"" "$(printf '%s' "$r" | jp 'json_encode(array_values(array_filter($d, function($n){return ($n["path"]??"")==="PromptPg.json";}))[0]["langs"] ?? null)')" '"prompt"'
 
 # --- CSRF enforcement: deny-by-default, header-less writes 403, reads 200 ----
 # The post() helper always sends X-CodeMan-Request, so every write test above

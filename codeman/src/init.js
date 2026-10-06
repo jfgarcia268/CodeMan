@@ -68,6 +68,7 @@ if (navigator.storage && navigator.storage.persist) navigator.storage.persist().
 })();
 
 (async () => {
+  loadPromptLibrary();   // NOT awaited — runs in parallel; the tree never waits for the library
   await loadTree();
   renderPage();
   await restoreOpenTabs();

@@ -194,6 +194,60 @@ function writeColSorts($base, $map) {
     writeJsonAtomic(colSortFile($base), json_encode((object)$map));
 }
 
+// Prompt-part library: ONE hidden root-level .prompt-library.json ({v, parts:[…]}) read
+// and written whole by prompt_library / save_prompt_library, with every overwrite
+// snapshotted into .prompt-library-history/ (keep HISTORY_KEEP). Both are FIXED paths
+// that never take user input, and the dot prefix keeps them out of buildTree,
+// contentFileIterator and every safePath-resolved action.
+const PROMPT_LIB_MAX = 1048576;   // 1 MB encoded — larger is refused (413), never truncated
+const PROMPT_SLOTS = ['role', 'context', 'task', 'constraints', 'output'];
+function promptLibFile($base) { return rtrim($base, '/') . '/.prompt-library.json'; }
+function promptLibHistoryDir($base) { return rtrim($base, '/') . '/.prompt-library-history'; }
+// True for a 0..n-1 sequential-key array (a JSON list). Walks the keys in order rather
+// than using array_is_list (PHP 8.1+ only — the NAS PHP version isn't pinned).
+function cm_isList($a) {
+    if (!is_array($a)) return false;
+    $i = 0;
+    foreach ($a as $k => $_) { if ($k !== $i) return false; $i++; }
+    return true;
+}
+// Validate a whole library document. Returns null when valid, else an error string.
+// Unknown top-level and part keys are KEPT (forward compatibility) — only the fields
+// the client relies on are checked.
+function validatePromptLibrary($data) {
+    if (!is_array($data) || (cm_isList($data) && count($data) > 0)) return 'invalid prompt library: not an object';
+    if (count($data) === 0) return 'invalid prompt library: parts';
+    if (array_key_exists('v', $data) && !is_int($data['v'])) return 'invalid prompt library: v';
+    if (!isset($data['parts']) || !is_array($data['parts']) || !cm_isList($data['parts'])) return 'invalid prompt library: parts';
+    $seen = [];
+    foreach ($data['parts'] as $i => $p) {
+        $n = $i + 1;
+        if (!is_array($p) || (cm_isList($p) && count($p) > 0)) return "invalid prompt library: part $n";
+        if (!isset($p['id']) || !is_string($p['id']) || !preg_match('/^[A-Za-z0-9_-]{1,64}$/', $p['id'])) return "invalid prompt library: part $n: id";
+        if (isset($seen[$p['id']])) return "invalid prompt library: part $n: duplicate id";
+        $seen[$p['id']] = true;
+        if (!isset($p['slot']) || !in_array($p['slot'], PROMPT_SLOTS, true)) return "invalid prompt library: part $n: slot";
+        if (!isset($p['name']) || !is_string($p['name']) || strlen($p['name']) > 200) return "invalid prompt library: part $n: name";
+        if (!isset($p['text']) || !is_string($p['text'])) return "invalid prompt library: part $n: text";
+        if (array_key_exists('tags', $p)) {
+            if (!is_array($p['tags']) || !cm_isList($p['tags'])) return "invalid prompt library: part $n: tags";
+            foreach ($p['tags'] as $t) { if (!is_string($t)) return "invalid prompt library: part $n: tags"; }
+        }
+        if (array_key_exists('updatedAt', $p) && !((is_int($p['updatedAt']) || is_float($p['updatedAt'])) && $p['updatedAt'] >= 0)) {
+            return "invalid prompt library: part $n: updatedAt";
+        }
+    }
+    return null;
+}
+// A prompt block = the `prompt` flag with NO other kind flag — mirrors blockKind()'s
+// precedence (editor.js), where prompt is checked LAST, so a block an older client
+// converted (adding e.g. `note` but leaving `prompt` behind) is that other kind.
+function cm_isPromptBlock($b) {
+    if (!is_array($b) || empty($b['prompt'])) return false;
+    foreach (['checklist', 'rich', 'note', 'csv', 'json', 'html'] as $k) { if (!empty($b[$k])) return false; }
+    return true;
+}
+
 // Walk a section (any depth, legacy or tabbed) collecting tags and block langs.
 function collectMeta($section, &$tags, &$langs) {
     if (!empty($section['tags']) && is_array($section['tags'])) {
@@ -270,8 +324,15 @@ function cm_buildReplace($find, $replace, $isRegex, $ci) {
 }
 
 // Apply a callback to every block's code in a section (flat or legacy tabbed),
-// recursing into subsections. The callback receives the code string and returns
-// a replacement string (or null for "unchanged"). Returns true if any changed.
+// recursing into subsections. The callback receives the code string plus a $counted
+// flag, and returns a replacement string (or null for "unchanged"). Returns true if
+// any changed.
+// A PROMPT block's source of truth is parts[].text — `code` is only a derived mirror
+// (the assembled prompt incl. its <role>/## Role wrappers). So only the part texts are
+// walked; the mirror is never touched — when a part changes the block is flagged
+// `mirrorStale` and the client re-derives `code` from the parts. A hit that lands only
+// in the wrapper text is therefore never counted, and replace_content's
+// `$pageMatches > 0` write gate leaves the page untouched.
 function cm_walkBlocks(&$node, $cb) {
     $changed = false;
     if (!empty($node['tabs']) && is_array($node['tabs'])) {
@@ -281,8 +342,24 @@ function cm_walkBlocks(&$node, $cb) {
     }
     if (!empty($node['blocks']) && is_array($node['blocks'])) {
         foreach ($node['blocks'] as &$b) {
+            if (cm_isPromptBlock($b) && isset($b['parts']) && is_array($b['parts'])) {
+                $partsChanged = false;
+                foreach ($b['parts'] as &$p) {
+                    if (!is_array($p) || !isset($p['text']) || !is_string($p['text'])) continue;
+                    $r = $cb($p['text'], true);
+                    if ($r !== null && $r !== $p['text']) { $p['text'] = $r; $partsChanged = true; }
+                }
+                unset($p);
+                // The mirror is NOT regexed here: a find that also matches the <task>/
+                // ## Task wrapper text would rewrite the wrappers and leave a mirror that no
+                // longer matches the parts — the client would then LOCK the block as an
+                // external divergence. Flag it instead; the client regenerates `code` from
+                // the parts (the canonical side) and clears the flag, with no lock.
+                if ($partsChanged) { $b['mirrorStale'] = true; $changed = true; }
+                continue;
+            }
             if (!isset($b['code'])) continue;
-            $r = $cb($b['code']);
+            $r = $cb($b['code'], true);
             if ($r !== null && $r !== $b['code']) { $b['code'] = $r; $changed = true; }
         }
         unset($b);
@@ -304,14 +381,33 @@ function collectBlocksMatching($sections, $trail, $q, $rel, $page, &$out) {
         $content = (!empty($sec['tabs']) && is_array($sec['tabs'])) ? ($sec['tabs'][0] ?? []) : $sec;
         if (!empty($content['blocks']) && is_array($content['blocks'])) {
             foreach ($content['blocks'] as $b) {
-                $hay = strtolower(($b['code'] ?? '') . ' ' . ($b['label'] ?? '') . ' ' . ($b['type'] ?? ''));
+                $isPrompt = cm_isPromptBlock($b);
+                $hay = ($b['code'] ?? '') . ' ' . ($b['label'] ?? '') . ' ' . ($b['type'] ?? '');
+                // A prompt's parts are the source of truth (code is a derived mirror that
+                // an older client may have left stale) — so match on part text too.
+                if ($isPrompt && isset($b['parts']) && is_array($b['parts'])) {
+                    foreach ($b['parts'] as $p) {
+                        if (is_array($p) && isset($p['text']) && is_string($p['text'])) $hay .= ' ' . $p['text'];
+                    }
+                }
+                $hay = strtolower($hay);
                 if (strpos($hay, $q) !== false) {
-                    $out[] = [
+                    $row = [
                         'path' => $rel, 'page' => $page,
                         'label' => $b['label'] ?? '', 'type' => $b['type'] ?? 'plaintext',
                         'code' => $b['code'] ?? '', 'note' => !empty($b['note']),
                         'trail' => implode(' › ', $t)
                     ];
+                    // Quick-paste copies a prompt's FILLED output, which needs the parts,
+                    // format and variable values — so a prompt row carries them. Rows for
+                    // every other kind are byte-identical to before.
+                    if ($isPrompt) {
+                        $row['prompt'] = true;
+                        $row['parts'] = (isset($b['parts']) && is_array($b['parts'])) ? $b['parts'] : [];
+                        $row['format'] = (isset($b['format']) && is_string($b['format'])) ? $b['format'] : 'xml';
+                        $row['varValues'] = (object)((isset($b['varValues']) && is_array($b['varValues'])) ? $b['varValues'] : []);
+                    }
+                    $out[] = $row;
                 }
             }
         }
@@ -488,8 +584,17 @@ function snapshotHistory($base, $rel, $path) {
     // Never widen this. Suppressing a snapshot is destroying a recovery point, and
     // failing OPEN (snapshotting a stub) is only noise — failing closed loses data.
     if (!$vers && isCreatePageStub($old, basename($path, '.json'))) return;
-    if (!is_dir($hdir)) mkdir($hdir, 0777, true);
-    $stamp = @filemtime($path) ?: time();
+    writeHistoryVersion($hdir, $old, @filemtime($path) ?: time());
+}
+
+// The keep-HISTORY_KEEP version-writing core shared by page history (snapshotHistory)
+// and the prompt-library history (snapshotPromptLibrary). Writes $old as the next
+// version in $hdir, keyed by $stamp (the overwritten file's mtime). Returns false when
+// the history dir can't be created — @-suppressed, so a failed mkdir never leaks a
+// PHP warning into the JSON body.
+function writeHistoryVersion($hdir, $old, $stamp) {
+    if (!is_dir($hdir) && !@mkdir($hdir, 0777, true)) return false;
+    $vers = glob($hdir . '/*.json') ?: [];
     // mtime is second-granularity, so two saves in the same second collide on the
     // version filename. Bump to the next free integer key (filenames must stay
     // pure-integer for restore-by-ts) so a concurrent same-second version is still
@@ -516,6 +621,16 @@ function snapshotHistory($base, $rel, $path) {
         });
         foreach (array_slice($vers, 0, count($vers) - HISTORY_KEEP) as $v) @unlink($v);
     }
+    return true;
+}
+
+// Snapshot the prompt library's current file before it's overwritten. NO create-stub
+// skip: every prior library document is content somebody authored.
+function snapshotPromptLibrary($base, $f) {
+    if (!file_exists($f)) return;
+    $old = @file_get_contents($f);
+    if ($old === false) return;
+    writeHistoryVersion(promptLibHistoryDir($base), $old, @filemtime($f) ?: time());
 }
 
 $action = $_GET['action'] ?? '';
@@ -554,7 +669,7 @@ if ($authPass) {
 // write (visible/recoverable) rather than treating it as "offline" and retrying.
 $csrfReadOnly = [
     'tree', 'col_sorts', 'get_page', 'list_tags', 'list_trash', 'list_history',
-    'get_history_version', 'search_content', 'search_blocks',
+    'get_history_version', 'search_content', 'search_blocks', 'prompt_library',
 ];
 $csrfOff = getenv('CODEMAN_CSRF');
 if ($csrfOff === false && isset($_SERVER['CODEMAN_CSRF'])) $csrfOff = $_SERVER['CODEMAN_CSRF'];
@@ -698,15 +813,20 @@ switch ($action) {
             $data = json_decode(@file_get_contents($file->getPathname()), true);
             if (!is_array($data) || empty($data['sections'])) continue;
             $pageMatches = 0;
-            $cb = function($code) use ($pat, $repl, $preview, &$pageMatches, &$regexError) {
+            // $counted=false = a prompt block's derived `code` mirror (see cm_walkBlocks):
+            // rewritten so it tracks the parts, but its hits never count — a match only in
+            // the <role>/## Role wrapper text must not report (or write) anything.
+            $cb = function($code, $counted = true) use ($pat, $repl, $preview, &$pageMatches, &$regexError) {
                 if ($preview) {
+                    if (!$counted) return null;
                     $n = preg_match_all($pat, $code, $m);
                     if ($n === false) { $regexError = true; return null; }
                     $pageMatches += $n; return null;
                 }
                 $new = preg_replace($pat, $repl, $code, -1, $c);
                 if ($new === null) { $regexError = true; return null; }
-                $pageMatches += $c; return $new;
+                if ($counted) $pageMatches += $c;
+                return $new;
             };
             $changed = false;
             foreach ($data['sections'] as &$s) { if (cm_walkBlocks($s, $cb)) $changed = true; }
@@ -865,6 +985,84 @@ switch ($action) {
             writeColSorts($base, $map);
         }
         echo json_encode(['ok' => true]);
+        break;
+
+    case 'prompt_library':
+        // The whole prompt-part library + its conflict tokens: `_rev` (sha1 of the file's
+        // bytes — the save conflict base) and `_mtime` (kept for older clients / queued
+        // ops). Absent file = an empty library with both null. A file that exists but
+        // isn't an OBJECT holding a `parts` LIST is an ERROR (422), never "empty" —
+        // reporting it as empty would invite the client to save over (and so destroy) it.
+        // Decoded in OBJECT mode (not assoc) so an empty {} anywhere in the document —
+        // an unknown forward-compat key — round-trips as {} instead of turning into [].
+        $f = promptLibFile($base);
+        if (!file_exists($f)) {
+            echo json_encode(['v' => 1, 'parts' => [], '_mtime' => null, '_rev' => null]);
+            break;
+        }
+        $raw = @file_get_contents($f);
+        $doc = $raw === false ? null : json_decode($raw);
+        if (!($doc instanceof stdClass) || !isset($doc->parts) || !is_array($doc->parts)) jsonError('prompt library is unreadable', 422);
+        $doc->_mtime = @filemtime($f);
+        $doc->_rev = sha1($raw);
+        echo json_encode($doc, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        break;
+
+    case 'save_prompt_library':
+        // Replace the whole library. input: { data, baseRev | baseMtime, force? }.
+        // The conflict token is `baseRev` = the sha1 of the file the client last read
+        // (`_rev`): mtime is second-granularity, so two saves inside one second against
+        // the same mtime BOTH passed and the second silently clobbered the first. An old
+        // client / an op queued before this change sends only `baseMtime`, which still
+        // works the old way. One of the two keys is REQUIRED (null = "I believe there is
+        // no library yet").
+        // Conflict rule — deliberately STRICTER than save_page: when the file exists and
+        // force is unset, a null base is a conflict too, not a blind write. That closes
+        // the first-create race. A missing file is written whatever the base says.
+        if (!is_array($input) || !array_key_exists('data', $input)) jsonError('missing field: data');
+        $hasRev = array_key_exists('baseRev', $input);
+        if (!$hasRev && !array_key_exists('baseMtime', $input)) jsonError('missing field: baseMtime');
+        $data = $input['data'];
+        if (is_array($data)) { unset($data['_mtime']); unset($data['_rev']); }
+        $err = validatePromptLibrary($data);
+        if ($err !== null) jsonError($err);
+        // Re-decode the body in OBJECT mode for the bytes we WRITE: assoc decoding turns
+        // every empty {} into [] (unknown keys would be silently corrupted), and can't
+        // tell `"parts": {}` from `"parts": []`. Validation above ran on the assoc form;
+        // these checks close the object-vs-list gaps it cannot see.
+        $inObj = json_decode(file_get_contents('php://input'));
+        $dataObj = ($inObj instanceof stdClass && property_exists($inObj, 'data')) ? $inObj->data : null;
+        if (!($dataObj instanceof stdClass) || !isset($dataObj->parts) || !is_array($dataObj->parts)) jsonError('invalid prompt library: parts');
+        foreach ($dataObj->parts as $i => $p) {
+            if (!($p instanceof stdClass)) jsonError('invalid prompt library: part ' . ($i + 1));
+            if (property_exists($p, 'tags') && !is_array($p->tags)) jsonError('invalid prompt library: part ' . ($i + 1) . ': tags');
+        }
+        unset($dataObj->_mtime, $dataObj->_rev);
+        $json = json_encode($dataObj, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if ($json === false) jsonError('invalid prompt library: encoding');
+        if (strlen($json) > PROMPT_LIB_MAX) jsonError('prompt library too large', 413);
+        $f = promptLibFile($base);
+        // Serialize check-then-write across concurrent requests (an empty dot-prefixed
+        // lock file — fopen 'c' writes nothing). Released when the request ends.
+        $lk = @fopen(rtrim($base, '/') . '/.prompt-library.lock', 'c');
+        if ($lk) @flock($lk, LOCK_EX);
+        if (file_exists($f) && empty($input['force'])) {
+            clearstatcache(true, $f);
+            $cur = @filemtime($f);
+            $curBytes = @file_get_contents($f);
+            $curRev = $curBytes === false ? null : sha1($curBytes);
+            $stale = $hasRev
+                ? (!is_string($input['baseRev']) || $input['baseRev'] !== $curRev)
+                : ($input['baseMtime'] === null || (int)$input['baseMtime'] !== (int)$cur);
+            if ($stale) {
+                echo json_encode(['conflict' => true, 'mtime' => $cur, 'rev' => $curRev]);
+                break;
+            }
+        }
+        snapshotPromptLibrary($base, $f); // version the prior library (no-op when absent)
+        if (writeJsonAtomic($f, $json) === false) jsonError('failed to write prompt library', 500);
+        clearstatcache(true, $f);
+        echo json_encode(['ok' => true, 'mtime' => @filemtime($f), 'rev' => sha1($json)]);
         break;
 
     case 'create_page':

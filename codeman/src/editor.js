@@ -1204,6 +1204,15 @@ function newHtmlBlock() {
   return { type: 'html', label: '', code: '', html: true, entry: 'index.html', files: [] };
 }
 
+// A prompt block (see the PROMPT BLOCK helpers): one empty Custom part per known slot,
+// in slot order. `code` '' already equals the mirror of an all-empty prompt. Never
+// carries varsOn — a prompt owns its variables (varValues) outright.
+function newPromptPart(slot) { return { slot: slot, ref: null, text: '', on: true }; }
+function newPromptBlock() {
+  return { type: 'prompt', label: '', prompt: true, format: 'xml',
+    parts: PROMPT_SLOTS.map(s => newPromptPart(s.slot)), varValues: {}, code: '' };
+}
+
 // Normalize a project-relative path: strip leading "./" and "/", collapse empty
 // segments, resolve "." / "..". Returns '' if the path escapes the project root.
 function normalizeHtmlPath(p) {
@@ -1868,6 +1877,7 @@ const BLOCK_KINDS = [
   { kind: 'csv', icon: '▦', label: 'Table (CSV)' },
   { kind: 'json', icon: '{}', label: 'JSON tree' },
   { kind: 'html', icon: '▶', label: 'HTML preview' },
+  { kind: 'prompt', icon: '✦', label: 'Prompt' },
 ];
 function blockKind(block) {
   if (block.checklist) return 'checklist';
@@ -1878,6 +1888,10 @@ function blockKind(block) {
   // NOTE: the discriminator is the block.html BOOLEAN, never type === 'html' —
   // plain CODE blocks legitimately use 'html' as their language and must stay code.
   if (block.html) return 'html';
+  // The block.prompt BOOLEAN, never type === 'prompt' (same rule as html above). It is
+  // checked LAST on purpose: an OLDER client converting a prompt adds its own kind flag
+  // but leaves `prompt` behind, and that client's choice must win.
+  if (block.prompt) return 'prompt';
   return 'code';
 }
 function newBlockOfKind(kind) {
@@ -1887,6 +1901,7 @@ function newBlockOfKind(kind) {
   if (kind === 'csv') return newCsvBlock();
   if (kind === 'json') return newJsonBlock();
   if (kind === 'html') return newHtmlBlock();
+  if (kind === 'prompt') return newPromptBlock();
   return newBlock();
 }
 // HTML → plain text preserving line breaks. Done by mapping block-close tags and
@@ -1915,6 +1930,8 @@ function richToPlainText(html) {
 function blockPlainText(block) {
   if (block.checklist) return (block.items || []).map(i => '- [' + (i.done ? 'x' : ' ') + '] ' + i.text).join('\n');
   if (block.rich) return richToPlainText(block.code);
+  // A prompt's raw template in its own format, _V_ markers kept (= its stored mirror).
+  if (blockKind(block) === 'prompt') return promptMirror(block);
   return block.code || '';
 }
 // Parse plain text / markdown task lines into checklist items.
@@ -1931,8 +1948,12 @@ function textToChecklistItems(text) {
 function convertBlock(block, kind) {
   if (blockKind(block) === kind) return;
   const text = blockPlainText(block);
+  const wasPrompt = blockKind(block) === 'prompt';
   delete block.note; delete block.rich; delete block.checklist; delete block.items; delete block.csv; delete block.json;
   delete block.html; delete block.files; delete block.entry; delete block.htmlH;
+  delete block.prompt; delete block.parts; delete block.format;
+  // a prompt's varValues were its OWN (never section/varsOn-driven) — don't strand them
+  if (wasPrompt) delete block.varValues;
   if (kind === 'note') { block.note = true; block.type = 'markdown'; block.code = text; }
   else if (kind === 'rich') { block.rich = true; block.type = 'plaintext'; block.code = textToRichHtml(text); }
   else if (kind === 'checklist') { block.checklist = true; block.type = 'checklist'; block.items = textToChecklistItems(text); block.code = ''; }
@@ -1940,6 +1961,17 @@ function convertBlock(block, kind) {
   else if (kind === 'json') { block.json = true; block.type = 'json'; block.code = text; }
   // the text becomes the ENTRY file's source; a fresh project has no other files
   else if (kind === 'html') { block.html = true; block.type = 'html'; block.code = text; block.entry = 'index.html'; block.files = []; }
+  // the text becomes the Task part; any vars the source block filled carry across, but
+  // a prompt owns its variables outright, so the block-level varsOn switch goes
+  else if (kind === 'prompt') {
+    const vv = block.varValues;
+    Object.assign(block, newPromptBlock(), { label: block.label || '' });
+    if (vv && typeof vv === 'object' && !Array.isArray(vv)) block.varValues = vv;
+    delete block.varsOn;
+    const task = block.parts.find(p => p.slot === 'task');
+    if (task) task.text = text;
+    block.code = promptMirror(block);
+  }
   else { block.type = 'plaintext'; block.code = text; }   // code
 }
 
@@ -1948,6 +1980,16 @@ function convertBlock(block, kind) {
 // call site routes through this so the guard can't be bypassed. History is still the
 // undo path, so a plain confirm is enough.
 function confirmKindChange(block, kind, go) {
+  // Converting AWAY from a prompt keeps its assembled text but drops the parts + links.
+  if (blockKind(block) === 'prompt' && kind !== 'prompt' && promptConvertNeedsConfirm(block)) {
+    const target = (BLOCK_KINDS.find(k => k.kind === kind) || { label: kind }).label;
+    const n = Array.isArray(block.parts) ? block.parts.length : 0;
+    const fmt = (PROMPT_FORMATS.find(f => f.id === normalizePromptFormat(block.format)) || PROMPT_FORMATS[0]).label;
+    showConfirm('Converting to ' + target + ' keeps the assembled prompt text (' + fmt + ') but drops its '
+      + n + ' part' + (n === 1 ? '' : 's') + ' and library links. This can be undone from page History.',
+    { okLabel: 'Convert', danger: false }).then(ok => { if (ok) go(); });
+    return;
+  }
   const extra = (blockKind(block) === 'html' && kind !== 'html' && Array.isArray(block.files)) ? block.files.length : 0;
   if (!extra) { go(); return; }
   const names = block.files.slice(0, 3).map(f => (f && f.p) || '').filter(Boolean).join(', ');
@@ -1958,6 +2000,287 @@ function confirmKindChange(block, kind, go) {
     + '. The entry HTML is kept. This can be undone from page History.',
     { okLabel: 'Convert', danger: false }
   ).then(ok => { if (ok) go(); });
+}
+
+/* ---------- PROMPT BLOCK — pure helpers ---------- */
+// A prompt block assembles ordered PARTS (role / context / task / constraints / output
+// format) into one copyable prompt. `block.parts` is the source of truth; `block.code`
+// is a derived MIRROR that always equals assemblePrompt(block, block.format) with the
+// _V_ markers unfilled — it's what server search, the metadata index, Find & Replace
+// and OLDER clients see. Every user-facing output (Copy, Copy-as, quick-paste,
+// Markdown/HTML export, converting away) comes from assemblePrompt; there is no
+// second assembler anywhere (not in api.php either). All of these are pure globals so
+// tests.html can pin them.
+const PROMPT_SLOTS = [
+  { slot: 'role', label: 'Role', tag: 'role', lib: true },
+  { slot: 'context', label: 'Context', tag: 'context', lib: true },
+  { slot: 'task', label: 'Task', tag: 'task', lib: false },   // Phase 1: no library picker for Task
+  { slot: 'constraints', label: 'Constraints', tag: 'constraints', lib: true },
+  { slot: 'output', label: 'Output format', tag: 'output_format', lib: true },
+];
+const PROMPT_FORMATS = [
+  { id: 'xml', label: 'XML tags', fence: 'xml' },
+  { id: 'markdown', label: 'Markdown headings', fence: 'markdown' },
+  { id: 'plain', label: 'Plain', fence: 'text' },
+];
+const PROMPT_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;   // = api.php validatePromptLibrary's id rule
+
+function normalizePromptFormat(f) { return f === 'markdown' || f === 'plain' ? f : 'xml'; }
+function promptFormatInfo(f) { const id = normalizePromptFormat(f); return PROMPT_FORMATS.find(x => x.id === id); }
+function promptSlotInfo(slot) { return PROMPT_SLOTS.find(s => s.slot === slot) || null; }
+function promptSlotLabel(slot) { const k = promptSlotInfo(slot); return k ? k.label : String(slot); }
+// A part's slot as assembled — coerced exactly as normalizePromptBlock coerces it, so
+// normalizing a block never changes its assembled text.
+function promptPartSlot(p) { return p.slot == null ? 'task' : String(p.slot); }
+// CRLF → LF, drop leading BLANK lines (the first line's own indentation is kept — it can
+// be meaningful), drop trailing whitespace.
+function promptNormText(t) {
+  return String(t).replace(/\r\n?/g, '\n').replace(/^(?:[ \t]*\n)+/, '').replace(/\s+$/, '');
+}
+// XML tag for a slot: the known tag, else the slot lowercased with anything outside
+// [a-z0-9_] → '_', prefixed 'part_' unless it starts with a letter ('part' if empty).
+function promptSlotTag(slot) {
+  const k = promptSlotInfo(slot);
+  if (k) return k.tag;
+  const t = String(slot).toLowerCase().replace(/[^a-z0-9_]/g, '_');
+  if (!t) return 'part';
+  return /^[a-z]/.test(t) ? t : 'part_' + t;
+}
+// Assemble the prompt text in `format` (xml | markdown | plain; anything else = xml).
+// Included = on !== false AND non-blank after normalisation. Grouped by slot: known
+// slots in PROMPT_SLOTS order, then unknown slots in first-appearance order; array
+// order within a slot; empty slots omitted. Text is NOT XML-escaped (the Claude
+// convention — the tags are structure, the content is verbatim). NEVER THROWS.
+function assemblePrompt(block, format) {
+  try {
+    if (!block || typeof block !== 'object' || !Array.isArray(block.parts)) return '';
+    const fmt = normalizePromptFormat(format);
+    const groups = new Map();
+    const unknown = [];
+    block.parts.forEach(p => {
+      if (!p || typeof p !== 'object' || typeof p.text !== 'string') return;
+      const slot = promptPartSlot(p);
+      if (!promptSlotInfo(slot) && !unknown.includes(slot)) unknown.push(slot);
+      if (p.on === false) return;
+      const t = promptNormText(p.text);
+      if (!t) return;
+      if (!groups.has(slot)) groups.set(slot, []);
+      groups.get(slot).push(t);
+    });
+    const order = PROMPT_SLOTS.map(s => s.slot).concat(unknown);
+    const out = [];
+    order.forEach(slot => {
+      const texts = groups.get(slot);
+      if (!texts || !texts.length) return;
+      const body = texts.join('\n\n');
+      if (fmt === 'markdown') out.push('## ' + promptSlotLabel(slot) + '\n\n' + body);
+      else if (fmt === 'plain') out.push(body);
+      else { const tag = promptSlotTag(slot); out.push('<' + tag + '>\n' + body + '\n</' + tag + '>'); }
+    });
+    return out.join('\n\n');
+  } catch (e) { return ''; }
+}
+function promptMirror(b) { return assemblePrompt(b, b && b.format); }
+// PHP decodes an empty JSON object as [] — so only a plain object counts.
+function promptVarValues(b) {
+  const v = b && b.varValues;
+  return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+}
+// What Copy copies: the assembled prompt with the prompt's OWN variable values filled.
+function promptOutput(b, fmt) { return substituteVars(assemblePrompt(b, fmt || (b && b.format)), promptVarValues(b)); }
+// Variable names across the INCLUDED parts only (an off part's marker isn't asked for).
+function promptVarNames(b) { return parseVars(assemblePrompt(b, 'plain')); }
+function promptMissingVars(b) {
+  const vals = promptVarValues(b);
+  return promptVarNames(b).filter(n => !varValue(vals, n).length);
+}
+function promptStats(s) { const n = String(s || '').length; return { chars: n, tokens: Math.ceil(n / 4) }; }
+// The stored mirror no longer matches the parts — an older client (or anything that
+// edits `code` alone) changed it. The block then LOCKS until the user resolves it.
+function isPromptOutOfSync(b) { return (b.code || '') !== promptMirror(b); }
+// FNV-1a 32-bit over UTF-16 code units → 8 lowercase hex digits. Only used to remember
+// WHICH library text the user chose to keep their own version against ("Keep mine").
+function promptTextHash(s) {
+  const str = String(s == null ? '' : s);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+function libPartById(lib, id) {
+  if (!lib || !Array.isArray(lib.parts)) return null;
+  return lib.parts.find(p => p && p.id === id) || null;
+}
+// custom | unknown (library not loaded — never claim "orphan" off a null library) |
+// orphan | synced | kept ("Keep mine" against THIS library text) | drift.
+function promptPartState(part, lib) {
+  if (!part || !part.ref) return 'custom';
+  if (!lib) return 'unknown';
+  const lp = libPartById(lib, part.ref);
+  if (!lp) return 'orphan';
+  if (part.text === lp.text) return 'synced';
+  if (part.ack && part.ack === promptTextHash(lp.text)) return 'kept';
+  return 'drift';
+}
+// Swap part i with the nearest part of the SAME slot in direction dir (−1/+1). Returns
+// the new index, or −1 at the edge of its slot (never crosses into another slot).
+function movePromptPart(parts, i, dir) {
+  if (!Array.isArray(parts) || !parts[i]) return -1;
+  const slot = parts[i].slot;
+  let j = i + dir;
+  while (j >= 0 && j < parts.length && !(parts[j] && parts[j].slot === slot)) j += dir;
+  if (j < 0 || j >= parts.length) return -1;
+  const t = parts[i]; parts[i] = parts[j]; parts[j] = t;
+  return j;
+}
+// Where a new part of `slot` goes: after the slot's last part; else just before the
+// first part of a LATER known slot; else at the end.
+function insertIndexForSlot(parts, slot) {
+  for (let i = parts.length - 1; i >= 0; i--) if (parts[i] && parts[i].slot === slot) return i + 1;
+  const rank = PROMPT_SLOTS.findIndex(s => s.slot === slot);
+  if (rank >= 0) {
+    const i = parts.findIndex(p => { const r = p ? PROMPT_SLOTS.findIndex(s => s.slot === p.slot) : -1; return r > rank; });
+    if (i >= 0) return i;
+  }
+  return parts.length;
+}
+// Render-time shape repair (mutates; NEVER marks the page dirty). Missing/non-array
+// `parts` → rebuilt from `code` (one Custom Task part holding the raw text, plain
+// format) so text is never lost, with the mirror re-derived from it; otherwise the
+// skeleton. Junk entries are dropped and fields coerced the same way assemblePrompt
+// reads them, so normalizing never changes the assembled text of existing parts.
+function normalizePromptBlock(b) {
+  if (!Array.isArray(b.parts)) {
+    const code = typeof b.code === 'string' ? b.code : '';
+    if (code.trim()) {
+      // The raw text IS the task — never wrap it again. With a stored format (xml) the
+      // text is often an already-assembled prompt, and re-wrapping it double-tagged it.
+      b.parts = [{ slot: 'task', ref: null, text: code, on: true }];
+      b.format = 'plain';
+    } else {
+      b.parts = PROMPT_SLOTS.map(s => newPromptPart(s.slot));
+    }
+    b.code = promptMirror(b);
+  }
+  b.parts = b.parts.filter(p => p && typeof p === 'object' && !Array.isArray(p));
+  b.parts.forEach(p => {
+    p.slot = promptPartSlot(p);
+    if (typeof p.text !== 'string') p.text = '';
+    p.on = p.on !== false;
+    if (typeof p.ref !== 'string' || !p.ref) p.ref = null;
+  });
+  // Find & Replace changed part text server-side and flagged the mirror (it is never
+  // regexed in PHP — that rewrote the wrappers and LOCKED the block). Parts are the
+  // canonical side and the change came from a known tool, so re-derive silently: no
+  // lock, no dirty mark (the next save writes it).
+  if (b.mirrorStale) { b.code = promptMirror(b); delete b.mirrorStale; }
+  return b;
+}
+// Everything an edit session can change, for the Revert dirty check + restore.
+function promptSnapshot(b) {
+  return JSON.stringify({ parts: b.parts, format: b.format, varValues: b.varValues || null, code: b.code || '' });
+}
+// Converting away is lossy only when there is structure to lose: more than one
+// non-blank part, or any library link.
+function promptConvertNeedsConfirm(b) {
+  const parts = Array.isArray(b && b.parts) ? b.parts : [];
+  const filled = parts.filter(p => p && typeof p.text === 'string' && p.text.trim()).length;
+  return filled > 1 || parts.some(p => p && p.ref);
+}
+function isPromptBlock(b) { return !!b && blockKind(b) === 'prompt'; }
+// A Markdown code fence longer than any backtick run inside `s` (min 3).
+function mdFence(s) {
+  const runs = String(s || '').match(/`+/g) || [];
+  const longest = runs.reduce((m, r) => Math.max(m, r.length), 0);
+  return '`'.repeat(Math.max(3, longest + 1));
+}
+// Library document shape guard (the cacheOnSuccess / fallback poison guard): a plain
+// object, not an error body, with an array `parts`. An EMPTY parts array is valid.
+function isPromptLibraryDoc(d) {
+  return !!d && typeof d === 'object' && !Array.isArray(d) && !d.error && Array.isArray(d.parts);
+}
+// Client copy of api.php's per-part validation (validatePromptLibrary).
+function isValidLibPart(p) {
+  if (!p || typeof p !== 'object' || Array.isArray(p)) return false;
+  if (typeof p.id !== 'string' || !PROMPT_ID_RE.test(p.id)) return false;
+  if (!PROMPT_SLOTS.some(s => s.slot === p.slot)) return false;
+  if (typeof p.name !== 'string' || new TextEncoder().encode(p.name).length > 200) return false;
+  if (typeof p.text !== 'string') return false;
+  if (p.tags !== undefined && !(Array.isArray(p.tags) && p.tags.every(t => typeof t === 'string'))) return false;
+  if (p.updatedAt !== undefined && !(typeof p.updatedAt === 'number' && isFinite(p.updatedAt) && p.updatedAt >= 0)) return false;
+  return true;
+}
+// "p_" + 12 random hex chars, never one already in `existing` (a Set or array of ids).
+function newPromptPartId(existing) {
+  const has = existing instanceof Set ? existing : new Set(existing || []);
+  for (;;) {
+    let hex = '';
+    const c = (typeof crypto !== 'undefined' && crypto && crypto.getRandomValues) ? crypto : null;
+    if (c) { const a = new Uint8Array(6); c.getRandomValues(a); hex = Array.from(a, x => x.toString(16).padStart(2, '0')).join(''); }
+    else { for (let i = 0; i < 12; i++) hex += Math.floor(Math.random() * 16).toString(16); }
+    const id = 'p_' + hex;
+    if (!has.has(id)) return id;
+  }
+}
+// Union-merge two library documents BY ID (the offline-replay conflict path — the
+// replay has only the full document, not the user's original change). Server order
+// first; an id in both keeps the larger updatedAt (missing = 0; a tie goes to LOCAL);
+// local-only ids are appended in local order. NEVER mutates its inputs. Accepted
+// trade-off: a part deleted on this device comes back when the other side still has it.
+function mergePromptLibraries(local, server) {
+  const clone = (x) => JSON.parse(JSON.stringify(x));
+  const lp = (local && Array.isArray(local.parts)) ? local.parts : [];
+  const sp = (server && Array.isArray(server.parts)) ? server.parts : [];
+  const lById = new Map();
+  lp.forEach(p => { if (p && p.id != null && !lById.has(p.id)) lById.set(p.id, p); });
+  const seen = new Set();
+  const parts = [];
+  sp.forEach(p => {
+    if (!p || p.id == null || seen.has(p.id)) return;
+    seen.add(p.id);
+    const l = lById.get(p.id);
+    if (!l) { parts.push(clone(p)); return; }
+    const lt = Number(l.updatedAt) || 0, st = Number(p.updatedAt) || 0;
+    parts.push(clone(st > lt ? p : l));
+  });
+  lp.forEach(p => { if (!p || p.id == null || seen.has(p.id)) return; seen.add(p.id); parts.push(clone(p)); });
+  const out = Object.assign({}, server || {}, local || {}, { v: 1, parts });
+  delete out._mtime;
+  return out;
+}
+// Id-keyed, idempotent library document edits (mutate `doc` in place).
+function libUpsert(doc, part) {
+  if (!Array.isArray(doc.parts)) doc.parts = [];
+  const i = doc.parts.findIndex(p => p && p.id === part.id);
+  if (i >= 0) doc.parts[i] = part; else doc.parts.push(part);
+  return doc;
+}
+function libRemove(doc, id) {
+  doc.parts = (Array.isArray(doc.parts) ? doc.parts : []).filter(p => !(p && p.id === id));
+  return doc;
+}
+function libAddIfAbsent(doc, part) {
+  if (!Array.isArray(doc.parts)) doc.parts = [];
+  if (doc.parts.some(p => p && p.id === part.id)) return false;
+  doc.parts.push(JSON.parse(JSON.stringify(part)));
+  return true;
+}
+// Plan a sidecar library import against the current library: only ABSENT, valid ids
+// are added — a present id is never overwritten (merge restraint, as for folders).
+function planPromptLibraryImport(curDoc, incoming) {
+  const ids = new Set(((curDoc && Array.isArray(curDoc.parts)) ? curDoc.parts : []).map(p => p && p.id));
+  const add = []; let present = 0, bad = 0;
+  (Array.isArray(incoming) ? incoming : []).forEach(p => {
+    if (!isValidLibPart(p)) { bad++; return; }
+    if (ids.has(p.id)) { present++; return; }
+    ids.add(p.id);
+    add.push(JSON.parse(JSON.stringify(p)));
+  });
+  return { add, present, bad };
+}
+// The library changed (loaded, saved, synced) → let every rendered prompt block refresh
+// its chips / source labels. Never touches a textarea, so focus and caret survive.
+function onPromptLibraryChanged() {
+  document.querySelectorAll('#page .block.prompt').forEach(b => b._refreshPromptLib && b._refreshPromptLib());
 }
 
 // Pure: wrap a menu index into [0,n) so ArrowUp/Down cycle past both ends
@@ -2324,7 +2647,8 @@ function renderSection(section, parentArray, idx, isSub, parentBlocks) {
   // Section-level variables (mutually exclusive with block-level): when on, the
   // section shows one set of fill-in fields for every _V_NAME_V_ in its OWN blocks,
   // and those values substitute into all of them. Disabled if any block owns vars.
-  const anyBlockVars = content.blocks.some(b => b.varsOn);
+  // A prompt block owns its variables (never varsOn) — it neither blocks nor joins these.
+  const anyBlockVars = content.blocks.some(b => b.varsOn && !isPromptBlock(b));
   const sectionVarsOn = !!section.varsOn && !anyBlockVars;
   const secVarToggle = mkBtn('$', () => {
     if (anyBlockVars) { toast('Disable variables on the code blocks first'); return; }
@@ -2393,11 +2717,14 @@ function renderSection(section, parentArray, idx, isSub, parentBlocks) {
     if (old) old.remove();
     if (!sectionVarsOn) return;
     const names = [];
-    content.blocks.forEach(b => parseVars(b.code).forEach(n => { if (!names.includes(n)) names.push(n); }));
+    content.blocks.forEach(b => { if (isPromptBlock(b)) return; parseVars(b.code).forEach(n => { if (!names.includes(n)) names.push(n); }); });
     const secVars = document.createElement('div');
     secVars.className = 'section-vars';
     const head = document.createElement('div'); head.className = 'section-vars-head'; head.textContent = 'Section variables';
     secVars.appendChild(head);
+    // The only markers here belong to a prompt (it owns its own variables): an empty
+    // "no variables" panel would read as a bug — show nothing.
+    if (!names.length && content.blocks.some(b => isPromptBlock(b) && promptVarNames(b).length)) return;
     if (!names.length) {
       const e = document.createElement('div'); e.className = 'block-vars-empty';
       e.textContent = 'No variables in this section’s blocks — wrap a value as _V_NAME_V_';
@@ -2407,7 +2734,7 @@ function renderSection(section, parentArray, idx, isSub, parentBlocks) {
         const row = document.createElement('div'); row.className = 'var-row';
         const lab = document.createElement('label'); lab.className = 'var-name'; lab.textContent = name;
         const inp = document.createElement('input'); inp.className = 'var-input'; inp.placeholder = 'MISSING VALUE';
-        inp.value = section.varValues[name] || '';
+        inp.value = varValue(section.varValues, name);
         inp.addEventListener('input', () => {
           section.varValues[name] = inp.value;
           // refresh only this section's direct blocks (live, keeps input focus)
@@ -2433,7 +2760,7 @@ function renderSection(section, parentArray, idx, isSub, parentBlocks) {
       onClick: () => { content.blocks.push(newBlockOfKind(k.kind)); renderPage(); scheduleSave(); },
     })));
   });
-  addMenuBtn.title = 'Add a block (Code, Note, Rich Text, Checklist, Table/CSV, JSON tree)';
+  addMenuBtn.title = 'Add a block (Code, Note, Rich Text, Checklist, Table/CSV, JSON tree, HTML preview, Prompt)';
   const addSubBtn = mkBtn('+ Subsection', () => {
     content.subsections.push(newSection());
     renderPage();
@@ -2548,6 +2875,10 @@ function renderSectionContent(container, blocks, subsections, sectionVarValues, 
 // subsection → combine everything into the topmost selected subsection.
 function mergeBlocksAndSubs(selBlocks, selSubs, blocks, subsections) {
   if (!selSubs.length) {
+    // Joining `code` into a prompt would merge only its derived mirror (the parts would
+    // silently win again on the next edit). Moving whole blocks into a subsection, below,
+    // stays allowed — that never touches a block's content.
+    if (selBlocks.some(i => isPromptBlock(blocks[i]))) { toast('Prompt blocks can’t be merged — convert first'); return; }
     const top = selBlocks[0];
     blocks[top].code = selBlocks.map(i => blocks[i].code).join('\n\n');
     selBlocks.slice(1).sort((a, b) => b - a).forEach(i => blocks.splice(i, 1));
@@ -2688,6 +3019,9 @@ function createLangPicker(block, onChange) {
 // Per-edit-session code backups, keyed by block object so they survive
 // autosaves and re-renders until the session ends (save or revert).
 const blockBackups = new WeakMap();
+// Prompt blocks also snapshot their parts/format/varValues per session (promptSnapshot),
+// so Revert restores the STRUCTURE, not just the derived `code` mirror.
+const promptBackups = new WeakMap();
 
 // Is a block edit session open on the active page? Derived from the DOM, NOT from a
 // tracked Set: a Set would hold a strong ref to the block object and would go stale
@@ -2717,8 +3051,10 @@ function wireFocusFlush(el) {
     // without this guard an explicit Save cost TWO writes (its own, plus this flush landing
     // mid-flight → savePending → a second request) and two history versions.
     if (el.classList.contains('viewing') || !document.contains(el)) return;
-    if (e.relatedTarget && (el.contains(e.relatedTarget) || e.relatedTarget.closest('.mini-menu'))) return;
-    if (document.querySelector('.mini-menu')) return;
+    // A ⋯ menu or a MODAL (confirm, picker, panel) opened from this block is part of the
+    // interaction, not a departure: both live on document.body and take focus.
+    if (e.relatedTarget && (el.contains(e.relatedTarget) || e.relatedTarget.closest('.mini-menu, .modal-overlay'))) return;
+    if (document.querySelector('.mini-menu, .modal-overlay')) return;
     // A TEARDOWN is not a departure either. Delete/convert splice the block and call
     // renderPage(), which does `#page.innerHTML = ''` — and the engine dispatches the
     // focused button's focusout at the START of that removal, while this element still
@@ -2736,6 +3072,9 @@ function wireFocusFlush(el) {
     // by their own route, and the page stays in `pageDirty` regardless.
     setTimeout(() => {
       if (el.classList.contains('viewing') || !document.contains(el)) return;
+      // showModal moves focus into the dialog one task later — so the overlay may only
+      // exist by now (focus went to <body> first with a null relatedTarget).
+      if (document.querySelector('.modal-overlay')) return;
       if (currentPagePath && pageDirty.has(currentPagePath)) savePage();
     }, 0);
   });
@@ -2779,9 +3118,17 @@ function parseVars(code) {
 }
 function substituteVars(code, values) {
   return (code || '').replace(VAR_RE, (_, name) => {
-    const v = values && values[name];
-    return (v && v.length) ? v : 'MISSING VALUE';
+    const v = varValue(values, name);
+    return v.length ? v : 'MISSING VALUE';
   });
+}
+// A variable's value, read as an OWN property only. A bare values[name] walks the
+// prototype chain, so a marker like _V_constructor_V_ "found" Object's constructor and
+// pasted its FUNCTION SOURCE into the copied text (and into the fill-in field).
+function varValue(values, name) {
+  if (!values || typeof values !== 'object' || !Object.prototype.hasOwnProperty.call(values, name)) return '';
+  const v = values[name];
+  return typeof v === 'string' ? v : (v == null ? '' : String(v));
 }
 
 /* ---------- MARKDOWN (note blocks) + CROSS-PAGE [[LINKS]] ---------- */
@@ -3387,6 +3734,746 @@ function renderCsvBlock(block, parentArray, idx) {
   renderTable();
   wireFocusFlush(el);
   if (!el.classList.contains('viewing')) requestAnimationFrame(autosize);
+  return el;
+}
+
+// A keystroke that would CHANGE a textarea's text (no Meta/Ctrl/Alt chord; a printable
+// key, or Backspace/Delete/Enter). Navigation, Tab, Escape and shortcuts don't count —
+// they must keep working on a linked (readOnly) prompt part. Pure.
+function isEditingKey(e) {
+  if (!e || e.metaKey || e.ctrlKey || e.altKey) return false;
+  const k = e.key || '';
+  return k.length === 1 || k === 'Backspace' || k === 'Delete' || k === 'Enter';
+}
+let _promptUid = 0;
+
+// Apply the edit a linked part's detach confirm interrupted: {key} (a printable key,
+// Enter, Backspace, Delete) or {insert} (pasted text), at the textarea's selection.
+// Pure over the textarea (no prompt state) — unit-tested.
+function applyEditIntent(ta, intent) {
+  if (!ta || !intent) return;
+  const s = ta.selectionStart, e = ta.selectionEnd;
+  if (typeof intent.insert === 'string') { if (intent.insert) ta.setRangeText(intent.insert, s, e, 'end'); return; }
+  const k = intent.key || '';
+  if (k.length === 1) ta.setRangeText(k, s, e, 'end');
+  else if (k === 'Enter') ta.setRangeText('\n', s, e, 'end');
+  else if (k === 'Backspace') { if (s !== e) ta.setRangeText('', s, e, 'end'); else if (s > 0) ta.setRangeText('', s - 1, s, 'end'); }
+  else if (k === 'Delete') { if (s !== e) ta.setRangeText('', s, e, 'end'); else if (s < ta.value.length) ta.setRangeText('', s, s + 1, 'end'); }
+}
+// What a part's source button says: "✦ <library name>" linked (+ "(edited)" after
+// Keep my text), "⚠ Missing" when its library part was deleted, "✎ Custom" otherwise
+// ("✦ Linked" while the library is unknown). Pure.
+function promptSourceLabel(part, lib) {
+  const st = promptPartState(part, lib);
+  if (st === 'custom') return { state: st, icon: '✎', text: 'Custom', edited: false };
+  if (st === 'orphan') return { state: st, icon: '⚠', text: 'Missing', edited: false };
+  if (st === 'unknown') return { state: st, icon: '✦', text: 'Linked', edited: false };
+  const lp = libPartById(lib, part.ref);
+  return { state: st, icon: '✦', text: (lp && lp.name) || 'Library part', edited: st === 'kept' };
+}
+function promptPlaceholder(slot) {
+  const k = promptSlotInfo(slot);
+  if (!k) return String(slot) + '…';
+  if (!k.lib) return 'Describe the ' + k.label.toLowerCase() + '…';
+  const l = k.label.toLowerCase();
+  return 'Type ' + (/^[aeiou]/.test(l) ? 'an ' : 'a ') + l + ', or choose one from the library';
+}
+// Fill the preview with the FILLED output as text nodes, wrapping each unfilled
+// variable's "MISSING VALUE" in a span so it stands out. textContent === promptOutput
+// (same regex + same rule as substituteVars); no innerHTML anywhere.
+function fillPromptPreview(view, block) {
+  view.textContent = '';
+  const tmpl = assemblePrompt(block, block.format);
+  const vals = promptVarValues(block);
+  const re = new RegExp(VAR_RE.source, 'g');
+  let last = 0, m;
+  while ((m = re.exec(tmpl)) !== null) {
+    if (m.index > last) view.appendChild(document.createTextNode(tmpl.slice(last, m.index)));
+    const v = varValue(vals, m[1]);
+    if (v.length) view.appendChild(document.createTextNode(v));
+    else { const sp = document.createElement('span'); sp.className = 'prompt-missing'; sp.title = 'Fill in ' + m[1]; sp.textContent = 'MISSING VALUE'; view.appendChild(sp); }
+    last = re.lastIndex;
+  }
+  if (last < tmpl.length) view.appendChild(document.createTextNode(tmpl.slice(last)));
+}
+
+// Prompt block: ordered parts (role / context / task / constraints / output format),
+// each Custom or LINKED to a library part (by id + a text snapshot), assembled into one
+// copyable prompt. Mirrors renderCsvBlock's edit/view split; the edit pane is one card
+// per slot, the preview + variables show in both modes. RULES (see CLAUDE.md):
+//  - parts are the source of truth; every part/format change re-derives block.code
+//    (syncMirror) and goes through scheduleSave;
+//  - a stored code that no longer matches the parts LOCKS the block (never discarded
+//    unseen);
+//  - NO in-block mutation re-renders the page — only the convert and delete lines tear
+//    the block down (CI grep); everything else rebuilds its own subtree;
+//  - the prompt owns its variables (varValues) and never reads/sets varsOn.
+function renderPromptBlock(block, parentArray, idx) {
+  normalizePromptBlock(block);
+  const isMobile = document.body.classList.contains('is-mobile');
+  const el = document.createElement('div');
+  el.className = 'block prompt' + (blockBackups.has(block) ? '' : ' viewing');
+  const locked = isPromptOutOfSync(block);
+  const uid = ++_promptUid;
+  // Slots shown expanded in THIS render instance stay expanded (sticky) — a part that
+  // is reverted/cleared to blank must not vanish from under the caret.
+  const expanded = new Set(['task']);
+
+  const toolbar = document.createElement('div');
+  toolbar.className = 'block-toolbar';
+
+  const labelInput = document.createElement('input');
+  labelInput.className = 'block-label';
+  labelInput.placeholder = 'Label (optional)';
+  labelInput.value = block.label || '';
+  labelInput.addEventListener('input', () => { block.label = labelInput.value; scheduleSave(); });
+
+  const spacer = document.createElement('span');
+  spacer.className = 'spacer';
+
+  const typeBtn = makeTypeMenuButton(block);
+
+  // edit pane | side (vars + meta + preview) — side-by-side with a sticky preview on
+  // wide screens while editing (CSS), stacked otherwise.
+  const bodyWrap = document.createElement('div');
+  bodyWrap.className = 'prompt-body';
+  const editPane = document.createElement('div');
+  editPane.className = 'prompt-edit';
+  const side = document.createElement('div');
+  side.className = 'prompt-side';
+  const varsBox = document.createElement('div');
+  varsBox.className = 'block-vars prompt-vars';
+  const meta = document.createElement('div');
+  meta.className = 'prompt-meta';
+  const formatBtn = menuBtn('', () => openFormatMenu(formatBtn));
+  formatBtn.className = 'secondary prompt-format-btn';
+  formatBtn.title = 'Assembly format';
+  const metaText = document.createElement('span');
+  metaText.className = 'prompt-stats';
+  const libNote = document.createElement('button');
+  libNote.type = 'button';
+  libNote.className = 'prompt-lib-note';
+  meta.append(formatBtn, metaText, libNote);
+  const view = document.createElement('pre');
+  view.className = 'prompt-view';
+  const empty = document.createElement('div');
+  empty.className = 'prompt-empty';
+  empty.textContent = 'Empty prompt — Edit to add a role, context, task…';
+  side.append(varsBox, meta, view, empty);
+  bodyWrap.append(editPane, side);
+
+  // A part/format change while the stored text disagrees with the parts would silently
+  // overwrite that text — so every such action exits here until the notice is resolved.
+  function guardLocked() {
+    if (locked) { toast('Resolve the stored-text notice on this prompt first'); return true; }
+    return false;
+  }
+  function syncMirror() { block.code = promptMirror(block); }
+  function refreshPreview() {
+    fillPromptPreview(view, block);
+    const has = !!view.textContent;
+    view.style.display = has ? '' : 'none';
+    empty.style.display = has ? 'none' : '';
+    const st = promptStats(view.textContent);
+    formatBtn.textContent = promptFormatInfo(block.format).label + ' ▾';
+    metaText.textContent = st.chars.toLocaleString() + ' chars · ≈' + st.tokens.toLocaleString() + ' tokens';
+    refreshLibNote();
+  }
+  function refreshLibNote() {
+    let drift = 0, orphan = 0;
+    block.parts.forEach(p => { const s = promptPartState(p, promptLibrary); if (s === 'drift') drift++; else if (s === 'orphan') orphan++; });
+    const bits = [];
+    if (drift) bits.push(drift + ' part' + (drift === 1 ? ' has' : 's have') + ' a newer library version');
+    if (orphan) bits.push(orphan + ' library part' + (orphan === 1 ? '' : 's') + ' deleted');
+    libNote.textContent = bits.length ? bits.join(' · ') + ' — Edit to review' : '';
+    libNote.style.display = bits.length ? '' : 'none';
+  }
+  libNote.addEventListener('click', () => { if (!locked) enterEdit(); });
+  function setFormat(id) {
+    if (guardLocked() || normalizePromptFormat(block.format) === id) return;
+    block.format = id;
+    mutated(false);
+  }
+  function openFormatMenu(anchor) {
+    const cur = normalizePromptFormat(block.format);
+    showMiniMenu(anchor, PROMPT_FORMATS.map(f => ({ label: f.label, checked: cur === f.id, onClick: () => setFormat(f.id) })));
+  }
+
+  // The prompt's OWN fill-in fields (never section variables, never varsOn).
+  function renderVars() {
+    varsBox.textContent = '';
+    const names = promptVarNames(block);
+    varsBox.style.display = names.length ? '' : 'none';
+    if (!names.length) return;
+    const head = document.createElement('div'); head.className = 'prompt-vars-head'; head.textContent = 'Variables';
+    varsBox.appendChild(head);
+    const vals = promptVarValues(block);
+    names.forEach((name, n) => {
+      const row = document.createElement('div'); row.className = 'var-row';
+      const inp = document.createElement('input'); inp.className = 'var-input'; inp.placeholder = 'MISSING VALUE';
+      inp.id = 'pv' + uid + '_' + n;
+      inp.dataset.name = name;
+      inp.setAttribute('aria-label', name);
+      inp.value = varValue(vals, name);
+      const lab = document.createElement('label'); lab.className = 'var-name'; lab.textContent = name; lab.htmlFor = inp.id;
+      inp.addEventListener('input', () => {
+        if (!block.varValues || typeof block.varValues !== 'object' || Array.isArray(block.varValues)) block.varValues = {};
+        block.varValues[name] = inp.value;
+        inp.classList.remove('pulse');
+        refreshPreview(); scheduleSave(); refreshRevertLabel();
+      });
+      row.append(lab, inp);
+      varsBox.appendChild(row);
+    });
+  }
+  // Point at the first empty variable after a Copy that left one unfilled.
+  function nudgeMissingVar() {
+    const miss = promptMissingVars(block);
+    const inp = miss.length && [...varsBox.querySelectorAll('.var-input')].find(i => i.dataset.name === miss[0]);
+    if (!inp) return;
+    inp.classList.remove('pulse'); void inp.offsetWidth; inp.classList.add('pulse');
+    inp.focus();
+  }
+
+  // The five-step flow every part/format change runs (typing runs ONLY this — it never
+  // rebuilds the pane, so the caret stays put). `structural` = add/remove/move/pick/
+  // detach: also rebuild the pane, then put focus back on the part that moved.
+  function mutated(structural, focusPi, focusSel) {
+    syncMirror(); refreshPreview(); renderVars(); scheduleSave(); refreshRevertLabel();
+    if (structural) {
+      renderEditPane();
+      requestAnimationFrame(() => {
+        autosizeAll();
+        const part = focusPi != null ? editPane.querySelector('.prompt-part[data-pi="' + focusPi + '"]') : null;
+        const t = part && (part.querySelector(focusSel || '.prompt-text') || part.querySelector('.prompt-text'));
+        if (t) t.focus();
+      });
+    }
+  }
+  function autosizeAll() { editPane.querySelectorAll('.prompt-text').forEach(t => t._autosize && t._autosize()); }
+
+  async function choose(i) {
+    if (guardLocked()) return;
+    const p0 = block.parts[i]; if (!p0) return;
+    const picked = await pickLibraryPart(p0.slot);
+    if (!picked || !document.contains(el)) return;
+    const p = block.parts[i]; if (!p) return;
+    if (p.text.trim() && p.text !== picked.text
+      && !(await showConfirm('Replace this part’s text with “' + (picked.name || 'library part') + '”?', { okLabel: 'Replace', danger: false }))) return;
+    p.ref = picked.id; p.text = picked.text; delete p.ack;
+    mutated(true, i);
+  }
+  function detach(i) {
+    if (guardLocked()) return;
+    const p = block.parts[i]; if (!p) return;
+    p.ref = null; delete p.ack;
+    mutated(true, i);
+  }
+  async function saveToLibrary(i) {
+    if (guardLocked()) return;
+    if (!promptLibrary) { toast('Prompt library unavailable — try again when connected'); return; }
+    const p = block.parts[i]; if (!p) return;
+    const name = await askPromptPartName(promptFirstLine(p.text, 60));
+    if (!name || !document.contains(el)) return;
+    const part = { id: newPromptPartId(new Set(promptLibrary.parts.map(x => x && x.id))), slot: p.slot, name, text: p.text, tags: [], updatedAt: Date.now() };
+    if (!isValidLibPart(part)) { toast('That name is too long for the library'); return; }
+    const res = await savePromptLibrary(d => libUpsert(d, part));
+    if (!res || res.error || !document.contains(el)) return;
+    p.ref = part.id; delete p.ack;
+    mutated(true, i);
+  }
+  function move(i, dir) {
+    if (guardLocked()) return;
+    const j = movePromptPart(block.parts, i, dir);
+    if (j < 0) return;
+    mutated(true, j, dir < 0 ? '.prompt-part-up' : '.prompt-part-down');
+  }
+  function removePart(i) {
+    if (guardLocked()) return;
+    const p = block.parts[i]; if (!p) return;
+    block.parts.splice(i, 1);
+    // focus the part that slid into this slot position, else this slot's "+ Add"
+    const next = block.parts[i] && block.parts[i].slot === p.slot ? i : (i > 0 && block.parts[i - 1] && block.parts[i - 1].slot === p.slot ? i - 1 : null);
+    mutated(true, next);
+    if (next == null) requestAnimationFrame(() => { const a = editPane.querySelector('.prompt-slot[data-slot="' + CSS.escape(p.slot) + '"] .prompt-add, .prompt-add-slot[data-slot="' + CSS.escape(p.slot) + '"]'); if (a) a.focus(); });
+  }
+  function addPart(slot) {
+    if (guardLocked()) return;
+    expanded.add(slot);
+    const at = insertIndexForSlot(block.parts, slot);
+    block.parts.splice(at, 0, newPromptPart(slot));
+    mutated(true, at);
+  }
+  // "+ Role" in the collapsed Add row: show the slot's existing blank part if it has
+  // one (no data change), else add one.
+  function expandSlot(slot) {
+    const i = block.parts.findIndex(p => p.slot === slot);
+    if (i < 0) { addPart(slot); return; }
+    expanded.add(slot);
+    renderEditPane();
+    const t = editPane.querySelector('.prompt-part[data-pi="' + i + '"] .prompt-text');
+    if (t) { t._autosize && t._autosize(); t.focus(); }
+  }
+  function pull(i) {
+    if (guardLocked()) return;
+    const p = block.parts[i]; const lp = p && libPartById(promptLibrary, p.ref);
+    if (!lp) return;
+    p.text = lp.text; delete p.ack;
+    mutated(true, i, '.prompt-source');
+  }
+  function keepMine(i) {
+    if (guardLocked()) return;
+    const p = block.parts[i]; const lp = p && libPartById(promptLibrary, p.ref);
+    if (!lp) return;
+    p.ack = promptTextHash(lp.text);
+    mutated(true, i, '.prompt-source');
+  }
+  function compare(i) {
+    const p = block.parts[i]; const lp = p && libPartById(promptLibrary, p.ref);
+    if (!lp) return;
+    const lines = lineDiff(p.text, lp.text).map(d => (d.type === 'add' ? '+ ' : d.type === 'del' ? '− ' : '   ') + d.text);
+    showAlert('Your text (−) vs the library version of “' + (lp.name || 'this part') + '” (+):\n\n' + lines.join('\n'));
+  }
+  async function reAdd(i) {
+    if (guardLocked()) return;
+    if (!promptLibrary) { toast('Prompt library unavailable — try again when connected'); return; }
+    const p = block.parts[i]; if (!p) return;
+    const id = (PROMPT_ID_RE.test(p.ref || '')) ? p.ref : newPromptPartId(new Set(promptLibrary.parts.map(x => x && x.id)));
+    const part = { id, slot: p.slot, name: promptFirstLine(p.text, 60) || 'Restored part', text: p.text, tags: [], updatedAt: Date.now() };
+    if (!isValidLibPart(part)) { toast('This part can’t be added to the library'); return; }
+    const res = await savePromptLibrary(d => libUpsert(d, part));
+    if (!res || res.error || !document.contains(el)) return;
+    if (id !== p.ref) { p.ref = id; delete p.ack; mutated(false); }
+    el._refreshPromptLib();
+  }
+
+  function openSourceMenu(i, anchor) {
+    const p = block.parts[i]; if (!p) return;
+    const info = promptSlotInfo(p.slot);
+    const lib = !!(info && info.lib);
+    const items = [];
+    if (lib) items.push({ icon: '✦', label: 'Choose from library…', onClick: () => choose(i) });
+    if (p.ref) items.push({ icon: '✎', label: 'Edit as Custom (detach)', onClick: () => detach(i) });
+    else if (lib && p.text.trim()) items.push({ icon: '＋', label: 'Save to library…', onClick: () => saveToLibrary(i) });
+    if (items.length) items.push({ divider: true });
+    items.push({ icon: '✕', label: 'Remove part', onClick: () => removePart(i) });
+    if (lib || p.ref) items.push({ divider: true }, { icon: '✦', label: 'Manage library…', onClick: () => openPromptLibrary(lib ? p.slot : undefined) });
+    showMiniMenu(anchor, items);
+  }
+
+  // Chip for one part: "Library version changed" [Use library version][Keep my text]
+  // [Compare] or "Library part deleted" [Make Custom][Restore to library]. Derived on
+  // the fly from the part + the live library; always its own row.
+  function fillChip(slotEl, i) {
+    slotEl.textContent = '';
+    const p = block.parts[i]; if (!p) return;
+    const st = promptPartState(p, promptLibrary);
+    if (st !== 'drift' && st !== 'orphan') return;
+    const chip = document.createElement('span');
+    chip.className = 'prompt-chip ' + st;
+    const t = document.createElement('span');
+    t.textContent = st === 'drift' ? 'Library version changed' : 'Library part deleted';
+    chip.appendChild(t);
+    const b = (txt, cls, fn) => { const x = mkBtn(txt, fn); x.className = 'secondary ' + cls; return x; };
+    if (st === 'drift') chip.append(b('Use library version', 'prompt-pull', () => pull(i)), b('Keep my text', 'prompt-keep', () => keepMine(i)), b('Compare', 'prompt-compare', () => compare(i)));
+    else chip.append(b('Make Custom', 'prompt-detach', () => detach(i)), b('Restore to library', 'prompt-readd', () => reAdd(i)));
+    slotEl.appendChild(chip);
+  }
+  function refreshChips() {
+    editPane.querySelectorAll('.prompt-part').forEach(pe => {
+      const s = pe.querySelector('.prompt-chip-slot');
+      if (s) fillChip(s, +pe.dataset.pi);
+    });
+  }
+  function fillSourceBtn(btn, p) {
+    const s = promptSourceLabel(p, promptLibrary);
+    btn.textContent = s.icon + ' ' + s.text;
+    if (s.edited) { const e = document.createElement('span'); e.className = 'prompt-edited'; e.textContent = ' (edited)'; btn.appendChild(e); }
+    btn.appendChild(document.createTextNode(' ▾'));
+    btn.dataset.state = s.state;
+  }
+  function refreshSourceLabels() {
+    editPane.querySelectorAll('.prompt-part').forEach(pe => {
+      const p = block.parts[+pe.dataset.pi];
+      const s = pe.querySelector('.prompt-source');
+      if (p && s) fillSourceBtn(s, p);
+    });
+  }
+
+  function partEl(p, i, n, label, info, count) {
+    const box = document.createElement('div');
+    box.className = 'prompt-part' + (p.on === false ? ' off' : '') + (p.ref ? ' linked' : '');
+    box.dataset.pi = i;
+    const head = document.createElement('div');
+    head.className = 'prompt-part-head';
+    const chipSlot = document.createElement('div');
+    chipSlot.className = 'prompt-chip-slot';
+    const ta = document.createElement('textarea');
+    ta.className = 'prompt-text';
+    ta.value = p.text;
+    ta.spellcheck = false;
+    ta.setAttribute('aria-label', label + ' part ' + n);
+    ta.placeholder = promptPlaceholder(p.slot);
+    const linkTitle = 'Linked to the library — start typing to edit it as a Custom copy';
+    const setRO = () => { ta.readOnly = !!p.ref || locked; ta.title = p.ref ? linkTitle : ''; box.classList.toggle('linked', !!p.ref); };
+    setRO();
+    const autosize = () => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight + 2, editorCapPx()) + 'px'; };
+    ta._autosize = autosize;
+    const lib = !!(info && info.lib);
+
+    function fillHead() {
+      head.textContent = '';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.className = 'prompt-part-on'; cb.checked = p.on !== false;
+      cb.title = 'Include in prompt';
+      cb.setAttribute('aria-label', 'Include ' + label + ' part ' + n + ' in prompt');
+      const excl = document.createElement('span');
+      excl.className = 'prompt-excluded';
+      excl.textContent = 'Excluded';
+      excl.hidden = p.on !== false;
+      cb.addEventListener('change', () => {
+        if (guardLocked()) { cb.checked = p.on !== false; return; }
+        p.on = cb.checked;
+        box.classList.toggle('off', !p.on);
+        excl.hidden = p.on;
+        mutated(false);
+      });
+      head.append(cb);
+      if (lib || p.ref) {
+        // the part's SOURCE: "✦ Name" linked / "✎ Custom" / "⚠ Missing" (deleted)
+        const src = menuBtn('', () => openSourceMenu(i, src));
+        src.className = 'secondary prompt-source';
+        src.title = p.ref ? 'Linked library part — choose, detach or manage' : 'Custom text — choose from or save to the library';
+        fillSourceBtn(src, p);
+        head.append(src);
+        const avail = promptLibrary && lib && promptLibrary.parts.some(x => x && x.slot === p.slot);
+        if (!p.ref && !p.text.trim() && avail) {
+          const pick = mkBtn('Choose from library…', () => choose(i));
+          pick.className = 'secondary prompt-pick-inline';
+          head.append(pick);
+        }
+      } else {
+        // Task (no library in Phase 1): a static tag, not a fake source picker
+        const tag = document.createElement('span');
+        tag.className = 'prompt-tag'; tag.textContent = 'Custom';
+        const more = menuBtn('⋯', () => showMiniMenu(more, [
+          ...(count > 1 ? [{ icon: '↑', label: 'Move up', onClick: () => move(i, -1) }, { icon: '↓', label: 'Move down', onClick: () => move(i, 1) }, { divider: true }] : []),
+          { icon: '✕', label: 'Remove part', onClick: () => removePart(i) }]));
+        more.className = 'secondary prompt-part-more';
+        more.setAttribute('aria-label', 'More actions for ' + label + ' part ' + n);
+        head.append(tag, more);
+      }
+      head.append(excl);
+      const grow = document.createElement('span'); grow.className = 'spacer';
+      head.append(grow);
+      const icon = (txt, cls, aria, fn) => { const x = mkBtn(txt, fn); x.className = cls; x.setAttribute('aria-label', aria); x.title = aria; return x; };
+      if (count > 1) {
+        const up = icon('↑', 'secondary prompt-part-up', 'Move ' + label + ' part ' + n + ' up', () => move(i, -1));
+        const dn = icon('↓', 'secondary prompt-part-down', 'Move ' + label + ' part ' + n + ' down', () => move(i, 1));
+        up.disabled = n === 1; dn.disabled = n === count;
+        head.append(up, dn);
+      }
+      head.append(icon('✕', 'danger prompt-part-del', 'Remove ' + label + ' part ' + n, () => removePart(i)));
+      fillChip(chipSlot, i);
+    }
+    fillHead();
+
+    ta.addEventListener('input', () => {
+      if (p.ref || locked) return;
+      p.text = ta.value; autosize();
+      mutated(false);
+    });
+    // Typing into a LINKED part never silently edits library text: ask to detach it
+    // into a Custom copy first, then APPLY the edit the user made (the keystroke/paste
+    // that triggered the question isn't swallowed). keydown/paste/cut/drop cover
+    // desktop; a touch tap covers iOS, which opens no keyboard on a readOnly field.
+    let asking = false;
+    const askDetach = (e, intent) => {
+      if (!p.ref || locked) return;
+      e.preventDefault();
+      if (asking) return;
+      asking = true;
+      const sel = [ta.selectionStart, ta.selectionEnd];
+      const lp = libPartById(promptLibrary, p.ref);
+      showConfirm('This part is linked to “' + (lp ? lp.name : 'a library part') + '” in the library. Edit it as a Custom copy? The library part is not changed.',
+        { okLabel: 'Edit as Custom', danger: false }).then(ok => {
+        asking = false;
+        if (!ok || !document.contains(ta) || !p.ref) return;
+        p.ref = null; delete p.ack;
+        setRO(); fillHead();
+        ta.focus();
+        if (intent) {
+          ta.setSelectionRange(sel[0], sel[1]);
+          applyEditIntent(ta, intent);
+          p.text = ta.value; autosize();
+          mutated(false);
+        } else { scheduleSave(); refreshRevertLabel(); refreshLibNote(); }
+      });
+    };
+    // stopPropagation: the confirm's own document-level keydown handler is installed
+    // DURING this dispatch, so an Enter that opened it would otherwise bubble on to
+    // document and submit it at once — detaching without the user ever choosing.
+    ta.addEventListener('keydown', (e) => { if (isEditingKey(e) && p.ref && !locked) { e.stopPropagation(); askDetach(e, { key: e.key }); } });
+    ta.addEventListener('paste', (e) => askDetach(e, { insert: (e.clipboardData && e.clipboardData.getData('text')) || '' }));
+    ['cut', 'drop'].forEach(t => ta.addEventListener(t, (e) => askDetach(e, null)));
+    ta.addEventListener('pointerup', (e) => { if (e.pointerType === 'touch') askDetach(e, null); });
+
+    box.append(head, chipSlot, ta);
+    return box;
+  }
+
+  function renderEditPane() {
+    // Clearing the pane removes the focused textarea, and the engine then fires a
+    // focusout that the deferred focus-flush would read as LEAVING the block (an
+    // autosave mid-edit on every add/move/remove/revert). Park focus on the pane first:
+    // the move stays inside the block, so the flush's in-block guard bails.
+    if (editPane.contains(document.activeElement)) { editPane.tabIndex = -1; editPane.focus({ preventScroll: true }); }
+    editPane.textContent = '';
+    const slots = PROMPT_SLOTS.map(s => s.slot);
+    block.parts.forEach(p => { if (!slots.includes(p.slot)) slots.push(p.slot); });
+    const collapsed = [];
+    slots.forEach(slot => {
+      const info = promptSlotInfo(slot);
+      const mine = [];
+      block.parts.forEach((p, i) => { if (p.slot === slot) mine.push(i); });
+      if (!info && !mine.length) return;
+      // An empty known slot (no parts, or only blank unlinked ones) folds into the one
+      // "Add:" row below — only Task (and anything already shown) starts expanded.
+      if (info && !expanded.has(slot) && mine.every(i => !block.parts[i].ref && !block.parts[i].text.trim())) { collapsed.push(info); return; }
+      expanded.add(slot);
+      const label = info ? info.label : String(slot);
+      const card = document.createElement('div');
+      card.className = 'prompt-slot';
+      card.dataset.slot = slot;
+      card.setAttribute('role', 'group');
+      const head = document.createElement('div');
+      head.className = 'prompt-slot-head';
+      const h = document.createElement('h4');
+      h.id = 'ps' + uid + '_' + slots.indexOf(slot);
+      h.textContent = label;
+      card.setAttribute('aria-labelledby', h.id);
+      head.appendChild(h);
+      if (info) {
+        const add = mkBtn('+ Add', () => addPart(slot));
+        add.className = 'secondary prompt-add';
+        add.setAttribute('aria-label', 'Add a ' + label + ' part');
+        head.appendChild(add);
+      }
+      card.appendChild(head);
+      mine.forEach((i, n) => card.appendChild(partEl(block.parts[i], i, n + 1, label, info, mine.length)));
+      editPane.appendChild(card);
+    });
+    if (collapsed.length) {
+      const row = document.createElement('div');
+      row.className = 'prompt-add-row';
+      const l = document.createElement('span'); l.textContent = 'Add:';
+      row.appendChild(l);
+      collapsed.forEach(info => {
+        const b = mkBtn('+ ' + info.label, () => expandSlot(info.slot));
+        b.className = 'secondary prompt-add-slot';
+        b.dataset.slot = info.slot;
+        b.setAttribute('aria-label', 'Add a ' + info.label + ' part');
+        row.appendChild(b);
+      });
+      editPane.appendChild(row);
+    }
+    const foot = document.createElement('div');
+    foot.className = 'prompt-edit-foot';
+    const manage = mkBtn('Manage library…', () => openPromptLibrary());
+    manage.className = 'secondary prompt-manage';
+    foot.appendChild(manage);
+    editPane.appendChild(foot);
+  }
+
+  function isDirty() {
+    const snap = promptBackups.get(block);
+    if (snap != null) return promptSnapshot(block) !== snap;
+    const backup = blockBackups.has(block) ? blockBackups.get(block) : (block.code || '');
+    return (block.code || '') !== backup;
+  }
+  function refreshRevertLabel() {
+    const dirty = isDirty();
+    revertBtn.textContent = dirty ? 'Revert' : 'Cancel';
+    revertBtn.title = dirty ? 'Undo changes made since you started editing' : 'Exit edit mode (no changes)';
+  }
+
+  function enterEdit() {
+    beforeEditSession();               // BEFORE .viewing drops (the predicate is DOM-derived)
+    blockBackups.set(block, block.code || '');
+    promptBackups.set(block, promptSnapshot(block));
+    el.classList.remove('viewing');
+    refreshRevertLabel();
+    requestAnimationFrame(() => { autosizeAll(); const t = editPane.querySelector('.prompt-text:not([readonly])') || editPane.querySelector('.prompt-text'); if (t) t.focus(); });
+  }
+  const editBtn = mkBtn('Edit', () => { if (!locked) enterEdit(); });
+  editBtn.className = 'secondary block-edit';
+  if (isMobile) { editBtn.textContent = '✎'; editBtn.title = 'Edit'; }
+  if (locked) { editBtn.disabled = true; editBtn.title = 'Resolve the stored-text notice below before editing'; }
+
+  const saveBtn = mkBtn('Save', () => {
+    blockBackups.delete(block);
+    promptBackups.delete(block);
+    el.classList.add('viewing');
+    refreshPreview();
+    savePage();   // announces 'Saved' itself, once the write is CONFIRMED
+  });
+  saveBtn.className = 'block-save';
+  if (isMobile) { saveBtn.textContent = '✓'; saveBtn.title = 'Save'; }
+
+  const revertBtn = mkBtn('Cancel', () => {
+    const snap = promptBackups.get(block);
+    if (isDirty()) {
+      // Keep focus where the user is (Esc-revert): the pane is rebuilt, so remember the
+      // focused part and return focus to its textarea — a second Esc then exits, as in
+      // every other block kind.
+      const fp = document.activeElement && el.contains(document.activeElement) && document.activeElement.closest('.prompt-part');
+      const fpi = fp ? fp.dataset.pi : null;
+      if (snap != null) {
+        const o = JSON.parse(snap);
+        block.parts = o.parts; block.format = o.format; block.code = o.code;
+        if (o.varValues == null) delete block.varValues; else block.varValues = o.varValues;
+      } else {
+        block.code = blockBackups.has(block) ? blockBackups.get(block) : '';
+      }
+      el.classList.remove('viewing');
+      renderEditPane(); refreshPreview(); renderVars(); afterEditSession(); refreshRevertLabel();
+      const ft = (fpi != null && editPane.querySelector('.prompt-part[data-pi="' + fpi + '"] .prompt-text')) || editPane.querySelector('.prompt-text');
+      if (ft) ft.focus();
+      requestAnimationFrame(autosizeAll);
+      toast('Reverted');
+    } else {
+      blockBackups.delete(block);
+      promptBackups.delete(block);
+      el.classList.add('viewing');
+      refreshPreview();
+      afterEditSession();
+    }
+  });
+  revertBtn.className = 'secondary block-revert';
+  wireEscapeRevert(editPane, revertBtn);
+
+  const copyBtn = mkBtn('Copy', () => {
+    const out = promptOutput(block);
+    const miss = promptMissingVars(block).length;
+    copyText(out).then(ok => {
+      if (ok) recordCopy({ code: out, label: block.label || '', type: 'prompt' });
+      if (ok && miss) { flashCopied(copyBtn, 'Copied — ' + miss + ' var' + (miss > 1 ? 's' : '') + ' missing', { warn: true }); nudgeMissingVar(); }
+      else flashCopied(copyBtn, ok ? 'Copied to clipboard' : 'Copy failed');
+    });
+  });
+  copyBtn.className = 'secondary block-copy';
+  copyBtn.title = 'Copy the assembled prompt (variables filled)';
+  if (isMobile) copyBtn.textContent = '⧉';
+
+  const dupBtn = mkBtn('Duplicate', () => duplicateBlock(parentArray, idx));
+  dupBtn.className = 'secondary block-dup';
+
+  // Copy-as runs the same missing-variable check as Copy (the raw template is unfilled
+  // on purpose, so it doesn't), with the same bubble on the ⋯ button.
+  const copyAs = (fmt, label) => {
+    const text = fmt ? promptOutput(block, fmt) : promptMirror(block);
+    const miss = fmt ? promptMissingVars(block).length : 0;
+    copyText(text).then(ok => {
+      if (ok) recordCopy({ code: text, label: block.label || '', type: 'prompt' });
+      if (ok && miss) { flashCopied(overflowBtn, 'Copied ' + label + ' — ' + miss + ' var' + (miss > 1 ? 's' : '') + ' missing', { warn: true }); nudgeMissingVar(); }
+      else flashCopied(overflowBtn, ok ? 'Copied: ' + label : 'Copy failed');
+    });
+  };
+  const overflowBtn = menuBtn('⋯', () => {
+    const cur = normalizePromptFormat(block.format);
+    showMiniMenu(overflowBtn, [
+      { icon: '❐', label: 'Duplicate block', onClick: () => dupBtn.click() },
+      { divider: true },
+      ...PROMPT_FORMATS.map(f => ({ label: 'Format: ' + f.label, checked: cur === f.id, onClick: () => setFormat(f.id) })),
+      { divider: true },
+      { icon: '⧉', label: 'Copy as XML', onClick: () => copyAs('xml', 'XML') },
+      { icon: '⧉', label: 'Copy as Markdown', onClick: () => copyAs('markdown', 'Markdown') },
+      { icon: '⧉', label: 'Copy as Plain', onClick: () => copyAs('plain', 'Plain') },
+      { icon: '⧉', label: 'Copy raw template', onClick: () => copyAs(null, 'raw template') },
+      { divider: true },
+      ...BLOCK_KINDS.map(k => ({
+        icon: k.icon, label: k.label, active: blockKind(block) === k.kind,
+        onClick: () => confirmKindChange(block, k.kind, () => { convertBlock(block, k.kind); renderPage(); scheduleSave(); }),
+      })),
+    ]);
+  });
+  overflowBtn.className = 'secondary block-overflow';
+  overflowBtn.title = 'More actions';
+
+  const delBtn = mkBtn('Delete', () => { parentArray.splice(idx, 1); renderPage(); scheduleSave(); });
+  delBtn.className = 'danger';
+  if (isMobile) { delBtn.textContent = '✕'; delBtn.title = 'Delete'; }
+
+  toolbar.append(labelInput, spacer, typeBtn, editBtn, saveBtn, revertBtn, copyBtn, dupBtn, overflowBtn, delBtn);
+
+  // Re-render just this block (resolving the stored-text notice). Carries across what
+  // renderSectionContent attached from outside — the merge checkbox and reorder arrows.
+  function rerenderSelf() {
+    const n2 = renderPromptBlock(block, parentArray, idx);
+    const oldTb = el.querySelector(':scope > .block-toolbar');
+    const newTb = n2.querySelector(':scope > .block-toolbar');
+    const mc = oldTb && oldTb.querySelector(':scope > .merge-check');
+    if (mc && newTb) newTb.prepend(mc);
+    const up = el.querySelector(':scope > .reorder-arrow.up');
+    const dn = el.querySelector(':scope > .reorder-arrow.down');
+    if (up) n2.insertBefore(up, n2.firstChild);
+    if (dn) n2.appendChild(dn);
+    if (el.classList.contains('reordering')) n2.classList.add('reordering');
+    el.replaceWith(n2);
+  }
+
+  el.append(toolbar);
+  // The stored text no longer matches the parts (an older CodeMan edited it). Never
+  // discard it unseen: show it, keep it as a part, or rebuild. (Find & Replace no longer
+  // causes this — it flags `mirrorStale`, which normalizePromptBlock resolves silently.)
+  if (locked) {
+    const warn = document.createElement('div');
+    warn.className = 'prompt-sync-warn';
+    warn.setAttribute('role', 'note');
+    const msg = document.createElement('div');
+    msg.textContent = 'This prompt’s stored text was changed outside the prompt builder (by an older CodeMan version) and no longer matches its parts. Editing is locked until you choose what to keep.';
+    const acts = document.createElement('div');
+    acts.className = 'prompt-sync-acts';
+    const stored = document.createElement('pre');
+    stored.className = 'prompt-stored';
+    stored.textContent = block.code || '';
+    stored.style.display = 'none';
+    const storedCopy = mkBtn('Copy stored text', () => {
+      copyText(block.code || '').then(ok => flashCopied(storedCopy, ok ? 'Copied to clipboard' : 'Copy failed'));
+    });
+    storedCopy.className = 'secondary prompt-stored-copy';
+    storedCopy.style.display = 'none';
+    const show = mkBtn('Show stored text', () => {
+      const open = stored.style.display === 'none';
+      stored.style.display = open ? '' : 'none';
+      storedCopy.style.display = open ? '' : 'none';
+      show.textContent = open ? 'Hide stored text' : 'Show stored text';
+      show.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
+    show.className = 'secondary prompt-show-stored';
+    show.setAttribute('aria-expanded', 'false');
+    const keep = mkBtn('Keep it as a Task part', () => {
+      block.parts.splice(insertIndexForSlot(block.parts, 'task'), 0, { slot: 'task', ref: null, text: block.code || '', on: false });
+      syncMirror(); scheduleSave(); rerenderSelf();
+      toast('Stored text kept as a Task part (switched off)');
+    });
+    keep.className = 'secondary prompt-keep-stored';
+    const rebuild = mkBtn('Rebuild from parts', () => {
+      showConfirm('Discard the stored text and rebuild it from the parts? (Recoverable from page History.)', { okLabel: 'Rebuild', danger: true })
+        .then(ok => { if (!ok || !document.contains(el)) return; syncMirror(); scheduleSave(); rerenderSelf(); });
+    });
+    rebuild.className = 'danger prompt-rebuild';
+    acts.append(show, keep, rebuild);
+    warn.append(msg, acts, stored, storedCopy);
+    el.append(warn);
+  }
+  el.append(bodyWrap);
+  renderEditPane();
+  renderVars();
+  refreshPreview();
+  el._refreshPromptLib = () => { refreshChips(); refreshSourceLabels(); refreshLibNote(); };
+  wireFocusFlush(el);
+  if (!el.classList.contains('viewing')) requestAnimationFrame(autosizeAll);
   return el;
 }
 
@@ -4393,6 +5480,9 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
   if (block.csv) return renderCsvBlock(block, parentArray, idx);
   if (block.json) return renderJsonBlock(block, parentArray, idx);
   if (block.html) return renderHtmlBlock(block, parentArray, idx);
+  // via blockKind, so a prompt flag left beside another kind's flag (an older client's
+  // convert) renders as THAT kind — precedence lives in one place
+  if (blockKind(block) === 'prompt') return renderPromptBlock(block, parentArray, idx);
 
   const el = document.createElement('div');
   // stay in edit mode if an edit session backup exists for this block
@@ -4704,7 +5794,7 @@ function renderBlock(block, parentArray, idx, sectionVarValues, onSecVarsRefresh
       const row = document.createElement('div'); row.className = 'var-row';
       const lab = document.createElement('label'); lab.className = 'var-name'; lab.textContent = name;
       const inp = document.createElement('input'); inp.className = 'var-input'; inp.placeholder = 'MISSING VALUE';
-      inp.value = block.varValues[name] || '';
+      inp.value = varValue(block.varValues, name);
       inp.addEventListener('input', () => {
         block.varValues[name] = inp.value;
         updatePreview();   // live-substitute into the rendered code
@@ -4961,7 +6051,7 @@ function editorCapPx() {
         .forEach(ta => { if (ta._autosize) ta._autosize(); });
       document.querySelectorAll('.block:not(.note):not(.viewing) .code-wrap')
         .forEach(cw => { if (cw._autosize) cw._autosize(); });
-      document.querySelectorAll('.block.csv:not(.viewing) .csv-edit, .block.json:not(.viewing) .json-edit, .block.html:not(.viewing) .html-edit')
+      document.querySelectorAll('.block.csv:not(.viewing) .csv-edit, .block.json:not(.viewing) .json-edit, .block.html:not(.viewing) .html-edit, .block.prompt:not(.viewing) .prompt-text')
         .forEach(ta => { if (ta._autosize) ta._autosize(); });
     }, 120);
   };
@@ -5011,17 +6101,33 @@ function safeStringify(data, limit) {
 // enterEdit BEFORE the element drops `.viewing` — the predicate is DOM-derived, so
 // the order matters (this must see "no editor open yet").
 function beforeEditSession() {
+  if (!anyBlockEditing()) sessionWrite = null;          // a fresh session: nothing written yet
   if (anyBlockEditing() || !currentPagePath || pageDirty.has(currentPagePath)) return;
   cleanPageSnapshot = safeStringify(currentPageData);
 }
 
+// A write that happened DURING an open edit session (a focus-departure flush, a tab
+// switch, an unload) puts the session's in-progress state on disk: { path, snap } =
+// what that write sent. savePage nulls cleanPageSnapshot and clears pageDirty, so a
+// later Revert/Cancel back to the pre-session state used to look "clean" and was never
+// written — the reverted edit stayed on disk and came back on reload. A snap of null
+// (page too large to stringify) means "unknown" and is treated as different.
+let sessionWrite = null;
+
 // Called when a block edit session ENDS (Cancel / completed Revert).
 function afterEditSession() {
+  // Disk holds what a MID-SESSION write sent; if memory now differs (a Revert after the
+  // flush), the page is dirty again — marked even while an editor stays open (the dirty
+  // Revert branch keeps editing), so tab-switch/unload persist the revert too. Marking
+  // here is NOT scheduleSave: that would arm a write mid-session.
+  if (sessionWrite && sessionWrite.path === currentPagePath
+      && (sessionWrite.snap == null || safeStringify(currentPageData) !== sessionWrite.snap)) pageDirty.add(currentPagePath);
   if (anyBlockEditing()) return;                       // another editor still open → stay deferred
   if (cleanPageSnapshot != null && safeStringify(currentPageData) === cleanPageSnapshot) {
     if (currentPagePath) pageDirty.delete(currentPagePath);   // provably back to the persisted state
   }
   cleanPageSnapshot = null;
+  sessionWrite = null;
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
   // Deliberately NOT scheduleSave() — that would re-mark the page dirty. scheduleSave
   // stays the single dirty-marking choke point; this only arms the deferred timer.
@@ -5082,6 +6188,7 @@ async function savePage() {
   // While a save is in flight, mark dirty and re-save once it returns instead.
   if (saveInFlight) { savePending = true; return; }
   cleanPageSnapshot = null;   // once we write, the snapshot no longer describes disk
+  if (anyBlockEditing()) sessionWrite = { path: currentPagePath, snap: safeStringify(currentPageData) };
   saveInFlight = true;
   const savedPath = currentPagePath;
   try {
@@ -5166,6 +6273,8 @@ function flushSave(opts) {
   // snapshot, no mtime bump). Call sites stay unconditional; the gate lives here.
   if (!pageDirty.has(currentPagePath)) return;
   cleanPageSnapshot = null;   // once we write, the snapshot no longer describes disk
+  // visibilitychange→hidden flushes MID-session too — same bookkeeping as savePage.
+  if (anyBlockEditing()) sessionWrite = { path: currentPagePath, snap: safeStringify(currentPageData) };
   const path = currentPagePath, data = currentPageData;
   const tab = openPages.find(t => t.path === path);
   if (opts && opts.keepalive) {

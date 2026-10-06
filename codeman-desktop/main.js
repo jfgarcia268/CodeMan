@@ -35,7 +35,7 @@ const BASE_PORT = 47615; // fixed → stable origin → offline cache persists a
 // to the real server). Kept identical to the server's future allowlist (R4).
 const READ_ONLY_ACTIONS = new Set([
   'tree', 'search_content', 'search_blocks', 'list_tags', 'col_sorts',
-  'get_page', 'list_trash', 'list_history', 'get_history_version',
+  'get_page', 'list_trash', 'list_history', 'get_history_version', 'prompt_library',
 ]);
 
 const shellDir = app.isPackaged
