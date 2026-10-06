@@ -13,6 +13,63 @@ to `## [X.Y.Z] — YYYY-MM-DD`.
 
 ## [Unreleased]
 
+### Added
+- **Prompt block — build AI prompts from reusable parts.** A new block kind (`+ Add ▾ → ✦ Prompt`)
+  assembles a prompt from ordered parts in five slots — **Role, Context, Task, Constraints, Output
+  format** (several parts per slot are fine; each can be switched off, reordered or removed). The
+  block previews the finished prompt live with a character / token estimate, and **Copy** copies it
+  in one click. Choose the assembly format per prompt from the format button beside the stats (or the
+  `⋯` menu) — **XML tags** (the default, `<role>…</role>`), **Markdown headings**, or **Plain** — and
+  `⋯ → Copy as…` copies any of them (or the raw template) without changing the block. A new prompt
+  opens with just the **Task**; the other slots sit in one compact **Add: + Role + Context …** row
+  until you use them. On wide screens the editor and a sticky live preview sit side by side.
+- **Prompt variables.** Write `_V_NAME_V_` in any part and the block shows a field for it; Copy
+  fills the values in. If any are still empty, Copy (and Copy as…) says so in an amber bubble and
+  jumps to the first empty field, and the preview highlights each unfilled **MISSING VALUE**. A
+  prompt's variables belong to the prompt — they are independent of section variables.
+- **Prompt library.** Save a part to a shared library (`Save to library…` on the part's source
+  menu) and reuse it in any prompt with `Choose from library…` (searchable). A library part used in a
+  prompt stays **linked** (its source button reads **✦ name**; your own text reads **✎ Custom**): if
+  the library text changes later, the prompt shows **"Library version changed"** with **Use library
+  version**, **Keep my text** or **Compare** (a line-by-line diff); if the library part is deleted,
+  the prompt keeps its text and shows **"Library part deleted"** (Make Custom / Restore to library).
+  Typing into a linked part asks first and turns it into your own copy — then applies the keystroke
+  you typed; the library is never changed by accident. An empty Role/Context/Constraints/Output part
+  offers **Choose from library…** right next to it. Manage everything from
+  the new **Prompt library** panel (sidebar `⋯`, or ⌘K → *Prompt library…*): tabs per slot, search,
+  create, edit, duplicate, tag and delete — deleting a part that is in use tells you how many pages
+  use it first. Every library save is versioned on the server (last 20), and two saves made from the
+  same starting point are detected even when they land within the same second.
+- Prompts work everywhere other blocks do: search, quick-paste (⌘⇧K copies the **filled** prompt),
+  Find & Replace (it edits the part text; a match only in the `<role>`-style wrappers is ignored, and
+  the block simply re-assembles — it is never locked by a replace),
+  duplicate, convert to/from other kinds, history, offline, and Markdown/HTML export.
+- **The JSON backup now carries the prompt library too.** Restoring a bundle adds the library parts
+  you don't already have and never overwrites one you do; the import summary says how many were
+  added.
+- **Offline:** the prompt library is readable and editable offline (several offline edits are
+  combined into one pending change); on reconnect it syncs, and if the library also changed on
+  another device the two are **merged by part** rather than one overwriting the other. A library
+  save that hits a passing server error is kept locally and retried (your next edits build on it);
+  one the server refuses is kept in **Review unsynced changes**. Neither is ever silently lost, and a
+  reload while a library change is still pending keeps your local version.
+
+### Fixed
+- **Reverting after an autosave now really reverts.** If a block was saved mid-edit (you switched
+  apps, or focus left the editor) and you then pressed Revert/Cancel, the screen showed the original
+  text but the edited version stayed on disk and came back after a reload. The reverted text is now
+  saved. Affects every block kind.
+- **Opening a dialog while editing no longer autosaves** (and no longer flashes "Saved"
+  mid-edit) — a confirm or picker opened from the block is part of the edit, not leaving it.
+- **A variable named like a built-in (`_V_constructor_V_`, `_V_toString_V_`) no longer pastes
+  JavaScript source** into the copied text or the fill-in field (code blocks and prompts).
+- **Disabled buttons now look disabled** everywhere (dimmed, no hover highlight).
+
+### Changed
+- Deployment note: update **`api.php` before (or together with) the web client / desktop app** —
+  a new client against an older server shows the prompt library as unavailable and parks library
+  saves as unsynced changes until the server is updated.
+
 ## [1.14.0] — 2026-07-31
 
 ### Added

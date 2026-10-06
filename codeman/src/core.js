@@ -59,12 +59,17 @@ const LANGUAGES = [
   { id: 'plaintext', label: 'Plain Text', prism: 'plaintext', color: '#555' }
 ];
 const LANG_BY_ID = Object.fromEntries(LANGUAGES.map(l => [l.id, l]));
+// Block `type` values that are NOT languages (so they stay out of the code-block
+// language picker, which lists LANGUAGES) but still need a friendly label/colour in
+// sidebar badges and the quick-paste palette. langPrism stays 'plaintext' for these.
+const BLOCK_TYPE_LABELS = { prompt: { label: 'Prompt', color: 'var(--prompt)' } };   // the --prompt token (style.css)
 
 function langPrism(id) { return (LANG_BY_ID[id] && LANG_BY_ID[id].prism) || 'plaintext'; }
-function langLabel(id) { return (LANG_BY_ID[id] && LANG_BY_ID[id].label) || id; }
+function langLabel(id) { return (LANG_BY_ID[id] && LANG_BY_ID[id].label) || (BLOCK_TYPE_LABELS[id] && BLOCK_TYPE_LABELS[id].label) || id; }
 function langColor(id) {
   const l = LANG_BY_ID[id];
   if (l && l.color) return l.color;
+  if (BLOCK_TYPE_LABELS[id]) return BLOCK_TYPE_LABELS[id].color;
   // derive a stable, reasonably dark color from the id
   let h = 0;
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 360;
@@ -91,6 +96,12 @@ let saveTimer = null;
 let saveInFlight = false;   // a savePage() request is awaiting the server
 let savePending = false;    // edits arrived mid-save; re-save when it returns
 let pageFilter = '';
+// Prompt-part library (.prompt-library.json), loaded by loadPromptLibrary (tree.js).
+// null = UNKNOWN / unavailable — deliberately distinct from an empty library, so an
+// unloaded library never marks every linked prompt part "Not in library".
+let promptLibrary = null;
+let promptLibMtime = null;  // the server mtime it was read at (kept for older servers)
+let promptLibRev = null;    // the server content hash (_rev) it was read at — the conflict token
 
 // Shared-secret token (only used when the backend has CODEMAN_PASSWORD set).
 let authToken = null;
@@ -276,10 +287,13 @@ async function copyText(text) {
 // A tiny confirmation bubble that pops right next to a control (e.g. the Copy
 // button) and fades out — more immediate than the corner toast for an action
 // whose source you're looking at. Positioned above the anchor element.
-function flashCopied(anchorEl, msg) {
+// opts.warn → the amber variant, held longer (~3.5s): the copy happened, but the copied
+// text has a problem the user should fix (e.g. unfilled prompt variables).
+function flashCopied(anchorEl, msg, opts) {
   if (!anchorEl) { toast(msg || 'Copied to clipboard'); return; }
+  const warn = !!(opts && opts.warn);
   const pop = document.createElement('div');
-  pop.className = 'copy-pop';
+  pop.className = 'copy-pop' + (warn ? ' warn' : '');
   // Announced on the same polite live channel as toast (flashCopied only shows the
   // bubble when it has an anchor; otherwise it falls back to toast — never both, so
   // no double-announce).
@@ -297,7 +311,7 @@ function flashCopied(anchorEl, msg) {
   pop.style.top = Math.round(r.top - 6) + 'px';
   // next frame → trigger the fade-in/up transition, then remove
   requestAnimationFrame(() => pop.classList.add('show'));
-  setTimeout(() => { pop.classList.remove('show'); setTimeout(() => pop.remove(), 200); }, 1800);
+  setTimeout(() => { pop.classList.remove('show'); setTimeout(() => pop.remove(), 200); }, warn ? 3500 : 1800);
 }
 
 /* ---------- MODALS (themed replacements for prompt/confirm) ---------- */

@@ -1,26 +1,64 @@
 /* ---------- TRASH & HISTORY (data-safety UI) ---------- */
 
 // Generic scrolling list modal: title + a body the caller fills + footer buttons.
-function openPanel(title, build) {
+// opts.dialog (opt-in; without it the behaviour is byte-for-byte unchanged) makes it a
+// real focus-trapping dialog like showModal: role=dialog + aria-modal, named by its
+// title, focus restored to the invoker on close, Tab cycles inside — and Escape/Tab are
+// handled ONLY while this overlay is the topmost .modal-overlay, so a nested
+// showConfirm owns its own Escape. opts.beforeClose() is awaited for the USER dismissals
+// (Escape, backdrop, ✕); resolving false keeps the panel open (an unsaved-edit guard).
+function openPanel(title, build, opts) {
+  const dialog = !!(opts && opts.dialog);
+  const invoker = dialog ? document.activeElement : null;
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   const box = document.createElement('div');
   box.className = 'modal panel-modal';
-  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
-  function onKey(e) { if (e.key === 'Escape') close(); }
-  overlay.addEventListener('mousedown', e => { if (e.target === overlay) close(); });
+  const close = () => {
+    overlay.remove(); document.removeEventListener('keydown', onKey);
+    if (dialog && invoker && document.contains(invoker) && typeof invoker.focus === 'function') invoker.focus();
+  };
+  // A user dismissal: consult beforeClose first (dialog mode only).
+  const dismiss = async () => {
+    if (dialog && opts.beforeClose) { try { if (await opts.beforeClose() === false) return; } catch (e) { return; } }
+    close();
+  };
+  const isTop = () => { const all = document.querySelectorAll('.modal-overlay'); return all[all.length - 1] === overlay; };
+  function onKey(e) {
+    if (!dialog) { if (e.key === 'Escape') close(); return; }
+    if (!isTop()) return;
+    if (e.key === 'Escape') { e.preventDefault(); dismiss(); }
+    else if (e.key === 'Tab') {
+      const f = Array.from(box.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'))
+        .filter(el => !el.disabled && el.offsetParent !== null);
+      e.preventDefault();
+      if (!f.length) { box.focus(); return; }
+      f[focusTrapNextIndex(f.indexOf(document.activeElement), f.length, e.shiftKey)].focus();
+    }
+  }
+  overlay.addEventListener('mousedown', e => { if (e.target === overlay) { if (dialog) dismiss(); else close(); } });
   document.addEventListener('keydown', onKey);
 
   const head = document.createElement('div'); head.className = 'panel-head';
   const h = document.createElement('div'); h.className = 'modal-title'; h.textContent = title;
-  const x = document.createElement('button'); x.className = 'secondary'; x.textContent = '✕'; x.onclick = close;
+  const x = document.createElement('button'); x.className = 'secondary'; x.textContent = '✕';
+  x.onclick = dialog ? dismiss : close;
   head.append(h, x);
+  if (dialog) {
+    h.id = 'panelTitle_' + Math.random().toString(36).slice(2, 8);
+    box.setAttribute('role', 'dialog');
+    box.setAttribute('aria-modal', 'true');
+    box.setAttribute('aria-labelledby', h.id);
+    box.tabIndex = -1;
+    x.setAttribute('aria-label', 'Close');
+  }
   const body = document.createElement('div'); body.className = 'panel-body';
   const foot = document.createElement('div'); foot.className = 'panel-foot modal-btns';
   box.append(head, body, foot);
   overlay.appendChild(box);
   document.body.appendChild(overlay);
   build(body, foot, close);
+  if (dialog) setTimeout(() => { if (!box.contains(document.activeElement)) box.focus(); }, 0);
   return { close, body, foot };
 }
 
@@ -170,7 +208,7 @@ function dlLabel(it) {
   const target = b.path || ((b.parent ? b.parent + '/' : '') + (b.name || '')) || '';
   const verb = { save_page: 'Save', create_page: 'Create page', create_folder: 'Create folder',
     create_project: 'Create project', delete: 'Delete', rename: 'Rename', move: 'Move',
-    reorder: 'Reorder', set_col_sort: 'Sort' }[it.action] || it.action;
+    reorder: 'Reorder', set_col_sort: 'Sort', save_prompt_library: 'Save prompt library' }[it.action] || it.action;
   return verb + (target ? ' · ' + target : '');
 }
 
@@ -404,6 +442,7 @@ function openCommandPalette() {
     { name: 'Find & replace…', run: () => openReplace() },
     { name: 'Quick-paste a block…', run: () => openBlockPalette() },
     { name: 'Manage tags…', run: () => openTagManager() },
+    { name: 'Prompt library…', run: () => openPromptLibrary() },
     // Move the open page to another folder — only offered when a page is open.
     ...(currentPagePath ? [{ name: 'Move current page to…', run: () => openMovePicker() }] : []),
     { name: 'Toggle outline', run: () => toggleOutline() },
@@ -568,8 +607,8 @@ function openBlockPalette() {
       const row = document.createElement('div'); row.className = 'cmdk-row block-row' + (i === active ? ' active' : '');
       const nm = document.createElement('div'); nm.className = 'cmdk-name';
       const badge = document.createElement('span'); badge.className = 'lang-badge';
-      badge.style.background = b.note ? '#7a5cc0' : b.csv ? '#3a7a5c' : b.json ? '#3a5c7a' : langColor(b.type);
-      badge.textContent = b.note ? 'Note' : b.csv ? 'CSV' : b.json ? 'JSON' : langLabel(b.type);
+      badge.style.background = b.prompt ? 'var(--prompt)' : b.note ? '#7a5cc0' : b.csv ? '#3a7a5c' : b.json ? '#3a5c7a' : langColor(b.type);
+      badge.textContent = b.prompt ? 'Prompt' : b.note ? 'Note' : b.csv ? 'CSV' : b.json ? 'JSON' : langLabel(b.type);
       const txt = document.createElement('span'); txt.textContent = ' ' + firstLine(b);
       nm.append(badge, txt);
       const sub = document.createElement('div'); sub.className = 'cmdk-sub'; sub.textContent = b.trail || b.path;
@@ -581,7 +620,17 @@ function openBlockPalette() {
     const act = list.querySelector('.cmdk-row.active');
     if (act) act.scrollIntoView({ block: 'nearest' });
   }
-  function copyHit(b) { copyText(b.code || '').then(ok => { if (ok) recordCopy(b); toast(ok ? 'Copied to clipboard' : 'Copy failed'); }); close(); }
+  // A prompt row copies its FILLED output (the row carries parts/format/varValues),
+  // never the raw `code` mirror — same text the block's own Copy button produces.
+  function copyHit(b) {
+    const text = b.prompt ? promptOutput(b) : (b.code || '');
+    const miss = b.prompt ? promptMissingVars(b).length : 0;
+    copyText(text).then(ok => {
+      if (ok) recordCopy({ code: text, label: b.label || '', type: b.prompt ? 'prompt' : (b.type || 'plaintext') });
+      toast(ok ? (miss ? 'Copied — ' + miss + ' var' + (miss > 1 ? 's' : '') + ' missing' : 'Copied to clipboard') : 'Copy failed');
+    });
+    close();
+  }
   function openHit(b) { openPage(b.path); close(); }
   function search() {
     const q = input.value.trim();
@@ -609,6 +658,347 @@ function openBlockPalette() {
   document.body.appendChild(overlay);
   input.addEventListener('input', search);
   input.focus();
+}
+
+/* ---------- PROMPT LIBRARY (.prompt-library.json — reusable prompt parts) ---------- */
+
+// Save the library by applying `mutate(doc)` to a copy of it. Online conflict (another
+// device saved since we read) = REBASE: re-read the server copy and re-apply the SAME
+// mutation by id, up to 3 times — so adds/edits land and a delete made here is never
+// resurrected. (Offline replay can't do this — it holds only the final document — and
+// union-merges instead: replayLibraryConflict in offline.js.) A rejected write is parked
+// (transient → the coalescing queue, terminal → a dead-letter) and NEVER reported as
+// saved. Returns the api response, or {error}. The mutator may run more than once.
+async function savePromptLibrary(mutate, opts) {
+  const announce = !(opts && opts.announce === false);
+  if (!promptLibrary) { toast('Prompt library unavailable — try again when connected'); return { error: 'unavailable' }; }
+  const fresh = (d) => { const c = JSON.parse(JSON.stringify(d)); delete c._mtime; return c; };
+  let doc = fresh(promptLibrary);
+  mutate(doc);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    // baseRev (the content hash) is the conflict token; baseMtime rides along for an
+    // older server that doesn't know `_rev`.
+    const res = await api('save_prompt_library', { data: doc, baseMtime: promptLibMtime, baseRev: promptLibRev });
+    if (res && res.conflict) {
+      const srv = await api('prompt_library');
+      if (!isPromptLibraryDoc(srv) || srv._unavailable) {
+        toast('Prompt library could not be re-read — not saved');
+        return { error: (srv && srv.error) || 'unreadable' };
+      }
+      promptLibMtime = srv._mtime == null ? null : srv._mtime;
+      promptLibRev = srv._rev == null ? null : srv._rev;
+      doc = fresh(srv);
+      mutate(doc);
+      continue;
+    }
+    if (!res || res.error) {
+      const op = { action: 'save_prompt_library', body: { data: doc, baseMtime: promptLibMtime, baseRev: promptLibRev } };
+      if (await parkLibrarySave(op, res) === 'queued') {
+        // A TRANSIENT failure is queued for retry — exactly like an offline save, the
+        // edit must become the LOCAL state now (global + kv mirror). Otherwise the next
+        // edit starts from the stale global and coalescing REPLACES this queued doc with
+        // one that lacks it: the edit would be silently lost on recovery.
+        await applyLibraryLocally(doc);
+        toast('Prompt library save didn’t reach the server — will retry');
+        return { ok: true, offline: true, queued: true };
+      }
+      toast('Library save failed: ' + ((res && res.error) || 'no response') + ' — kept in unsynced changes');
+      return { error: (res && res.error) || 'failed' };
+    }
+    promptLibrary = doc;
+    if (!res.offline) { promptLibMtime = res.mtime; promptLibRev = res.rev == null ? null : res.rev; }
+    onPromptLibraryChanged();
+    if (announce) toast(res.offline ? 'Prompt library saved offline — will sync' : 'Prompt library saved');
+    return res;
+  }
+  toast('Library changed elsewhere — try again');
+  return { error: 'conflict' };
+}
+// Same split as the page rejected-save path: a transient body goes to the (coalescing)
+// write queue, whose 3-attempt policy owns transients; a terminal 4xx can never succeed
+// as-is and is parked straight as a dead-letter.
+async function parkLibrarySave(op, res) {
+  try {
+    if (!res || res._transient) { await enqueueLibrarySave(op); return 'queued'; }
+    await dlAdd(op, res.error, 'terminal');
+    return 'parked';
+  } catch (e) { return 'failed'; }
+}
+// Make `doc` the local library (global + the kv mirror, keeping the base tokens the
+// queued op was built against) — the same thing an offline save does.
+async function applyLibraryLocally(doc) {
+  promptLibrary = doc;
+  try { await kvSet('promptlib', Object.assign({}, doc, { _mtime: promptLibMtime, _rev: promptLibRev })); } catch (e) {}
+  onPromptLibraryChanged();
+}
+// How many pages reference library part `id`, or null when it can't be known (offline,
+// or a malformed reply). A page referencing it stores `"ref": "<id>"`, so a content
+// search for the id finds exactly those pages.
+async function promptLibraryUsage(id) {
+  if (offlineState) return null;
+  const r = await api('search_content', undefined, 'q=' + encodeURIComponent(id));
+  return (offlineState || !Array.isArray(r)) ? null : r.length;
+}
+// First non-blank line of a part's text, trimmed to n chars (row sub-lines, default names).
+function promptFirstLine(text, n) {
+  const l = String(text || '').split('\n').find(x => x.trim()) || '';
+  return l.trim().slice(0, n || 80);
+}
+const byPartName = (a, b) => String(a.name || '').toLowerCase().localeCompare(String(b.name || '').toLowerCase());
+
+// Pick a library part for `slot` from a filterable picker (the openMovePicker model:
+// type to filter, ArrowUp/Down move the highlight, Enter picks it). Resolves the
+// chosen part, or null.
+function pickLibraryPart(slot) {
+  const label = promptSlotLabel(slot);
+  const lib = promptLibrary;
+  const all = lib ? lib.parts.filter(p => p && p.slot === slot).sort(byPartName) : [];
+  let active = 0, visible = [], manage = false;
+  return showModal((box, submit, cancel) => {
+    const title = document.createElement('div'); title.className = 'modal-title';
+    title.textContent = 'Choose a ' + label + ' part';
+    box.appendChild(title);
+    if (!lib) {
+      const e = document.createElement('div'); e.className = 'move-empty';
+      e.textContent = 'The prompt library isn’t available right now.';
+      const btns = document.createElement('div'); btns.className = 'modal-btns';
+      const c = document.createElement('button'); c.className = 'secondary'; c.textContent = 'Close'; c.onclick = cancel;
+      btns.appendChild(c);
+      box.append(e, btns);
+      return;
+    }
+    if (!all.length) {
+      const e = document.createElement('div'); e.className = 'move-empty';
+      e.textContent = 'No ' + label + ' parts in the library yet';
+      const m = document.createElement('button'); m.type = 'button'; m.className = 'secondary';
+      m.textContent = 'Manage library…';
+      m.onclick = () => { manage = true; cancel(); };
+      const c = document.createElement('button'); c.type = 'button'; c.className = 'secondary'; c.textContent = 'Cancel'; c.onclick = cancel;
+      const btns = document.createElement('div'); btns.className = 'modal-btns'; btns.append(c, m);
+      box.append(e, btns);
+      return;
+    }
+    const filter = document.createElement('input'); filter.className = 'modal-input';
+    filter.placeholder = 'Filter ' + label + ' parts…';
+    filter.setAttribute('aria-label', 'Filter ' + label + ' parts');
+    const listWrap = document.createElement('div'); listWrap.className = 'move-list';
+    function renderList() {
+      const q = filter.value.trim().toLowerCase();
+      visible = all.filter(p => !q || String(p.name || '').toLowerCase().includes(q) || String(p.text || '').toLowerCase().includes(q));
+      if (active >= visible.length) active = Math.max(0, visible.length - 1);
+      listWrap.innerHTML = '';
+      visible.forEach((p, i) => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'move-row prompt-pick-row' + (i === active ? ' active' : '');
+        const nm = document.createElement('span'); nm.className = 'prompt-pick-name'; nm.textContent = p.name || '(unnamed)';
+        const sub = document.createElement('span'); sub.className = 'prompt-pick-sub'; sub.textContent = promptFirstLine(p.text, 90);
+        row.append(nm, sub);
+        row.addEventListener('mousemove', () => { if (active !== i) { active = i; renderList(); } });
+        row.onclick = () => { active = i; submit(); };
+        listWrap.appendChild(row);
+      });
+      if (!visible.length) {
+        const e = document.createElement('div'); e.className = 'move-empty'; e.textContent = 'No matching parts';
+        listWrap.appendChild(e);
+      }
+      const act = listWrap.querySelector('.move-row.active');
+      if (act) act.scrollIntoView({ block: 'nearest' });
+    }
+    filter.addEventListener('input', () => { active = 0; renderList(); });
+    filter.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+      e.preventDefault();
+      active = paletteArrowIndex(e.key, active, visible.length);
+      renderList();
+    });
+    const btns = document.createElement('div'); btns.className = 'modal-btns';
+    const cancelBtn = document.createElement('button'); cancelBtn.className = 'secondary'; cancelBtn.textContent = 'Cancel';
+    cancelBtn.onclick = cancel;
+    btns.appendChild(cancelBtn);
+    box.append(filter, listWrap, btns);
+    renderList();
+    setTimeout(() => filter.focus(), 0);
+  }, () => visible[active] || null).then(p => {
+    if (manage) openPromptLibrary(slot);
+    return p || null;
+  });
+}
+
+// Ask for a library part name (Save to library…). Resolves the trimmed name, or null.
+function askPromptPartName(initial) {
+  let input;
+  return showModal((box, submit, cancel) => {
+    const t = document.createElement('div'); t.className = 'modal-title'; t.textContent = 'Save to the prompt library as…';
+    input = document.createElement('input'); input.className = 'modal-input';
+    input.maxLength = 200; input.value = initial || ''; input.placeholder = 'Name';
+    input.setAttribute('aria-label', 'Library part name');
+    const btns = document.createElement('div'); btns.className = 'modal-btns';
+    const c = document.createElement('button'); c.className = 'secondary'; c.textContent = 'Cancel'; c.onclick = cancel;
+    const ok = document.createElement('button'); ok.textContent = 'Save'; ok.onclick = submit;
+    btns.append(c, ok);
+    box.append(t, input, btns);
+    setTimeout(() => { input.focus(); input.select(); }, 0);
+  }, () => input.value.trim() || null);
+}
+
+// The Prompt Library panel: one tab per library slot (Role / Context / Constraints /
+// Output — Task is Custom-only in Phase 1), search, create, edit, duplicate, delete.
+// Every row is built with textContent. A dialog-mode openPanel (focus trap, Escape that
+// a nested confirm owns, unsaved-edit guard on dismissal).
+function openPromptLibrary(initialSlot) {
+  const LIB_SLOTS = PROMPT_SLOTS.filter(s => s.lib);
+  let slot = (LIB_SLOTS.find(s => s.slot === initialSlot) || LIB_SLOTS[0]).slot;
+  let query = '';
+  let editing = null;   // { id (null = new), dirty(), name() }
+  const discardOk = async () => {
+    if (!editing || !editing.dirty()) return true;
+    return showConfirm('Discard unsaved changes to “' + (editing.name() || 'new part') + '”?', { okLabel: 'Discard' });
+  };
+  openPanel('Prompt library', (body, foot) => {
+    body.classList.add('plib-body');
+    const bytes = (s) => new TextEncoder().encode(s).length;
+
+    function editForm(orig) {
+      const wrap = document.createElement('div'); wrap.className = 'plib-edit';
+      const nameIn = document.createElement('input'); nameIn.className = 'modal-input'; nameIn.maxLength = 200;
+      nameIn.placeholder = 'Name (required)'; nameIn.setAttribute('aria-label', 'Name'); nameIn.value = orig ? orig.name || '' : '';
+      const textIn = document.createElement('textarea'); textIn.className = 'plib-text'; textIn.spellcheck = false;
+      textIn.placeholder = promptSlotLabel(slot) + ' text'; textIn.setAttribute('aria-label', 'Text'); textIn.value = orig ? orig.text || '' : '';
+      const tagsIn = document.createElement('input'); tagsIn.className = 'modal-input';
+      tagsIn.placeholder = 'Tags, comma-separated (optional)'; tagsIn.setAttribute('aria-label', 'Tags (comma-separated)');
+      tagsIn.value = orig && Array.isArray(orig.tags) ? orig.tags.join(', ') : '';
+      const btns = document.createElement('div'); btns.className = 'modal-btns';
+      const cancel = document.createElement('button'); cancel.className = 'secondary'; cancel.textContent = 'Cancel';
+      const save = document.createElement('button'); save.textContent = 'Save';
+      const start = JSON.stringify([nameIn.value, textIn.value, tagsIn.value]);
+      // A list re-render (search typing) rebuilds this form — carry the in-progress draft.
+      const id0 = orig ? orig.id : null;
+      const draft = (editing && editing.id === id0 && editing.draft) ? editing.draft : null;
+      if (draft) { nameIn.value = draft[0]; textIn.value = draft[1]; tagsIn.value = draft[2]; }
+      const cur = () => [nameIn.value, textIn.value, tagsIn.value];
+      editing = { id: id0, draft, dirty: () => JSON.stringify(cur()) !== start, name: () => nameIn.value.trim() };
+      [nameIn, textIn, tagsIn].forEach(i => i.addEventListener('input', () => { editing.draft = cur(); }));
+      const sync = () => { const n = nameIn.value.trim(); save.disabled = !n || bytes(n) > 200; save.title = !n ? 'A name is required' : bytes(n) > 200 ? 'Name is too long' : ''; };
+      nameIn.addEventListener('input', sync); sync();
+      cancel.onclick = () => { editing = null; render(); };
+      save.onclick = async () => {
+        const id = orig ? orig.id : newPromptPartId(new Set(promptLibrary.parts.map(p => p && p.id)));
+        const tags = tagsIn.value.split(',').map(t => t.trim()).filter(Boolean);
+        const part = Object.assign({}, orig || {}, { id, slot: orig ? orig.slot : slot, name: nameIn.value.trim(), text: textIn.value, tags, updatedAt: Date.now() });
+        if (!isValidLibPart(part)) { toast('That part is not valid — check the name'); return; }
+        save.disabled = true;
+        const res = await savePromptLibrary(d => libUpsert(d, part));
+        if (res && !res.error) { editing = null; render(); }
+        else sync();
+      };
+      btns.append(cancel, save);
+      wrap.append(nameIn, textIn, tagsIn, btns);
+      if (!draft) setTimeout(() => nameIn.focus(), 0);
+      return wrap;
+    }
+
+    function row(p) {
+      if (editing && editing.id === p.id) return editForm(p);
+      const r = document.createElement('div'); r.className = 'panel-row plib-row';
+      const info = document.createElement('div'); info.className = 'panel-row-info';
+      const nm = document.createElement('div'); nm.className = 'panel-row-name'; nm.textContent = p.name || '(unnamed)';
+      const sub = document.createElement('div'); sub.className = 'panel-row-sub';
+      sub.textContent = promptFirstLine(p.text, 100) + (Array.isArray(p.tags) && p.tags.length ? '  ·  ' + p.tags.join(', ') : '');
+      info.append(nm, sub);
+      const edit = document.createElement('button'); edit.className = 'secondary'; edit.textContent = 'Edit';
+      edit.setAttribute('aria-label', 'Edit “' + (p.name || '') + '”');
+      edit.onclick = async () => { if (!await discardOk()) return; editing = { id: p.id, dirty: () => false, name: () => p.name }; render(); };
+      const dup = document.createElement('button'); dup.className = 'secondary'; dup.textContent = 'Duplicate';
+      dup.setAttribute('aria-label', 'Duplicate “' + (p.name || '') + '”');
+      dup.onclick = async () => {
+        const copy = Object.assign(JSON.parse(JSON.stringify(p)), {
+          id: newPromptPartId(new Set(promptLibrary.parts.map(x => x && x.id))),
+          name: String(p.name || '').slice(0, 190) + ' copy', updatedAt: Date.now(),
+        });
+        if (!isValidLibPart(copy)) copy.name = 'Copy';
+        if (!(await savePromptLibrary(d => libUpsert(d, copy))).error) render();
+      };
+      const del = document.createElement('button'); del.className = 'danger'; del.textContent = 'Delete';
+      del.setAttribute('aria-label', 'Delete “' + (p.name || '') + '”');
+      del.onclick = async () => {
+        const used = await promptLibraryUsage(p.id);
+        const nm2 = p.name || 'this part';
+        const msg = used == null
+          ? 'Usage can’t be checked while offline. Prompts using “' + nm2 + '” keep their text and will show it as “Not in library”. Delete it?'
+          : used > 0
+            ? 'Used in ' + used + ' page' + (used === 1 ? '' : 's') + '. Those prompts keep their text but will show “Not in library”. Delete “' + nm2 + '”?'
+            : 'Delete “' + nm2 + '”?';
+        if (!await showConfirm(msg, { okLabel: 'Delete' })) return;
+        if (!(await savePromptLibrary(d => libRemove(d, p.id))).error) render();
+      };
+      r.append(info, edit, dup, del);
+      return r;
+    }
+
+    function render() {
+      body.textContent = '';
+      if (!promptLibrary) {
+        const e = document.createElement('div'); e.className = 'panel-empty';
+        e.textContent = 'The prompt library isn’t available right now (offline with no saved copy, or it could not be read).';
+        const retry = document.createElement('button'); retry.className = 'secondary'; retry.textContent = 'Retry';
+        retry.onclick = () => { loadPromptLibrary().then(render); };
+        body.append(e, retry);
+        return;
+      }
+      const tabs = document.createElement('div'); tabs.className = 'plib-tabs';
+      tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', 'Part slots');
+      LIB_SLOTS.forEach((s, i) => {
+        const t = document.createElement('button'); t.type = 'button'; t.className = 'plib-tab';
+        t.setAttribute('role', 'tab'); t.dataset.slot = s.slot;
+        t.setAttribute('aria-selected', s.slot === slot ? 'true' : 'false');
+        t.tabIndex = s.slot === slot ? 0 : -1;
+        const n = promptLibrary.parts.filter(p => p && p.slot === s.slot).length;
+        t.textContent = s.label + ' · ' + n;
+        const go = async (j) => {
+          const target = LIB_SLOTS[j].slot;
+          if (target !== slot) { if (!await discardOk()) return; editing = null; slot = target; render(); }
+          const nt = body.querySelector('.plib-tab[data-slot="' + target + '"]'); if (nt) nt.focus();
+        };
+        t.onclick = () => go(i);
+        t.addEventListener('keydown', (e) => {
+          if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+          e.preventDefault();
+          go(tabArrowIndex(e.key, i, LIB_SLOTS.length));
+        });
+        tabs.appendChild(t);
+      });
+      const bar = document.createElement('div'); bar.className = 'plib-bar';
+      const search = document.createElement('input'); search.className = 'modal-input plib-search';
+      search.placeholder = 'Search ' + promptSlotLabel(slot) + ' parts…'; search.value = query;
+      search.setAttribute('aria-label', 'Search ' + promptSlotLabel(slot) + ' parts');
+      const add = document.createElement('button'); add.textContent = '+ New ' + promptSlotLabel(slot) + ' part';
+      add.onclick = async () => { if (!await discardOk()) return; editing = { id: null, dirty: () => false, name: () => '' }; render(); };
+      bar.append(search, add);
+      const list = document.createElement('div'); list.className = 'plib-list';
+      list.setAttribute('role', 'tabpanel');
+      function renderList() {
+        list.textContent = '';
+        const q = query.trim().toLowerCase();
+        const rows = promptLibrary.parts.filter(p => p && p.slot === slot)
+          .filter(p => !q || [p.name, p.text, (p.tags || []).join(' ')].some(v => String(v || '').toLowerCase().includes(q)))
+          .sort(byPartName);
+        if (editing && editing.id === null) list.appendChild(editForm(null));
+        rows.forEach(p => list.appendChild(row(p)));
+        if (!rows.length && !(editing && editing.id === null)) {
+          const e = document.createElement('div'); e.className = 'panel-empty';
+          e.textContent = q ? 'No matching parts' : 'No ' + promptSlotLabel(slot) + ' parts yet — add one to reuse it across prompts.';
+          list.appendChild(e);
+        }
+      }
+      search.addEventListener('input', () => { query = search.value; renderList(); });
+      body.append(tabs, bar, list);
+      renderList();
+    }
+    render();
+    // keyboard users land on the selected slot tab (←/→ moves between slots), not on the box
+    setTimeout(() => { const t = body.querySelector('.plib-tab[aria-selected="true"]'); if (t && !body.contains(document.activeElement)) t.focus(); }, 0);
+  }, { dialog: true, beforeClose: discardOk });
 }
 
 /* ---------- TAG MANAGER (rename / merge / delete tags across all pages) ---------- */
@@ -820,7 +1210,12 @@ function pageToMarkdown(data) {
       out.push('');
       c.blocks.forEach(b => {
         if (b.label) out.push('**' + b.label + '**');
-        if (b.checklist) {
+        // FIRST, matching blockKind's precedence: the filled prompt, fenced longer than
+        // any backtick run inside it.
+        if (isPromptBlock(b)) {
+          const t = promptOutput(b); const f = mdFence(t);
+          out.push(f + promptFormatInfo(b.format).fence); out.push(t); out.push(f, '');
+        } else if (b.checklist) {
           (b.items || []).forEach(it => out.push('- [' + (it.done ? 'x' : ' ') + '] ' + (it.text || '')));
           out.push('');
         } else if (b.csv) {
@@ -887,6 +1282,8 @@ function pageToHtml(data) {
     const vals = b.varsOn ? (b.varValues || {}) : secVals;
     const code = active ? substituteVars(b.code, vals) : (b.code || '');
     if (b.label) parts.push('<div class="lbl">' + esc(b.label) + '</div>');
+    // `parts` here is this function's local HTML array, not a prompt's b.parts.
+    if (isPromptBlock(b)) { parts.push('<pre class="prompt"><code>' + esc(promptOutput(b)) + '</code></pre>'); return; }
     if (b.checklist) {
       const rows = (b.items || []).map(it => '<li class="' + (it.done ? 'done' : '') + '"><input type="checkbox" disabled' + (it.done ? ' checked' : '') + '> ' + esc(it.text || '') + '</li>').join('');
       parts.push('<ul class="todo">' + rows + '</ul>'); return;
@@ -934,7 +1331,7 @@ function pageToHtml(data) {
       const h = Math.min(depth, 6);
       parts.push('<h' + h + '>' + esc(sec.title || 'Untitled') + '</h' + h + '>');
       if (sec.tags && sec.tags.length) parts.push('<div class="tags">' + sec.tags.map(t => '<span class="tag">' + esc(t) + '</span>').join('') + '</div>');
-      const secVals = (sec.varsOn && !c.blocks.some(b => b.varsOn)) ? (sec.varValues || {}) : null;
+      const secVals = (sec.varsOn && !c.blocks.some(b => b.varsOn && !isPromptBlock(b))) ? (sec.varValues || {}) : null;
       c.blocks.forEach(b => blockHtml(b, secVals));
       walk(c.subsections, depth + 1);
     });
@@ -976,6 +1373,7 @@ function pageToHtml(data) {
     'table.csv tbody tr:nth-child(even) td{background:rgba(255,255,255,.02)}',
     '.csv-empty{color:#888;font-style:italic}',
     'iframe.htmlproj{display:block;width:100%;border:1px solid #333;border-radius:6px;background:#fff;margin:8px 0}',
+    'pre.prompt{background:#252526;border:1px solid #333;border-left:3px solid #6f4fa8;border-radius:6px;padding:12px 14px;font-size:13px;line-height:1.45;white-space:pre-wrap;overflow-wrap:break-word}pre.prompt code{font-family:"SF Mono",Menlo,Consolas,monospace}',
     '.xlink{color:#8a7bd8}',
     'a{color:#4ea0e0}',
     // prism-tomorrow token colors (compact subset)
@@ -1021,6 +1419,7 @@ function openMoreMenu(anchor) {
     // everyday actions
     { icon: '★', label: 'Favorites & recently copied', onClick: () => openFavorites() },
     { icon: '🏷', label: 'Manage tags', onClick: () => openTagManager() },
+    { icon: '✦', label: 'Prompt library', onClick: () => openPromptLibrary() },
     { icon: '⧉', label: 'Quick-paste block', onClick: () => openBlockPalette() },
     { icon: '⌘', label: 'Command palette…', onClick: () => openCommandPalette() },
     { icon: '⇄', label: 'Find & replace…', onClick: () => openReplace() },
@@ -1076,10 +1475,10 @@ function exportCurrentPage(fmt) {
 //   SHORT_SHAPE — import of a bundle WITH the sidecar: shape came too.
 const BUNDLE_SCOPE_NOTE = 'Every page restores exactly as it is now.\n'
   + "The bundle also carries the library's shape — project markers, manual folder order, "
-  + 'column sort and favourites — so restoring into an empty library rebuilds it.\n'
+  + 'column sort, favourites and the prompt-part library — so restoring into an empty library rebuilds it.\n'
   + 'Trash and version history are not included.';
 const BUNDLE_SCOPE_SHORT = 'a JSON bundle carries page content only, not project markers, '
-  + 'manual order, trash or history';
+  + 'manual order, the prompt library, trash or history';
 const BUNDLE_SCOPE_SHORT_SHAPE = 'trash and version history are not included';
 
 // The sidecar key. Deliberately NOT *.json: every page key in a bundle ends in .json,
@@ -1095,7 +1494,9 @@ const LIBRARY_META_KEY = '__codeman_meta';
 // (persisted) order, colSort and favorites are live module globals.
 // Never throws (the parseCsv/parseJsonSafe/bundleHtmlProject contract): on any
 // surprise it returns null and the caller ships the pages without a sidecar.
-function buildLibraryMeta(nodes, colSortMap, favSet, appVersion, nowIso) {
+// promptLib (optional 6th arg): the prompt-part library document — carried as
+// meta.promptLibrary ONLY when it has parts, so a library-less export is unchanged.
+function buildLibraryMeta(nodes, colSortMap, favSet, appVersion, nowIso, promptLib) {
   try {
     const folders = [], pagePaths = new Set();
     (function walk(list) {
@@ -1137,6 +1538,10 @@ function buildLibraryMeta(nodes, colSortMap, favSet, appVersion, nowIso) {
     // The root has no folder entry, so its order is its own field — omitted entirely
     // when the root is already in the default order.
     if (!isDefaultChildOrder(nodes || [])) meta.rootOrder = childOrderKeys(nodes || []);
+    // `counts` deliberately unchanged (provenance only).
+    if (promptLib && Array.isArray(promptLib.parts) && promptLib.parts.length) {
+      meta.promptLibrary = { v: 1, parts: JSON.parse(JSON.stringify(promptLib.parts)) };
+    }
     return meta;
   } catch (e) {
     return null;
@@ -1158,7 +1563,8 @@ async function exportAll() {
   // irreplaceable part. On any trouble, omit the key and say so in the wording.
   let meta = null;
   try {
-    meta = buildLibraryMeta(treeData, colSort, favorites, (self.CODEMAN_VERSION || ''), new Date().toISOString());
+    const lib = await ensurePromptLibrary().catch(() => null);
+    meta = buildLibraryMeta(treeData, colSort, favorites, (self.CODEMAN_VERSION || ''), new Date().toISOString(), lib);
   } catch (e) { meta = null; }
   if (meta) bundle[LIBRARY_META_KEY] = meta;
   download('codeman-export-' + paths.length + '-pages.json', JSON.stringify(bundle, null, 2), 'application/json');
@@ -1200,7 +1606,12 @@ function readLibraryMeta(parsed) {
       colSort[k] = { field: p.field, dir: p.dir === 'desc' ? 'desc' : 'asc' };
     });
     const favs = (m.client && typeof m.client === 'object') ? strs(m.client.favorites) : null;
-    return { folders, colSort, rootOrder: strs(m.rootOrder), favorites: favs || [] };
+    const out = { folders, colSort, rootOrder: strs(m.rootOrder), favorites: favs || [] };
+    // Only when present, so today's return shape is unchanged for a library-less sidecar.
+    // Per-part validation happens at import (planPromptLibraryImport counts the bad ones).
+    const pl = (m.promptLibrary && Array.isArray(m.promptLibrary.parts)) ? m.promptLibrary.parts : null;
+    if (pl) out.promptLibrary = pl;
+    return out;
   } catch (e) {
     return null;
   }
@@ -1260,6 +1671,8 @@ function importPages() {
     // count it read as "1 shape item failed", which is what a merging user takes for
     // data loss on the documented backup path — the folder and every page in it landed.
     let downgraded = 0;
+    // Phase 5b (prompt library) tallies.
+    let plPlan = null, plAdded = 0, plFailed = false, plUnavail = false;
 
     /* ---- Phase 2 — folders, BEFORE pages ---------------------------------------- */
     if (meta) {
@@ -1392,6 +1805,27 @@ function importPages() {
       const bundleKeys = new Set(Object.keys(items));
       meta.favorites.forEach((p) => { if (bundleKeys.has(p) && !favorites.has(p)) { favorites.add(p); starred++; } });
       if (starred) saveFavorites();
+
+      /* ---- Phase 5b — the prompt-part library -------------------------------------
+         Adds only ids ABSENT from the current library; a present id keeps the existing
+         text (merge restraint — never overwrite). A sidecar without promptLibrary makes
+         no prompt_library call at all. */
+      if (meta.promptLibrary && meta.promptLibrary.length) {
+        const cur = await ensurePromptLibrary();
+        if (!cur) plUnavail = true;
+        else {
+          plPlan = planPromptLibraryImport(cur, meta.promptLibrary);
+          if (plPlan.add.length) {
+            // the mutator can re-run on a conflict rebase — so it RE-PLANS against the
+            // fresh copy each run (present/added counts describe the write that landed)
+            const r = await savePromptLibrary(d => {
+              plPlan = planPromptLibraryImport(d, meta.promptLibrary); plAdded = 0;
+              plPlan.add.forEach(p => { if (libAddIfAbsent(d, p)) plAdded++; });
+            }, { announce: false });
+            if (!r || r.error) { plFailed = true; plAdded = 0; }
+          }
+        }
+      }
     }
 
     /* ---- Phase 6 — refresh and report -------------------------------------------
@@ -1418,6 +1852,13 @@ function importPages() {
       // The honesty obligation of "layout applies only to folders this import created":
       // this clause is what tells a merging user WHY their sidebar did not change.
       if (shapeSkipped) msg += ' · ' + shapeSkipped + ' existing folder' + (shapeSkipped === 1 ? '' : 's') + ' left as-is';
+      if (plUnavail) msg += ' · prompt library not imported (unavailable)';
+      else if (plPlan) {
+        msg += ' · prompt library: ' + plAdded + ' part' + (plAdded === 1 ? '' : 's') + ' added';
+        if (plPlan.present) msg += ', ' + plPlan.present + ' already present';
+        if (plPlan.bad) msg += ', ' + plPlan.bad + ' invalid';
+        if (plFailed) msg += ' (could not be saved)';
+      }
     } else if (hasSidecar) {
       msg += ' · library shape could not be read';
     }

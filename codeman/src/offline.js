@@ -137,7 +137,11 @@ async function migrateHistoryKeys() {
 
 let offlineState = false;
 let syncQueue = [];
-(async () => {
+// Resolves once the persisted write-queue has been restored. Anything that DECIDES from
+// the queue at boot (loadPromptLibrary: "is a library save still queued?") must await
+// it — init.js starts before this IIFE gets there, and an empty-looking queue let a
+// server read overwrite the queued offline library edit in the mirror.
+let syncQueueReady = (async () => {   // `let`: tests hold it pending to pin the await
   try { await migrateLegacy(); } catch (e) {}
   try { await migrateHistoryKeys(); } catch (e) {}
   try { syncQueue = (await kvGet('queue')) || []; } catch (e) {}
@@ -147,6 +151,9 @@ let syncQueue = [];
   // on a cold boot that starts online nothing would ever replay it — flush here.
   if (!offlineState && syncQueue.length) flushQueue();
 })();
+// Is a prompt-library save waiting in the queue? (Then the local mirror is NEWER than
+// the server copy and must not be overwritten by a read.)
+function libSaveQueued() { return syncQueue.some(o => o && o.action === 'save_prompt_library'); }
 // Hooks the desktop wrapper calls (main.js) to drive safe server/mode switching.
 if (typeof window !== 'undefined') {
   // How many writes are queued in the ACTIVE namespace (→ which merge prompt to show).
@@ -174,9 +181,11 @@ if (typeof window !== 'undefined') {
       // trash: concat (newest-first lists; order isn't load-bearing for restore).
       const srcTrash = (await get(fromNS, 'trash')) || [];
       if (srcTrash.length) { const dst = (await get(toNS, 'trash')) || []; await set(toNS, 'trash', dst.concat(srcTrash)); }
-      // tree / colsorts: only seed the target if it has none (else it reconciles from
-      // the server on the next flush — the source tree could be stale for that server).
-      for (const k of ['tree', 'colsorts']) {
+      // tree / colsorts / promptlib: only seed the target if it has none (else it
+      // reconciles from the server on the next flush — the source copy could be stale for
+      // that server). A queued library save carried across in the queue above replays
+      // against the target server's library through the union-merge conflict path.
+      for (const k of ['tree', 'colsorts', 'promptlib']) {
         if ((await get(toNS, k)) === undefined) { const v = await get(fromNS, k); if (v !== undefined) await set(toNS, k, v); }
       }
       const db = await idbOpen();
@@ -233,6 +242,26 @@ if (typeof window !== 'undefined') {
 }
 async function saveQueue() { try { await kvSet('queue', syncQueue); } catch (e) {} }
 async function enqueue(op) { syncQueue.push(op); await saveQueue(); updateOfflineBadge(); }
+// Prompt-library saves are WHOLE-DOCUMENT writes, so N offline edits coalesce into ONE
+// queued op: the newest document, keeping the OLDEST baseMtime (the server state those
+// edits were all made against). The one op that must never be replaced is a replay
+// already IN FLIGHT — flushQueue sends syncQueue[0] and then shift()s it, so swapping
+// the document under it would let that shift() throw the newer document away. In that
+// case a fresh op is queued behind it instead.
+async function enqueueLibrarySave(op) {
+  let i = -1;
+  for (let k = syncQueue.length - 1; k >= 0; k--) { if (syncQueue[k] && syncQueue[k].action === 'save_prompt_library') { i = k; break; } }
+  if (i >= 0 && !(flushing && i === 0)) {
+    const existing = syncQueue[i];
+    const eb = existing.body || {};
+    const body = { data: op.body.data, baseMtime: ('baseMtime' in eb) ? eb.baseMtime : op.body.baseMtime };
+    if ('baseRev' in eb) body.baseRev = eb.baseRev; else if ('baseRev' in op.body) body.baseRev = op.body.baseRev;
+    syncQueue[i] = { action: op.action, body };
+    await saveQueue(); updateOfflineBadge();
+    return;
+  }
+  await enqueue(op);
+}
 
 /* ---------- DEAD-LETTER QUEUE ----------
    A queued write the server *rejects* (a terminal 4xx, a transient error that
@@ -324,7 +353,13 @@ function setOffline(on) {
   offlineState = on;
   updateOfflineBadge();
   if (on) { reconnectDelay = 0; scheduleReconnect(); } // start self-healing probe loop
-  else { if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; } flushQueue(); }
+  else {
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    flushQueue();
+    // Re-read the prompt library from the server (a no-op while a library save is still
+    // queued — the flush above refreshes it once that op has landed).
+    if (typeof loadPromptLibrary === 'function') loadPromptLibrary();
+  }
 }
 
 // --- Self-healing reconnect ---------------------------------------------------
@@ -371,6 +406,7 @@ async function flushQueue() {
   if (flushing || !syncQueue.length) return;
   flushing = true;
   let conflicts = 0, dead = 0;
+  let libTouched = false, libMerged = 0;   // a prompt-library save landed / was merged
   const failedCreates = new Set(); // create_* ops that terminally failed this drain
   try {
     while (syncQueue.length) {
@@ -378,6 +414,19 @@ async function flushQueue() {
       let res;
       try { res = await apiFetch(op.action, op.body, op.query); }
       catch (e) { setOffline(true); break; } // network/5xx → still offline, op stays queued
+
+      // Prompt-library conflict: the library changed on the server while we were
+      // offline. Never force — union-merge by id onto the fresh server copy and resend
+      // (replayLibraryConflict). Merged, parked (never dropped), retry later, or stop.
+      if (op.action === 'save_prompt_library' && res && res.conflict) {
+        const out = await replayLibraryConflict(op);
+        if (out === 'stop') break;
+        if (out === 'retry') { await saveQueue(); break; }
+        if (out === 'parked') dead++; else libMerged++;
+        libTouched = true;
+        syncQueue.shift(); await saveQueue(); updateOfflineBadge();
+        continue;
+      }
 
       // Save-conflict: the server refused a stale-baseMtime write (a concurrent edit
       // landed while we were offline). Re-send forced — save_page snapshots the prior
@@ -421,6 +470,7 @@ async function flushQueue() {
         syncQueue.shift(); await saveQueue(); dead++; continue;
       }
 
+      if (op.action === 'save_prompt_library') { libTouched = true; rebaseNextLibrarySave(res); }
       syncQueue.shift();
       await saveQueue();
       updateOfflineBadge();
@@ -434,12 +484,76 @@ async function flushQueue() {
         await kvSet('tree', fresh);
         setTreeData(fresh); renderTree();
       }
+      if (libTouched) await refreshPromptLibraryFromServer();
       if (dead) toast('Synced — ' + dead + ' change' + (dead === 1 ? '' : 's') + ' could not sync (review)');
       else if (conflicts) toast('Synced — ' + conflicts + ' conflict' + (conflicts === 1 ? '' : 's') + ' overwritten (prior versions in History)');
+      else if (libMerged) toast('Synced — prompt library merged with changes from another device');
       else toast('Synced');
     }
   } finally { flushing = false; }
   updateOfflineBadge();
+}
+
+// A library save just LANDED as-is: a later queued library save was built on top of
+// this very document (local state already included it), so its base is now the rev the
+// server just reported. Without this it replayed against the pre-landing base, conflicted
+// with ITSELF and union-merged — resurrecting parts deleted in between. (Not done after a
+// MERGED landing: the later doc lacks the other device's parts, so it must merge again.)
+function rebaseNextLibrarySave(res) {
+  if (!res || !res.ok) return;
+  const next = syncQueue.slice(1).find(o => o && o.action === 'save_prompt_library');
+  if (!next || !next.body) return;
+  next.body.baseMtime = res.mtime == null ? null : res.mtime;
+  if (res.rev != null) next.body.baseRev = res.rev;
+}
+
+// Resolve a queued prompt-library save that hit a conflict on replay. The replay holds
+// only the full document (not the user's original change), so it UNION-MERGES by id
+// onto the fresh server copy (mergePromptLibraries) and resends against that copy's
+// mtime — up to 3 times. Returns 'merged' | 'parked' (dead-lettered, never dropped) |
+// 'retry' (transient — leave the op queued, attempts bumped) | 'stop' (unreachable).
+async function replayLibraryConflict(op) {
+  const transientOrPark = async (reason) => {
+    op.attempts = (op.attempts || 0) + 1;
+    if (op.attempts >= 3) { await dlAdd(op, reason, 'retryable-exhausted'); return 'parked'; }
+    return 'retry';
+  };
+  for (let i = 0; i < 3; i++) {
+    let srv;
+    try { srv = await apiFetch('prompt_library'); } catch (e) { setOffline(true); return 'stop'; }
+    if (srv && srv._transient) return transientOrPark(srv.error || 'transient error');
+    if (!isPromptLibraryDoc(srv)) { await dlAdd(op, (srv && srv.error) || 'prompt library unreadable', 'terminal'); return 'parked'; }
+    const merged = mergePromptLibraries(op.body && op.body.data, srv);
+    const baseMtime = srv._mtime == null ? null : srv._mtime;
+    const baseRev = srv._rev == null ? null : srv._rev;
+    let r2;
+    try { r2 = await apiFetch('save_prompt_library', { data: merged, baseMtime, baseRev }); } catch (e) { setOffline(true); return 'stop'; }
+    if (r2 && r2.conflict) continue;   // changed AGAIN between our read and write
+    if (r2 && r2.error) {
+      if (r2._transient) return transientOrPark(r2.error);
+      // park what we actually tried to write — the merge — so a Retry re-sends it
+      await dlAdd({ action: op.action, body: { data: merged, baseMtime, baseRev }, attempts: op.attempts }, r2.error, 'terminal');
+      return 'parked';
+    }
+    return 'merged';
+  }
+  await dlAdd(op, 'prompt library kept changing during sync', 'retryable-exhausted');
+  return 'parked';
+}
+
+// Pull the server's library into the mirror + globals after a sync. Guarded: a
+// malformed / error body changes nothing. NEVER THROWS.
+async function refreshPromptLibraryFromServer() {
+  try {
+    const d = await apiFetch('prompt_library');
+    if (!isPromptLibraryDoc(d)) return;
+    await kvSet('promptlib', d);
+    promptLibMtime = d._mtime == null ? null : d._mtime;
+    promptLibRev = d._rev == null ? null : d._rev;
+    const copy = Object.assign({}, d); delete copy._mtime; delete copy._rev;
+    promptLibrary = copy;
+    onPromptLibraryChanged();
+  } catch (e) {}
 }
 
 // Keep the IndexedDB mirror current after a successful backend call.
@@ -465,6 +579,15 @@ async function cacheOnSuccess(action, body, query, data) {
     else if (action === 'get_page') { const p = (body && body.path) || qparam(query, 'path'); if (p && data && typeof data === 'object' && !Array.isArray(data)) { const copy = Object.assign({}, data); delete copy._mtime; await pageSet(p, copy); } }
     else if (action === 'save_page' && body) { const copy = Object.assign({}, body.data); delete copy._mtime; await pageSet(body.path, copy); }
     else if (action === 'delete' && body) await pageDel(body.path);
+    // The prompt library: only a real library document is mirrored (an error body was
+    // rejected above; isPromptLibraryDoc also refuses an array or a parts-less object).
+    // …and NEVER while a library save is still queued: the mirror holds that newer
+    // offline edit, and a server read landing first would silently overwrite it.
+    else if (action === 'prompt_library') { if (isPromptLibraryDoc(data) && !libSaveQueued()) await kvSet('promptlib', data); }
+    // A save is mirrored only on a real write — a conflict body has no `.ok`.
+    else if (action === 'save_prompt_library' && body && data && data.ok && !data.offline) {
+      await kvSet('promptlib', Object.assign({}, body.data, { _mtime: data.mtime, _rev: data.rev == null ? null : data.rev }));
+    }
   } catch (e) {}
 }
 
@@ -479,6 +602,12 @@ async function offlineApi(action, body, query) {
   switch (action) {
     case 'tree': return (await kvGet('tree')) || [];
     case 'col_sorts': return (await kvGet('colsorts')) || {};
+    // No mirror ⇒ `_unavailable`, NOT an empty library: an empty one would mark every
+    // linked prompt part "Not in library" and invite a save that wipes the real one.
+    case 'prompt_library': {
+      const d = await kvGet('promptlib');
+      return isPromptLibraryDoc(d) ? d : { v: 1, parts: [], _mtime: null, _rev: null, _unavailable: true };
+    }
     case 'get_page': {
       const p = (body && body.path) || qparam(query, 'path');
       return (await pageGet(p)) || { title: nameFromPath(p || ''), sections: [], _mtime: null };
@@ -511,6 +640,12 @@ async function offlineApi(action, body, query) {
       await recordLocalTrash(body.path); // snapshot before the cache clears it
       await mutateTreeCache(action, body);
       await enqueue({ action, body }); return { ok: true, offline: true };
+    }
+    case 'save_prompt_library': {
+      // Mirror first (so the offline library reads back the edit), then coalesce-queue.
+      await kvSet('promptlib', Object.assign({}, body.data, { _mtime: body.baseMtime == null ? null : body.baseMtime, _rev: body.baseRev == null ? null : body.baseRev }));
+      await enqueueLibrarySave({ action, body });
+      return { ok: true, offline: true, mtime: null };
     }
     case 'set_col_sort': {
       // Sorting is client-side, so just mirror the preference locally + replay later.
@@ -719,8 +854,15 @@ function collectBlocksFromPage(path, data, q, out) {
       const t = trail.concat([sec.title || 'Untitled']);
       const content = sec.tabs ? (sec.tabs[0] || {}) : sec;
       (content.blocks || []).forEach(b => {
-        const hay = ((b.code || '') + ' ' + (b.label || '') + ' ' + (b.type || '')).toLowerCase();
-        if (hay.includes(q)) out.push({ path, page, label: b.label || '', type: b.type || 'plaintext', code: b.code || '', note: !!b.note, trail: t.join(' › ') });
+        const isPrompt = isPromptBlock(b);
+        let hay = (b.code || '') + ' ' + (b.label || '') + ' ' + (b.type || '');
+        // a prompt matches on its PARTS too (the source of truth; code may be stale)
+        if (isPrompt && Array.isArray(b.parts)) b.parts.forEach(p => { if (p && typeof p.text === 'string') hay += ' ' + p.text; });
+        if (!hay.toLowerCase().includes(q)) return;
+        const row = { path, page, label: b.label || '', type: b.type || 'plaintext', code: b.code || '', note: !!b.note, trail: t.join(' › ') };
+        // same extra keys as api.php's collectBlocksMatching — quick-paste copies the FILLED prompt
+        if (isPrompt) Object.assign(row, { prompt: true, parts: Array.isArray(b.parts) ? b.parts : [], format: typeof b.format === 'string' ? b.format : 'xml', varValues: promptVarValues(b) });
+        out.push(row);
       });
       walk(content.subsections, t);
     });

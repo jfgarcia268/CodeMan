@@ -22,6 +22,7 @@
   --danger-bg: #6e2018;   /* red urgency surface — rejected data / dead-letters (louder than warn) */
   --danger-border: #a5382a;
   --danger-text: #ffd7d0;
+  --prompt: #6f4fa8;      /* prompt block / "Prompt" badge / linked-part accent */
   --radius: 5px;          /* default control radius — keeps peer controls consistent */
 }
 
@@ -706,6 +707,12 @@ button.secondary:hover { background: #4a4d51; }
    actions don't dominate the toolbar; full red only on hover/keyboard focus. */
 button.danger { background: #3a3d41; color: #e0a0a0; }
 button.danger:hover, button.danger:focus-visible { background: #c1340f; color: #fff; }
+/* Disabled reads as disabled everywhere (it used to look identical to enabled), and a
+   hover never lights it up as if it were clickable. */
+button:disabled { opacity: .45; cursor: not-allowed; }
+button:disabled:hover { background: var(--accent); }
+button.secondary:disabled:hover, button.danger:disabled:hover { background: #3a3d41; }
+button.danger:disabled:hover { color: #e0a0a0; }
 
 /* Keyboard-only focus ring (mouse clicks stay ring-free via :focus-visible).
    The app was effectively unusable by keyboard without this. */
@@ -1628,6 +1635,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   content: ''; position: absolute; left: 50%; top: 100%; transform: translateX(-50%);
   border: 5px solid transparent; border-top-color: #2e7d46;
 }
+/* warn variant: copied, but with something to fix (e.g. unfilled prompt variables) */
+.copy-pop.warn { background: var(--warn-bg); color: var(--warn-text); border: 1px solid var(--warn-border); }
+.copy-pop.warn::after { border-top-color: var(--warn-border); }
 
 /* ---------- HISTORY DIFF VIEWER ---------- */
 .diff-summary { font-size: 12px; color: var(--text-dim); margin-bottom: 8px; }
@@ -1895,6 +1905,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 }
 /* let the bulk buttons wrap instead of overflowing on a narrow (~320px) panel */
 .panel-foot.modal-btns { flex-wrap: wrap; row-gap: 8px; }
+.panel-foot:empty { display: none; }
+.panel-modal[role="dialog"]:focus { outline: none; }   /* the box is only a focus fallback */
 .panel-loading, .panel-empty {
   color: var(--text-dim);
   text-align: center;
@@ -2124,6 +2136,111 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   color: #e7b35c; background: rgba(231,179,92,.1);
   border: 1px solid rgba(231,179,92,.35); border-radius: 5px;
   font-size: 12px; padding: 5px 10px; margin: 0 0 8px;
+}
+
+/* ---- Prompt block (parts → one assembled prompt) ---- */
+.block.prompt { box-shadow: inset 3px 0 0 var(--prompt); }
+.block.prompt.viewing .prompt-edit { display: none; }
+.block.prompt .prompt-edit { padding: 2px 0 4px; }
+.prompt-slot {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--panel); margin: 8px 14px; padding: 6px 10px 8px;
+}
+.prompt-slot-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.prompt-slot-head h4 { margin: 0; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; flex: 1; }
+.prompt-add, .prompt-add-slot { font-size: 12px; padding: 2px 8px; }
+/* empty slots fold into ONE row ("Add: + Role + Context …") — only Task starts open */
+.prompt-add-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 14px; font-size: 12px; color: var(--muted); }
+.prompt-part { padding: 6px 0; border-top: 1px solid var(--border); }
+.prompt-slot-head + .prompt-part { border-top: 0; }
+.prompt-part.off .prompt-text { opacity: .55; }
+.prompt-part-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 4px; }
+.prompt-part-head .spacer { flex: 1; }
+.prompt-part-on { margin: 0 2px; accent-color: var(--accent); }
+.prompt-excluded { font-size: 11px; color: var(--muted); font-style: italic; }
+.prompt-source { max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; padding: 2px 8px; }
+.prompt-source[data-state="orphan"] { color: var(--warn-text); }
+.prompt-edited { opacity: .6; font-style: italic; }
+.prompt-tag { font-size: 11px; color: var(--muted); border: 1px solid var(--border-2); border-radius: 10px; padding: 1px 8px; }
+.prompt-part-more, .prompt-pick-inline { font-size: 12px; padding: 2px 8px; }
+.prompt-part-up, .prompt-part-down, .prompt-part-del { font-size: 12px; padding: 2px 7px; line-height: 1.2; }
+.prompt-chip-slot { display: block; margin: 0 0 4px; }
+.prompt-chip-slot:empty { display: none; }
+.prompt-text {
+  display: block; box-sizing: border-box; width: 100%;
+  background: #303841; color: var(--text);
+  border: 1px solid var(--border-2); border-radius: 6px;
+  padding: 8px 10px; font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 13px; line-height: 1.5; resize: vertical;
+  max-height: 60vh; overflow: auto; tab-size: 4;
+  white-space: pre-wrap;     /* prose-like parts soft-wrap (unlike CSV source) */
+}
+/* a LINKED part: full-contrast text (it is content, not a placeholder) on a raised
+   surface with the prompt accent bar — "comes from the library", not "empty" */
+.prompt-text[readonly] { background: var(--panel-2); color: var(--text); border-left: 3px solid var(--prompt); }
+.prompt-chip {
+  display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  background: var(--warn-bg); border: 1px solid var(--warn-border); color: var(--warn-text);
+  border-radius: 12px; font-size: 12px; padding: 2px 4px 2px 10px;
+}
+.prompt-chip button { font-size: 11px; padding: 1px 8px; border-radius: 10px; }
+/* the out-of-sync notice: a note, lighter than an alert — a left bar, not a slab */
+.prompt-sync-warn {
+  background: rgba(231,179,92,.08); border-left: 3px solid var(--warn-border); color: var(--text);
+  border-radius: 0 6px 6px 0; font-size: 12px; padding: 8px 10px; margin: 8px 14px;
+}
+.prompt-sync-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.prompt-stored {
+  margin: 8px 0 6px; padding: 8px 10px; background: var(--bg); color: var(--text);
+  border: 1px solid var(--border-2); border-radius: 5px; max-height: 40vh; overflow: auto;
+  white-space: pre-wrap; overflow-wrap: break-word; font-size: 12px;
+}
+.block.prompt .prompt-vars { display: flex; }
+.prompt-vars-head { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+.var-input.pulse { animation: prompt-pulse 1.2s ease-out 1; border-color: var(--warn-border); }
+@keyframes prompt-pulse { 0% { box-shadow: 0 0 0 0 rgba(231,179,92,.7); } 100% { box-shadow: 0 0 0 8px rgba(231,179,92,0); } }
+.prompt-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); padding: 6px 14px 0; }
+.prompt-format-btn { font-size: 12px; padding: 1px 8px; }
+.prompt-lib-note {
+  background: transparent; border: 1px solid var(--warn-border); color: var(--warn-text);
+  font-size: 11px; padding: 1px 8px; border-radius: 10px;
+}
+.block.prompt:not(.viewing) .prompt-lib-note { display: none; }
+pre.prompt-view {
+  margin: 0; padding: 6px 14px 12px;
+  font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 13px; line-height: 1.5;
+  white-space: pre-wrap; overflow-wrap: break-word; color: var(--text);
+}
+.prompt-missing { color: #ffb08a; background: rgba(193,52,15,.22); border-radius: 3px; padding: 0 2px; font-weight: 600; }
+.block.prompt:not(.viewing) .prompt-view { max-height: 40vh; overflow: auto; opacity: .92; }
+.prompt-empty { color: var(--text-dim); font-size: 13px; font-style: italic; padding: 6px 14px 12px; }
+.prompt-edit-foot { display: flex; justify-content: flex-end; padding: 0 14px; }
+.prompt-edit-foot button { font-size: 12px; }
+/* wide screens: edit | sticky preview, side by side, while editing */
+@media (min-width: 1200px) {
+  body:not(.is-mobile) .block.prompt:not(.viewing) { overflow: clip; }
+  body:not(.is-mobile) .block.prompt:not(.viewing) .prompt-body {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start;
+  }
+  body:not(.is-mobile) .block.prompt:not(.viewing) .prompt-side { position: sticky; top: 8px; }
+  body:not(.is-mobile) .block.prompt:not(.viewing) .prompt-view { max-height: calc(100vh - 220px); }
+}
+.prompt-pick-row { display: flex; flex-direction: column; gap: 2px; white-space: normal; }
+.prompt-pick-name { font-weight: 600; }
+.prompt-pick-sub { font-size: 11px; opacity: .75; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Prompt library panel */
+.plib-tabs { display: flex; gap: 4px; overflow-x: auto; padding-bottom: 8px; border-bottom: 1px solid var(--border); margin-bottom: 8px; }
+.plib-tab { background: transparent; border: 1px solid var(--border-2); color: var(--text); white-space: nowrap; font-size: 12px; padding: 4px 10px; }
+.plib-tab[aria-selected="true"] { background: var(--accent-2); border-color: var(--accent); color: #fff; }
+.plib-bar { display: flex; gap: 8px; align-items: stretch; margin-bottom: 8px; }
+.plib-bar .plib-search { flex: 1; min-width: 0; margin: 0; }
+.plib-bar button { white-space: nowrap; }
+.plib-edit { display: flex; flex-direction: column; gap: 6px; padding: 8px; margin: 4px 0; border: 1px solid var(--border-2); border-radius: 6px; background: var(--panel-2); }
+.plib-edit .modal-input { margin: 0; }
+.plib-edit .plib-text {
+  min-height: 90px; resize: vertical; background: var(--bg); color: var(--text);
+  border: 1px solid var(--border-2); border-radius: 5px; padding: 6px 8px;
+  font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 13px; line-height: 1.5;
 }
 
 /* ---- JSON (tree-viewer) block ---- */
@@ -2501,7 +2618,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
   /* --- 16px inputs so iOS Safari doesn't zoom on focus --- */
   .sidebar-search input, .page-search input, .modal-input, .cmdk-input,
-  .todo-text, .section-title, .block-label, .pending-input, .csv-edit, .json-edit, .html-edit { font-size: 16px; }
+  .todo-text, .section-title, .block-label, .pending-input, .csv-edit, .json-edit, .html-edit,
+  .prompt-text, .prompt-vars .var-input, .plib-edit input, .plib-edit textarea { font-size: 16px; }
 
   /* --- editor max-height: smaller on phones, dynamic-viewport so it tracks the
      browser chrome / on-screen keyboard (dvh); 50vh fallback for old engines --- */
@@ -2510,7 +2628,22 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   body.is-mobile .block.csv .csv-edit,
   body.is-mobile .block.json .json-edit,
   body.is-mobile .block.html .html-edit,
+  body.is-mobile .block.prompt .prompt-text,
   body.is-mobile .block.rich:not(.viewing) .rich-surface { max-height: 50vh; max-height: 50dvh; }
+
+  /* --- prompt block: 34×32 part icons (the shared mobile footprint), chips on their own row --- */
+  body.is-mobile .prompt-part-up, body.is-mobile .prompt-part-down, body.is-mobile .prompt-part-del {
+    min-width: 34px; min-height: 32px; padding: 5px 6px; display: inline-flex; align-items: center; justify-content: center;
+  }
+  body.is-mobile .prompt-source { max-width: 60%; }
+  body.is-mobile .prompt-slot { margin: 8px 6px; }
+  body.is-mobile .prompt-add-row { margin: 8px 6px; }
+  /* tap targets: every prompt control is ≥32px tall */
+  body.is-mobile .prompt-source, body.is-mobile .prompt-add, body.is-mobile .prompt-add-slot,
+  body.is-mobile .prompt-chip button, body.is-mobile .prompt-pick-inline, body.is-mobile .prompt-part-more,
+  body.is-mobile .prompt-format-btn { min-height: 32px; }
+  /* library tabs scroll sideways — fade the edge so it reads as "more →" */
+  .plib-tabs { -webkit-mask-image: linear-gradient(to right, #000 85%, transparent); mask-image: linear-gradient(to right, #000 85%, transparent); }
 
   /* iOS Safari has no folder picker — drag-drop is the only other route, and there
      isn't one on a phone either, so hide Upload rather than offer a dead button. */

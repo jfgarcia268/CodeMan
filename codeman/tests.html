@@ -1373,6 +1373,204 @@
     if (!wasMobile) document.body.classList.remove('is-mobile');
   })();
 
+  // ---- PROMPT BLOCK — pure helpers (editor.js) -----------------------------------
+  // assemblePrompt is the ONE assembler behind Copy, Copy-as, quick-paste, both exports
+  // and convert-away; these goldens are the contract. Fixture G is deliberately OUT of
+  // slot order, carries an off part, a whitespace-only part, a leading-blank/CRLF part.
+  (function () {
+    const G = () => ({ prompt: true, format: 'xml', parts: [
+      { slot: 'task', ref: null, text: 'Review the diff below.', on: true },
+      { slot: 'role', ref: 'p_aaaaaaaaaaaa', text: 'You are a senior code reviewer.', on: true },
+      { slot: 'constraints', ref: null, text: 'Cite file:line for every finding.', on: true },
+      { slot: 'context', ref: null, text: '\n\n  The repo is a PHP + vanilla JS app.\r\nNo build step.\n\n', on: true },
+      { slot: 'constraints', ref: null, text: 'Be rude.', on: false },
+      { slot: 'constraints', ref: 'p_bbbbbbbbbbbb', text: 'No style nitpicks.', on: true },
+      { slot: 'output', ref: null, text: '   \n\t ', on: true } ] });
+    const GX = '<role>\nYou are a senior code reviewer.\n</role>\n\n<context>\n  The repo is a PHP + vanilla JS app.\nNo build step.\n</context>\n\n<task>\nReview the diff below.\n</task>\n\n<constraints>\nCite file:line for every finding.\n\nNo style nitpicks.\n</constraints>';
+    const GM = '## Role\n\nYou are a senior code reviewer.\n\n## Context\n\n  The repo is a PHP + vanilla JS app.\nNo build step.\n\n## Task\n\nReview the diff below.\n\n## Constraints\n\nCite file:line for every finding.\n\nNo style nitpicks.';
+    const GP = 'You are a senior code reviewer.\n\n  The repo is a PHP + vanilla JS app.\nNo build step.\n\nReview the diff below.\n\nCite file:line for every finding.\n\nNo style nitpicks.';
+    t('assemblePrompt golden G — xml', assemblePrompt(G(), 'xml'), GX);
+    t('assemblePrompt golden G — markdown', assemblePrompt(G(), 'markdown'), GM);
+    t('assemblePrompt golden G — plain', assemblePrompt(G(), 'plain'), GP);
+    const shuffled = G(); shuffled.parts = [shuffled.parts[3], shuffled.parts[6], shuffled.parts[1], shuffled.parts[0], shuffled.parts[2], shuffled.parts[4], shuffled.parts[5]];
+    t('assemblePrompt orders by SLOT, not array order', assemblePrompt(shuffled, 'xml'), GX);
+    t('assemblePrompt skips off + blank parts and omits an empty slot (no <output_format>)',
+      [assemblePrompt(G(), 'xml').includes('Be rude'), assemblePrompt(G(), 'xml').includes('output_format')], [false, false]);
+    const out1 = { parts: [{ slot: 'output', text: 'JSON with keys a, b.' }] };
+    t('assemblePrompt output slot — xml tag is output_format', assemblePrompt(out1, 'xml'), '<output_format>\nJSON with keys a, b.\n</output_format>');
+    t('assemblePrompt output slot — markdown label is "Output format"', assemblePrompt(out1, 'markdown'), '## Output format\n\nJSON with keys a, b.');
+    t('assemblePrompt unknown slot follows the known slots, tag derived',
+      assemblePrompt({ parts: [{ slot: 'examples', text: 'In: 1 → Out: 2' }, { slot: 'task', text: 'T' }] }, 'xml'),
+      '<task>\nT\n</task>\n\n<examples>\nIn: 1 → Out: 2\n</examples>');
+    t('promptSlotTag sanitises unknown slots', [promptSlotTag('My Slot!'), promptSlotTag('9x'), promptSlotTag('')], ['my_slot_', 'part_9x', 'part']);
+    t('assemblePrompt unknown format falls back to xml', assemblePrompt(G(), 'json'), GX);
+    t('assemblePrompt never throws on junk input',
+      [assemblePrompt(null), assemblePrompt({ parts: 'x' }), assemblePrompt({ parts: [null, 5, { slot: 'task', text: 7 }, { slot: 'task', text: 'ok' }] }, 'plain')],
+      ['', '', 'ok']);
+    t('assemblePrompt of a fresh prompt is empty in every format',
+      ['xml', 'markdown', 'plain'].map(f => assemblePrompt(newPromptBlock(), f)), ['', '', '']);
+    const V = { parts: [{ slot: 'role', text: 'You review _V_LANG_V_ code.' }, { slot: 'task', text: 'Find bugs in _V_FILE_V_.' },
+                        { slot: 'context', text: 'only _V_OFFVAR_V_ here', on: false }], varValues: { LANG: 'TypeScript' } };
+    t('promptOutput fills the prompt\'s own vars (missing → MISSING VALUE)', promptOutput(V, 'xml'),
+      '<role>\nYou review TypeScript code.\n</role>\n\n<task>\nFind bugs in MISSING VALUE.\n</task>');
+    t('promptMissingVars lists only empty vars of INCLUDED parts', promptMissingVars(V), ['FILE']);
+    t('promptVarNames ignores a marker that sits only in an off part', promptVarNames(V).includes('OFFVAR'), false);
+    t('promptVarValues tolerates PHP\'s [] for an empty object', [promptVarValues({ varValues: [] }), promptVarValues({})], [{}, {}]);
+    t('promptStats = chars + ceil(chars/4) tokens', promptStats('abcde'), { chars: 5, tokens: 2 });
+    t('promptTextHash goldens (FNV-1a 32-bit)', [promptTextHash(''), promptTextHash('a')], ['811c9dc5', 'e40c292c']);
+    const lib = { v: 1, parts: [{ id: 'p_aaaaaaaaaaaa', slot: 'role', name: 'R', text: 'lib text' }] };
+    t('promptPartState matrix', [
+      promptPartState({ ref: null, text: 'x' }, lib),
+      promptPartState({ ref: 'p_aaaaaaaaaaaa', text: 'x' }, null),
+      promptPartState({ ref: 'p_gone', text: 'x' }, lib),
+      promptPartState({ ref: 'p_aaaaaaaaaaaa', text: 'lib text' }, lib),
+      promptPartState({ ref: 'p_aaaaaaaaaaaa', text: 'mine' }, lib),
+      promptPartState({ ref: 'p_aaaaaaaaaaaa', text: 'mine', ack: promptTextHash('lib text') }, lib),
+    ], ['custom', 'unknown', 'orphan', 'synced', 'drift', 'kept']);
+    const lib2 = { v: 1, parts: [{ id: 'p_aaaaaaaaaaaa', slot: 'role', name: 'R', text: 'lib text v2' }] };
+    t('"Keep mine" turns back into drift when the LIBRARY text changes again',
+      promptPartState({ ref: 'p_aaaaaaaaaaaa', text: 'mine', ack: promptTextHash('lib text') }, lib2), 'drift');
+    const mp = [{ slot: 'role' }, { slot: 'constraints', text: 'c1' }, { slot: 'task' }, { slot: 'constraints', text: 'c2' }];
+    t('movePromptPart swaps with the nearest SAME-slot part (skips other slots)',
+      [movePromptPart(mp, 1, 1), mp.map(p => p.text || p.slot)], [3, ['role', 'c2', 'task', 'c1']]);
+    t('movePromptPart returns -1 at the edge of its slot', [movePromptPart(mp, 0, -1), movePromptPart(mp, 3, 1), movePromptPart(mp, 0, 1)], [-1, -1, -1]);
+    t('insertIndexForSlot: after the slot\'s last part / before a later slot / end',
+      [insertIndexForSlot(mp, 'constraints'), insertIndexForSlot(mp, 'context'), insertIndexForSlot([{ slot: 'role' }], 'output'), insertIndexForSlot([{ slot: 'output' }], 'role')],
+      [4, 1, 1, 0]);
+    // mergePromptLibraries — the offline-replay union merge
+    const L = { v: 1, x: 'local', parts: [{ id: 'a', text: 'L-a', updatedAt: 5 }, { id: 'b', text: 'L-b', updatedAt: 1 }, { id: 'c', text: 'L-c', updatedAt: 3 }, { id: 'lo', text: 'local-only' }] };
+    const S = { v: 1, _mtime: 99, parts: [{ id: 's1', text: 'srv-only' }, { id: 'a', text: 'S-a', updatedAt: 1 }, { id: 'b', text: 'S-b', updatedAt: 9 }, { id: 'c', text: 'S-c', updatedAt: 3 }] };
+    const Ls = JSON.stringify(L), Ss = JSON.stringify(S);
+    const M = mergePromptLibraries(L, S);
+    t('mergePromptLibraries: server order first, local-only appended', M.parts.map(p => p.id), ['s1', 'a', 'b', 'c', 'lo']);
+    t('mergePromptLibraries: newer updatedAt wins in BOTH directions; a tie goes to local',
+      M.parts.map(p => p.text), ['srv-only', 'L-a', 'S-b', 'L-c', 'local-only']);
+    t('mergePromptLibraries: never mutates its inputs; drops _mtime', [JSON.stringify(L) === Ls, JSON.stringify(S) === Ss, '_mtime' in M], [true, true, false]);
+    t('mergePromptLibraries: a part deleted locally COMES BACK from the server (accepted trade-off)',
+      mergePromptLibraries({ parts: [] }, { parts: [{ id: 'gone', text: 'x' }] }).parts.map(p => p.id), ['gone']);
+    const doc = { v: 1, parts: [{ id: 'p_aaaaaaaaaaaa', slot: 'role', name: 'R', text: 'keep me' }] };
+    t('libAddIfAbsent never overwrites a present id', [libAddIfAbsent(doc, { id: 'p_aaaaaaaaaaaa', slot: 'role', name: 'X', text: 'NEW' }), doc.parts[0].text], [false, 'keep me']);
+    const plan = planPromptLibraryImport(doc, [
+      { id: 'p_aaaaaaaaaaaa', slot: 'role', name: 'dup', text: 'server keeps' },
+      { id: 'p_new000000001', slot: 'context', name: 'N', text: 'n' },
+      { id: 'bad id!', slot: 'role', name: 'B', text: 'b' },
+      { id: 'p_x', slot: 'task_bogus', name: 'B', text: 'b' } ]);
+    t('planPromptLibraryImport: adds only absent ids, counts present + invalid',
+      [plan.add.map(p => p.id), plan.present, plan.bad], [['p_new000000001'], 1, 2]);
+    t('libUpsert/libRemove are id-keyed + idempotent', (() => {
+      const d = { parts: [] }; libUpsert(d, { id: 'a', text: '1' }); libUpsert(d, { id: 'a', text: '2' }); libRemove(d, 'zz');
+      const after = d.parts.map(p => p.text).join(); libRemove(d, 'a'); return [after, d.parts.length];
+    })(), ['2', 0]);
+    t('isPromptLibraryDoc matrix (the mirror-poison guard)',
+      [isPromptLibraryDoc({ v: 1, parts: [] }), isPromptLibraryDoc({ error: 'x', parts: [] }), isPromptLibraryDoc([]),
+       isPromptLibraryDoc({ parts: 'x' }), isPromptLibraryDoc(null), isPromptLibraryDoc({ v: 1 })],
+      [true, false, false, false, false, false]);
+    t('isValidLibPart matrix', [
+      isValidLibPart({ id: 'p_1', slot: 'role', name: 'n', text: 't' }),
+      isValidLibPart({ id: 'p_1', slot: 'task', name: 'n', text: 't', tags: ['a'], updatedAt: 3 }),
+      isValidLibPart({ id: 'a/b', slot: 'role', name: 'n', text: 't' }),
+      isValidLibPart({ id: 'p_1', slot: 'bogus', name: 'n', text: 't' }),
+      isValidLibPart({ id: 'p_1', slot: 'role', name: 5, text: 't' }),
+      isValidLibPart({ id: 'p_1', slot: 'role', name: 'é'.repeat(101), text: 't' }),   // 202 BYTES
+      isValidLibPart({ id: 'p_1', slot: 'role', name: 'n', text: 't', tags: 'x' }),
+    ], [true, true, false, false, false, false, false]);
+    const ids = new Set(); for (let i = 0; i < 100; i++) ids.add(newPromptPartId(ids));
+    t('newPromptPartId: p_ + 12 hex, 100 draws unique', [[...ids].every(id => /^p_[0-9a-f]{12}$/.test(id)), ids.size], [true, 100]);
+    {
+      const _grv = crypto.getRandomValues; let call = 0;
+      crypto.getRandomValues = (a) => { a.fill(call++ === 0 ? 0 : 1); return a; };   // 1st draw collides
+      try { t('newPromptPartId never returns an id already in use', newPromptPartId(new Set(['p_000000000000'])), 'p_010101010101'); }
+      finally { crypto.getRandomValues = _grv; }
+    }
+    t('blockKind: the prompt BOOLEAN, never type === "prompt" (the html-rule trap)',
+      [blockKind({ type: 'prompt', code: 'x' }), blockKind({ prompt: true }), blockKind({ prompt: true, note: true })], ['code', 'prompt', 'note']);
+    t('renderBlock dispatch follows blockKind (prompt+note renders as a note, not .prompt)',
+      renderBlock({ type: 'markdown', note: true, prompt: true, code: 'x', parts: [] }, [], 0).classList.contains('prompt'), false);
+    const nb = newBlockOfKind('prompt');
+    t('newBlockOfKind("prompt"): five parts in slot order, xml, mirror code, no varsOn',
+      [nb.parts.map(p => p.slot), nb.format, nb.code === promptMirror(nb), nb.varsOn, nb.prompt],
+      [['role', 'context', 'task', 'constraints', 'output'], 'xml', true, undefined, true]);
+    {
+      const pb = { type: 'prompt', label: 'L', prompt: true, format: 'xml', parts: [{ slot: 'role', ref: 'p_aaaaaaaaaaaa', text: 'R' }, { slot: 'task', ref: null, text: 'T' }], varValues: { A: '1' }, code: '' };
+      pb.code = promptMirror(pb);
+      const mirror = pb.code;
+      t('blockPlainText(prompt) is its mirror (raw template)', blockPlainText(pb), mirror);
+      convertBlock(pb, 'note');
+      t('convert prompt→note keeps the assembled text and drops prompt/parts/format/varValues',
+        [pb.code, pb.note, 'prompt' in pb, 'parts' in pb, 'format' in pb, 'varValues' in pb], [mirror, true, false, false, false, false]);
+      const cb = { type: 'bash', label: '', code: 'echo _V_X_V_', varsOn: true, varValues: { X: 'y' } };
+      convertBlock(cb, 'prompt');
+      t('convert code→prompt: text into the Task part, varsOn gone, varValues kept, code = mirror',
+        [cb.parts.find(p => p.slot === 'task').text, 'varsOn' in cb, cb.varValues, cb.code === promptMirror(cb), cb.code],
+        ['echo _V_X_V_', false, { X: 'y' }, true, '<task>\necho _V_X_V_\n</task>']);
+      const hb = newBlockOfKind('html'); hb.code = '<p>x</p>'; hb.files = [{ p: 'a.css', t: 'a{}' }];
+      convertBlock(hb, 'prompt');
+      t('convert html→prompt drops the project files', ['files' in hb, 'html' in hb, blockKind(hb)], [false, false, 'prompt']);
+    }
+    t('promptConvertNeedsConfirm matrix', [
+      promptConvertNeedsConfirm({ parts: [{ text: 'a' }, { text: ' ' }] }),
+      promptConvertNeedsConfirm({ parts: [{ text: 'a' }, { text: 'b' }] }),
+      promptConvertNeedsConfirm({ parts: [{ text: 'a', ref: 'p_1' }] }),
+      promptConvertNeedsConfirm({}) ], [false, true, true, false]);
+    t('mdFence grows past any backtick run', [mdFence('a ``` b'), mdFence('x'), mdFence('````` y')], ['````', '```', '``````']);
+    t('"prompt" is a block type, not a language (no picker leak, no Prism autoload)',
+      [langLabel('prompt'), langPrism('prompt'), LANGUAGES.some(l => l.id === 'prompt'), langColor('prompt')], ['Prompt', 'plaintext', false, 'var(--prompt)']);
+    t('normalizePromptBlock: missing parts → one Custom Task part holding the raw text (plain), mirror re-derived',
+      (() => { const b = { prompt: true, code: 'hello\n' }; normalizePromptBlock(b); return [b.parts.length, b.parts[0].slot, b.parts[0].text, b.format, b.code]; })(),
+      [1, 'task', 'hello\n', 'plain', 'hello']);
+    t('normalizePromptBlock: junk parts dropped, fields coerced',
+      (() => { const b = { prompt: true, parts: [null, 'x', { text: 5, on: 0, ref: '' }, { slot: 'role', text: 'r' }] }; normalizePromptBlock(b); return b.parts; })(),
+      [{ text: '', on: true, ref: null, slot: 'task' }, { slot: 'role', text: 'r', on: true, ref: null }]);
+    t('isEditingKey: printable/Backspace/Delete/Enter yes; chords, arrows, Tab, Escape no',
+      [{ key: 'a' }, { key: 'Backspace' }, { key: 'Enter' }, { key: 'a', metaKey: true }, { key: 'ArrowLeft' }, { key: 'Tab' }, { key: 'Escape' }].map(isEditingKey),
+      [true, true, true, false, false, false, false]);
+  })();
+
+  // ---- PROMPT fix pass — pure helpers -----------------------------------------------
+  (function () {
+    // L3: variable lookups are OWN-property only (a bare values[name] walked the
+    // prototype chain and pasted Object's constructor SOURCE into the copied text).
+    t('substituteVars never resolves a prototype member (_V_constructor_V_ / _V_toString_V_)',
+      substituteVars('a _V_constructor_V_ b _V_toString_V_', {}), 'a MISSING VALUE b MISSING VALUE');
+    t('varValue: own string / number / prototype member / null map',
+      [varValue({ A: 'x' }, 'A'), varValue({ N: 5 }, 'N'), varValue({}, 'hasOwnProperty'), varValue(null, 'A')], ['x', '5', '', '']);
+    t('promptMissingVars counts _V_constructor_V_ as missing', promptMissingVars({ parts: [{ slot: 'task', text: '_V_constructor_V_' }], varValues: {} }), ['constructor']);
+    // L4: a parts-less block with a STORED format is not re-wrapped
+    t('normalizePromptBlock: no parts + format xml → the raw code is the Task text, NOT double-wrapped',
+      (() => { const b = { prompt: true, format: 'xml', code: '<task>\nDo it.\n</task>' }; normalizePromptBlock(b); return [b.parts[0].text, b.format, b.code]; })(),
+      ['<task>\nDo it.\n</task>', 'plain', '<task>\nDo it.\n</task>']);
+    // M1: Find & Replace's mirrorStale flag is resolved silently — re-derived, not locked
+    t('normalizePromptBlock: mirrorStale → code re-derived from the parts, flag cleared, NOT out of sync',
+      (() => { const b = { prompt: true, format: 'xml', parts: [{ slot: 'task', text: 'NEW' }], code: '<y>\nold\n</y>', mirrorStale: true };
+               normalizePromptBlock(b); return [b.code, 'mirrorStale' in b, isPromptOutOfSync(b)]; })(),
+      ['<task>\nNEW\n</task>', false, false]);
+    t('…and with the flag a stale-mirror block still renders WITHOUT the lock',
+      !!renderBlock({ type: 'prompt', prompt: true, format: 'xml', parts: [{ slot: 'task', text: 'NEW' }], code: 'stale', mirrorStale: true }, [], 0).querySelector('.prompt-sync-warn'), false);
+    // P5: the keystroke/paste that triggered the detach confirm is applied, not swallowed
+    const ta = document.createElement('textarea');
+    const run = (val, s, e, intent) => { ta.value = val; ta.setSelectionRange(s, e); applyEditIntent(ta, intent); return ta.value; };
+    t('applyEditIntent: char / Enter / Backspace / Delete / selection / paste',
+      [run('ab', 1, 1, { key: 'X' }), run('ab', 2, 2, { key: 'Enter' }), run('ab', 1, 1, { key: 'Backspace' }), run('ab', 0, 0, { key: 'Delete' }),
+       run('abc', 0, 2, { key: 'Z' }), run('ab', 1, 1, { insert: 'PASTE' }), run('ab', 0, 0, { key: 'Backspace' })],
+      ['aXb', 'ab\n', 'b', 'b', 'Zc', 'aPASTEb', 'ab']);
+    // UX M1: the source label by state
+    const lib = { parts: [{ id: 'p_a', slot: 'role', name: 'Senior', text: 'L' }] };
+    t('promptSourceLabel: ✦ name / (edited) after Keep / ⚠ Missing / ✎ Custom / ✦ Linked (unknown)',
+      [promptSourceLabel({ ref: 'p_a', text: 'L' }, lib), promptSourceLabel({ ref: 'p_a', text: 'M', ack: promptTextHash('L') }, lib),
+       promptSourceLabel({ ref: 'p_x', text: 'M' }, lib), promptSourceLabel({ ref: null, text: 'M' }, lib), promptSourceLabel({ ref: 'p_a', text: 'M' }, null)]
+        .map(x => x.icon + ' ' + x.text + (x.edited ? ' (edited)' : '')),
+      ['✦ Senior', '✦ Senior (edited)', '⚠ Missing', '✎ Custom', '✦ Linked']);
+    t('promptPlaceholder: library slots invite a choice; Task describes',
+      [promptPlaceholder('role'), promptPlaceholder('output'), promptPlaceholder('task')],
+      ['Type a role, or choose one from the library', 'Type an output format, or choose one from the library', 'Describe the task…']);
+    // UX H2: MISSING VALUE runs are their own spans (text nodes only); text === Copy
+    const pv = document.createElement('pre');
+    const vb = { format: 'plain', parts: [{ slot: 'task', text: 'Hi _V_A_V_, _V_B_V_ and _V_A_V_ <b>x</b>' }], varValues: { B: 'Bo' } };
+    fillPromptPreview(pv, vb);
+    t('fillPromptPreview: textContent === promptOutput, each unfilled var a .prompt-missing span, markup inert',
+      [pv.textContent === promptOutput(vb), pv.querySelectorAll('.prompt-missing').length, pv.querySelectorAll('b').length], [true, 2, 0]);
+  })();
+
   document.getElementById('summary').innerHTML =
     `<span class="${fail ? 'fail' : 'pass'}">${pass} passed, ${fail} failed</span>`;
   window.__testResult = { pass, fail };
@@ -1489,7 +1687,7 @@
       // The offline cache is namespaced per server (offline.js): go through the SAME
       // kvGet/kvSet/pageGet/pageSet wrappers the functions use, so we seed/read the
       // active namespace AND snapshot/restore exactly the keys under test (safe to run).
-      for (const k of ['tree', 'queue', 'trash', 'history', '__history_migrated']) snap[k] = await kvGet(k);
+      for (const k of ['tree', 'queue', 'trash', 'history', '__history_migrated', 'promptlib']) snap[k] = await kvGet(k);
       // Dead-letters are per-op namespaced kv entries (dl:<id>) — snapshot every one
       // so a failed run can NEVER corrupt a contributor's real cache. Restored in
       // `finally` alongside the keys above.
@@ -1813,7 +2011,7 @@
           ta('adopt-into keeps the pre-existing target op first', merged[0].body.name, 'pre');
           ta('adopt-into appends the source op', merged[1].body.path, RUN + 'S.json');
         } finally {
-          for (const k of ['queue', 'tree', 'trash', 'history', 'colsorts']) await idbDel('kv', toNS + NS_SEP + k);
+          for (const k of ['queue', 'tree', 'trash', 'history', 'colsorts', 'promptlib']) await idbDel('kv', toNS + NS_SEP + k);
           syncQueue.length = 0;
         }
       }
@@ -1996,7 +2194,7 @@
           // code/note textarea, so rich/csv/json/html had no Escape at all.
           pageDirty.clear();
           const ESC_SURFACE = { code: '.code-edit', note: '.code-edit', rich: '.rich-surface',
-                                csv: '.csv-edit', json: '.json-edit', html: '.html-edit' };
+                                csv: '.csv-edit', json: '.json-edit', html: '.html-edit', prompt: '.prompt-edit' };
           const escKinds = BLOCK_KINDS.map(k => k.kind).filter(k => k !== 'checklist');
           const escResults = escKinds.map(kind => {
             const b = newBlockOfKind(kind);
@@ -2488,14 +2686,14 @@
           ta('every session-bearing kind clears dirty on a no-op Revert (afterEditSession)',
              revertResults, kinds.map(k => k + ':clean/idle'));
 
-          // (c) …and the census itself: each of the FIVE session-bearing render paths
+          // (c) …and the census itself: each of the SIX session-bearing render paths
           // wires all four hooks. Mirrors the CI `edit-session wiring census` invariant so
           // the client suite fails too when one path silently loses one.
           ta('every session-bearing render path wires all four edit-session hooks',
-             [renderBlock, renderRichBlock, renderCsvBlock, renderJsonBlock, renderHtmlBlock]
+             [renderBlock, renderRichBlock, renderCsvBlock, renderJsonBlock, renderHtmlBlock, renderPromptBlock]
                .map(f => ['beforeEditSession()', 'afterEditSession()', 'wireEscapeRevert(', 'wireFocusFlush(']
                  .filter(h => !f.toString().includes(h))),
-             [[], [], [], [], []]);
+             [[], [], [], [], [], []]);
         } finally {
           pageEl.innerHTML = '';
           currentPagePath = _cpp; currentPageData = _cpd; window.api = _api;
@@ -3655,7 +3853,7 @@
           // the un-awaited savePage() — savePage is the single announcer (cf. the CI
           // edit-session wiring census; this has no other observable signature per-kind).
           ta('no render path announces Saved itself (savePage is the single announcer)',
-             [renderBlock, renderRichBlock, renderCsvBlock, renderJsonBlock, renderHtmlBlock]
+             [renderBlock, renderRichBlock, renderCsvBlock, renderJsonBlock, renderHtmlBlock, renderPromptBlock]
                .filter(f => f.toString().includes("toast('Saved')")).length, 0);
         } finally {
           pageEl.innerHTML = '';
@@ -4192,6 +4390,860 @@
         }
       }
 
+      // ==== PROMPT BLOCK — wiring through the REAL entry points ======================
+      // Every assertion below drives production code (the rendered buttons, the real ⋯
+      // menu, flushQueue, importPages, openBlockPalette) against stubs at the network
+      // edge — never a re-implementation of the helper inside its own expectation.
+      {
+        const _cpp = currentPagePath, _cpd = currentPageData, _api = window.api, _toast = window.toast,
+              _copy = window.copyText, _flash = window.flashCopied, _confirm = window.showConfirm,
+              _rp = window.renderPage, _pick = window.pickLibraryPart, _lib = promptLibrary, _libM = promptLibMtime,
+              _rec = window.recordCopy;
+        const pageEl = document.getElementById('page');
+        const PP = RUN + 'prompt/P.json';
+        const settle = async () => { for (let i = 0; i < 6; i++) await Promise.resolve(); await new Promise(r => setTimeout(r, 0)); };
+        const LIB = () => ({ v: 1, parts: [
+          { id: 'p_role00000001', slot: 'role', name: 'Senior reviewer', text: 'You are a senior reviewer.', updatedAt: 1 },
+          { id: 'p_cons00000001', slot: 'constraints', name: 'Cite lines', text: 'Cite file:line.', updatedAt: 1 } ] });
+        // Seed a page holding one prompt block, rendered INTO #page (the DOM-derived
+        // predicates read the live document). `edit` renders straight into an edit session.
+        const seed = (parts, opts) => {
+          const b = Object.assign({ type: 'prompt', label: '', prompt: true, format: 'xml', parts, varValues: {} }, (opts && opts.extra) || {});
+          if (!(opts && 'code' in opts)) b.code = promptMirror(b); else b.code = opts.code;
+          currentPagePath = PP;
+          currentPageData = { title: 'P', sections: [{ title: 's', collapsed: false, tags: [], blocks: [b], subsections: [] }] };
+          pageEl.innerHTML = '';
+          if (opts && opts.edit) { blockBackups.set(b, b.code); promptBackups.set(b, promptSnapshot(b)); }
+          const el = renderBlock(b, currentPageData.sections[0].blocks, 0);
+          pageEl.appendChild(el);
+          pageDirty.clear(); cleanPageSnapshot = null;
+          if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+          return { b, el, arr: currentPageData.sections[0].blocks };
+        };
+        const unseed = (s) => { blockBackups.delete(s.b); promptBackups.delete(s.b); pageEl.innerHTML = ''; };
+        const menuItem = (label) => [...document.querySelectorAll('.mini-menu .mini-menu-opt')].find(o => o.textContent.includes(label));
+        const closeMenus = () => document.querySelectorAll('.mini-menu').forEach(m => m.remove());
+        try {
+          const toasts = [];
+          window.toast = (m) => toasts.push(String(m));
+          let saves = 0;
+          window.api = async (a) => { if (a === 'save_page') saves++; return { ok: true, mtime: 1 }; };
+
+          // 17. the REAL enterEdit: snapshot captured, and captured BEFORE .viewing drops
+          let s = seed([newPromptPart('role'), newPromptPart('task')]);
+          const clean = safeStringify(currentPageData);
+          s.el.querySelector('.block-edit').click();
+          ta('prompt: enterEdit captured the CLEAN-page snapshot (beforeEditSession ran first)', cleanPageSnapshot, clean);
+          ta('prompt: enterEdit leaves the block in edit mode', s.el.classList.contains('viewing'), false);
+          // 18. typing into a Custom part: mirror re-derived, dirty, NO write armed
+          const taTask = s.el.querySelector('.prompt-slot[data-slot="task"] .prompt-text');
+          taTask.value = 'Do the _V_THING_V_.';
+          taTask.dispatchEvent(new Event('input', { bubbles: true }));
+          ta('prompt: typing re-derives code (= the mirror), marks dirty, arms NO write',
+             [s.b.code, s.b.code === promptMirror(s.b), pageDirty.has(PP), saveTimer], ['<task>\nDo the _V_THING_V_.\n</task>', true, true, null]);
+          ta('prompt: the variables panel appears for the new marker',
+             [...s.el.querySelectorAll('.prompt-vars .var-name')].map(x => x.textContent), ['THING']);
+          s.el.querySelector('.block-revert').click();          // dirty → Revert (restores PARTS)
+          ta('prompt: Revert restores the parts and the mirror', [s.b.parts[1].text, s.b.code], ['', '']);
+          s.el.querySelector('.block-revert').click();          // clean → Cancel, session ends
+          await settle();
+          ta('prompt: Cancel after a full revert clears dirty and earns ZERO writes', [pageDirty.has(PP), saveTimer, saves], [false, null, 0]);
+          unseed(s);
+
+          // 19. Save: silent until the write resolves, then exactly ONE "Saved"; none on rejection
+          s = seed([{ slot: 'task', ref: null, text: 'T', on: true }], { edit: true });
+          pageDirty.add(PP); toasts.length = 0;
+          let resolveSave;
+          window.api = async (a) => (a === 'save_page' ? new Promise(r => { resolveSave = () => r({ ok: true, mtime: 9 }); }) : { ok: true });
+          s.el.querySelector('.block-save').click();
+          await settle();
+          ta('prompt: Save does NOT announce before the write resolves', toasts.filter(m => /^Saved/.test(m)), []);
+          resolveSave(); await settle();
+          ta('prompt: Save announces Saved exactly ONCE', toasts.filter(m => /^Saved/.test(m)), ['Saved']);
+          unseed(s);
+          s = seed([{ slot: 'task', ref: null, text: 'T', on: true }], { edit: true });
+          pageDirty.add(PP); toasts.length = 0;
+          window.api = async () => ({ error: 'parent folder does not exist' });
+          s.el.querySelector('.block-save').click();
+          await settle(); await settle();
+          ta('prompt: a REJECTED Save never announces Saved', toasts.some(m => /^Saved/.test(m)), false);
+          for (const d of (await dlList()).filter(x => x.body && x.body.path === PP)) await dlRemove(d.id);
+          unseed(s);
+          window.api = async (a) => { if (a === 'save_page') saves++; return { ok: true, mtime: 1 }; };
+
+          // 20. Copy = the FILLED output (not the raw mirror), + the missing-vars count
+          const copied = []; const flashes = [];
+          window.copyText = async (txt) => { copied.push(txt); return true; };
+          window.flashCopied = (el, m) => flashes.push(m);
+          window.recordCopy = () => {};
+          s = seed([{ slot: 'role', ref: null, text: 'You review _V_LANG_V_.', on: true }, { slot: 'task', ref: null, text: 'Fix _V_FILE_V_.', on: true }],
+                   { extra: { varValues: { LANG: 'Go' } } });
+          s.el.querySelector('.block-copy').click(); await settle();
+          ta('prompt: Copy copies promptOutput (vars filled), never the raw template',
+             copied, ['<role>\nYou review Go.\n</role>\n\n<task>\nFix MISSING VALUE.\n</task>']);
+          ta('prompt: Copy reports the missing variable count', flashes, ['Copied — 1 var missing']);
+          s.el.querySelector('.block-overflow').click();
+          copied.length = 0; menuItem('Copy as Markdown').click(); await settle();
+          ta('prompt: ⋯ Copy as Markdown copies the MARKDOWN assembly', copied, ['## Role\n\nYou review Go.\n\n## Task\n\nFix MISSING VALUE.']);
+          closeMenus();
+          s.el.querySelector('.block-overflow').click();
+          copied.length = 0; menuItem('Copy raw template').click(); await settle();
+          ta('prompt: ⋯ Copy raw template copies the unfilled mirror', copied, [s.b.code]);
+          closeMenus();
+          // 21. format radio through the real ⋯ menu
+          s.el.querySelector('.block-overflow').click();
+          ta('prompt: the format rows are radios, XML checked', menuItem('Format: XML tags').getAttribute('aria-checked'), 'true');
+          menuItem('Format: Plain').click();
+          ta('prompt: choosing Plain updates format + code', [s.b.format, s.b.code], ['plain', 'You review _V_LANG_V_.\n\nFix _V_FILE_V_.']);
+          closeMenus();
+          s.el.querySelector('.block-overflow').click();
+          ta('prompt: …and the menu now checks Plain', [menuItem('Format: Plain').getAttribute('aria-checked'), menuItem('Format: XML tags').getAttribute('aria-checked')], ['true', 'false']);
+          closeMenus();
+          unseed(s);
+
+          // 22. drift / Keep mine / Pull / orphan / Detach / null library
+          promptLibrary = LIB();
+          s = seed([{ slot: 'role', ref: 'p_role00000001', text: 'My own role text.', on: true }], { edit: true });
+          ta('prompt: a linked part whose text differs shows the drift chip', !!s.el.querySelector('.prompt-chip.drift'), true);
+          s.el.querySelector('.prompt-keep').click();
+          ta('prompt: Keep mine records the ack and silences the chip',
+             [s.b.parts[0].ack, !!s.el.querySelector('.prompt-chip.drift')], [promptTextHash('You are a senior reviewer.'), false]);
+          promptLibrary = LIB(); promptLibrary.parts[0].text = 'You are a STRICT reviewer.';
+          onPromptLibraryChanged();
+          ta('prompt: the chip COMES BACK when the library text changes again', !!s.el.querySelector('.prompt-chip.drift'), true);
+          s.el.querySelector('.prompt-pull').click();
+          ta('prompt: Pull update takes the library text, re-derives the mirror, clears the chip',
+             [s.b.parts[0].text, s.b.code, 'ack' in s.b.parts[0], !!s.el.querySelector('.prompt-chip')],
+             ['You are a STRICT reviewer.', '<role>\nYou are a STRICT reviewer.\n</role>', false, false]);
+          unseed(s);
+          s = seed([{ slot: 'role', ref: 'p_deleted00001', text: 'Orphan text.', on: true }], { edit: true });
+          ta('prompt: a ref missing from the library shows "Not in library", text intact',
+             [!!s.el.querySelector('.prompt-chip.orphan'), s.b.parts[0].text], [true, 'Orphan text.']);
+          s.el.querySelector('.prompt-detach').click();
+          ta('prompt: Detach clears the ref (now Custom), keeps the text', [s.b.parts[0].ref, s.b.parts[0].text, !!s.el.querySelector('.prompt-chip')], [null, 'Orphan text.', false]);
+          unseed(s);
+          promptLibrary = null;
+          s = seed([{ slot: 'role', ref: 'p_deleted00001', text: 'x', on: true }, { slot: 'role', ref: 'p_role00000001', text: 'y', on: true }], { edit: true });
+          ta('prompt: an UNKNOWN (null) library shows zero chips — never a false "Not in library"', s.el.querySelectorAll('.prompt-chip').length, 0);
+          unseed(s);
+
+          // 23. a linked part is readOnly; typing asks to detach (yes → Custom; no → nothing)
+          promptLibrary = LIB();
+          let answer = false; const asked = [];
+          window.showConfirm = async (m) => { asked.push(m); return answer; };
+          s = seed([{ slot: 'role', ref: 'p_role00000001', text: 'You are a senior reviewer.', on: true }], { edit: true });
+          let ta0 = s.el.querySelector('.prompt-text');
+          ta('prompt: a linked part renders readOnly', ta0.readOnly, true);
+          let ev = new KeyboardEvent('keydown', { key: 'a', bubbles: true, cancelable: true });
+          ta0.dispatchEvent(ev); await settle();
+          ta('prompt: typing on a linked part asks first, and a "no" changes nothing',
+             [asked.length, ev.defaultPrevented, s.b.parts[0].ref, ta0.readOnly], [1, true, 'p_role00000001', true]);
+          answer = true;
+          ta0.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', bubbles: true, cancelable: true })); await settle();
+          ta('prompt: a "yes" detaches into a Custom copy and unlocks the textarea', [s.b.parts[0].ref, ta0.readOnly, pageDirty.has(PP)], [null, false, true]);
+          // Enter on a linked part opens the REAL confirm — whose document-level Enter=submit
+          // handler is installed DURING that keydown's dispatch. Unless the keydown stops
+          // there, it bubbles on and auto-confirms: a detach the user never chose.
+          {
+            window.showConfirm = _confirm;
+            const s3 = seed([{ slot: 'role', ref: 'p_role00000001', text: 'linked', on: true }], { edit: true });
+            s3.el.querySelector('.prompt-text').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+            await settle();
+            ta('prompt: Enter on a linked part leaves the detach confirm OPEN (no auto-submit) and the part linked',
+               [!!document.querySelector('.modal-overlay .modal'), s3.b.parts[0].ref], [true, 'p_role00000001']);
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            await settle();
+            unseed(s3);
+            window.showConfirm = async (m) => { asked.push(m); return answer; };
+          }
+          ta('prompt: a navigation key on a linked part never asks', (() => {
+            const n = asked.length; const s2 = seed([{ slot: 'role', ref: 'p_role00000001', text: 'z', on: true }], { edit: true });
+            s2.el.querySelector('.prompt-text').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+            unseed(s2); return asked.length - n; })(), 0);
+          unseed(s);
+
+          // 24. out of sync: an older client changed `code` only → lock, never discard unseen
+          s = seed([{ slot: 'task', ref: null, text: 'from parts', on: true }], { code: 'EDITED BY AN OLD CLIENT' });
+          ta('prompt: a stale mirror shows the notice, disables Edit, and leaves code untouched',
+             [!!s.el.querySelector('.prompt-sync-warn'), s.el.querySelector('.block-edit').disabled, s.b.code], [true, true, 'EDITED BY AN OLD CLIENT']);
+          s.el.querySelector('.prompt-keep-stored').click();
+          ta('prompt: "Keep it as a Task part" stores the text as an OFF part and re-derives the mirror',
+             [s.b.parts.map(p => [p.text, p.on]), s.b.code, pageDirty.has(PP), !!document.querySelector('#page .prompt-sync-warn')],
+             [[['from parts', true], ['EDITED BY AN OLD CLIENT', false]], '<task>\nfrom parts\n</task>', true, false]);
+          unseed(s);
+          answer = true;
+          s = seed([{ slot: 'task', ref: null, text: 'from parts', on: true }], { code: 'stale' });
+          s.el.querySelector('.prompt-rebuild').click(); await settle();
+          ta('prompt: "Rebuild from parts" (confirmed) re-derives the mirror', [s.b.code, s.b.parts.length], ['<task>\nfrom parts\n</task>', 1]);
+          unseed(s);
+          s = seed([{ slot: 'task', ref: null, text: 'from parts', on: true }], { code: 'stale' });
+          s.el.querySelector('.block-overflow').click(); menuItem('Format: Plain').click(); closeMenus();
+          ta('prompt: while locked, a format change is refused (stored text survives)', [s.b.format, s.b.code], ['xml', 'stale']);
+          unseed(s);
+
+          // 25. NO in-block mutation calls renderPage — and every one still marks dirty
+          let rp = 0; window.renderPage = () => { rp++; };
+          window.pickLibraryPart = async () => LIB().parts[1];
+          answer = true;
+          s = seed([{ slot: 'constraints', ref: null, text: 'c1', on: true }, { slot: 'constraints', ref: null, text: 'c2', on: true }], { edit: true });
+          const steps = [];
+          const step = async (name, fn) => { pageDirty.clear(); await fn(); await settle(); steps.push(name + ':' + rp + ':' + (pageDirty.has(PP) ? 'dirty' : 'CLEAN')); };
+          const q = (sel) => document.querySelector('#page .block.prompt ' + sel);
+          await step('add', () => q('.prompt-add-slot[data-slot="role"]').click());
+          await step('move', () => q('.prompt-part[data-pi="1"] .prompt-part-down').click());
+          await step('remove', () => q('.prompt-part[data-pi="2"] .prompt-part-del').click());
+          await step('pick', async () => { q('.prompt-part[data-pi="1"] .prompt-source').click(); menuItem('Choose from library').click(); });
+          promptLibrary.parts[1].text = 'Cite file:line, always.'; onPromptLibraryChanged();
+          await step('pull', () => q('.prompt-pull').click());
+          await step('toggle', () => { const c = q('.prompt-part[data-pi="0"] .prompt-part-on'); c.checked = false; c.dispatchEvent(new Event('change')); });
+          await step('format', () => { q('.block-overflow').click(); menuItem('Format: Markdown').click(); closeMenus(); });
+          s.b.parts[0].on = true; s.b.parts[0].text = '_V_Q_V_';
+          await step('var', () => { const r2 = renderBlock(s.b, s.arr, 0); pageEl.innerHTML = ''; pageEl.appendChild(r2); pageDirty.clear(); const i = r2.querySelector('.prompt-vars .var-input'); i.value = 'v'; i.dispatchEvent(new Event('input')); });
+          ta('prompt: add/move/remove/pick/pull/toggle/format/var never call renderPage and all mark dirty',
+             steps, ['add:0:dirty', 'move:0:dirty', 'remove:0:dirty', 'pick:0:dirty', 'pull:0:dirty', 'toggle:0:dirty', 'format:0:dirty', 'var:0:dirty']);
+          ta('prompt: …and the pick linked the part to the library id', s.b.parts.some(p => p.ref === 'p_cons00000001'), true);
+          window.renderPage = _rp; window.pickLibraryPart = _pick;
+          unseed(s);
+          closeMenus();
+
+          // 26. section variables ignore a prompt's markers
+          {
+            const sec = { title: 'S', collapsed: false, tags: [], varsOn: true, varValues: {},
+              blocks: [{ type: 'prompt', prompt: true, format: 'xml', parts: [{ slot: 'task', text: 'Use _V_PX_V_.' }], code: '<task>\nUse _V_PX_V_.\n</task>' },
+                       { type: 'bash', label: '', code: 'echo _V_CX_V_' }], subsections: [] };
+            currentPageData = { title: 'P', sections: [sec] };
+            const sel = renderSection(sec, currentPageData.sections, 0);
+            ta('prompt: the SECTION variables panel lists code markers, never a prompt\'s',
+               [...sel.querySelectorAll('.section-vars .var-name')].map(x => x.textContent), ['CX']);
+          }
+          // 27. merging blocks that include a prompt is refused, untouched
+          {
+            const blocks = [newPromptBlock(), { type: 'bash', label: '', code: 'x' }];
+            const before = JSON.stringify(blocks); toasts.length = 0;
+            mergeBlocksAndSubs([0, 1], [], blocks, []);
+            ta('prompt: a block merge including a prompt is refused with no change',
+               [JSON.stringify(blocks) === before, toasts], [true, ['Prompt blocks can’t be merged — convert first']]);
+          }
+          // 28. exports: MD fences the FILLED output; HTML escapes it
+          {
+            const pb = { type: 'prompt', prompt: true, label: '', format: 'xml', varValues: { N: 'Ada' },
+              parts: [{ slot: 'task', text: 'Hi _V_N_V_ </code><script>alert(1)<\/script> ```' }] };
+            pb.code = promptMirror(pb);
+            const pg = { title: 'E', sections: [{ title: 'S', tags: [], blocks: [pb], subsections: [] }] };
+            const md = pageToMarkdown(pg);
+            ta('prompt: Markdown export fences the filled prompt beyond its own backtick run',
+               md.includes('````xml\n<task>\nHi Ada </code><script>alert(1)<\/script> ```\n</task>\n````'), true);
+            const html = pageToHtml(pg);
+            ta('prompt: HTML export escapes the prompt (no live <script>), in a pre.prompt',
+               [html.includes('<script>alert'), html.includes('&lt;script&gt;alert(1)'), html.includes('<pre class="prompt">'), html.includes('Hi Ada')], [false, true, true, true]);
+          }
+        } finally {
+          pageEl.innerHTML = '';
+          currentPagePath = _cpp; currentPageData = _cpd; window.api = _api; window.toast = _toast;
+          window.copyText = _copy; window.flashCopied = _flash; window.showConfirm = _confirm;
+          window.renderPage = _rp; window.pickLibraryPart = _pick; window.recordCopy = _rec;
+          promptLibrary = _lib; promptLibMtime = _libM;
+          document.querySelectorAll('.mini-menu').forEach(m => m.remove());
+          pageDirty.clear(); cleanPageSnapshot = null;
+          if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+        }
+      }
+
+      // ---- 29/30. offline: the library mirror, coalescing, and the replay conflict ----
+      {
+        const _fetch = window.apiFetch, _toast = window.toast, _setOff = window.setOffline, _badge = window.updateOfflineBadge,
+              _lib = promptLibrary, _libM = promptLibMtime, _render = window.renderTree;
+        try {
+          window.toast = () => {}; window.setOffline = () => {}; window.updateOfflineBadge = () => {}; window.renderTree = () => {};
+          const good = { v: 1, parts: [{ id: 'p_keep00000001', slot: 'role', name: 'K', text: 'k' }], _mtime: 5 };
+          await kvSet('promptlib', good);
+          for (const junk of [{ error: 'boom' }, [], { parts: 'x' }]) await cacheOnSuccess('prompt_library', undefined, undefined, junk);
+          ta('cacheOnSuccess never mirrors an error / array / parts-less library body', await kvGet('promptlib'), good);
+          await cacheOnSuccess('save_prompt_library', { data: { v: 1, parts: [] }, baseMtime: 5 }, undefined, { conflict: true, mtime: 9 });
+          ta('cacheOnSuccess never mirrors a CONFLICT body for a save', await kvGet('promptlib'), good);
+          await cacheOnSuccess('prompt_library', undefined, undefined, { v: 1, parts: [], _mtime: 7 });
+          ta('cacheOnSuccess mirrors a valid EMPTY library', await kvGet('promptlib'), { v: 1, parts: [], _mtime: 7 });
+          ta('offlineApi(prompt_library) serves the mirror', await offlineApi('prompt_library'), { v: 1, parts: [], _mtime: 7 });
+          await kvDel('promptlib');
+          ta('offlineApi(prompt_library) with NO mirror is _unavailable, not an empty library',
+             (await offlineApi('prompt_library'))._unavailable, true);
+          syncQueue.length = 0;
+          const d1 = { v: 1, parts: [{ id: 'p_a', slot: 'role', name: 'A', text: '1' }] };
+          const d2 = { v: 1, parts: [{ id: 'p_a', slot: 'role', name: 'A', text: '2' }] };
+          const r1 = await offlineApi('save_prompt_library', { data: d1, baseMtime: 5 });
+          await offlineApi('save_prompt_library', { data: d2, baseMtime: 5 });
+          ta('offlineApi(save_prompt_library) answers ok+offline and mirrors the document', [r1.ok, r1.offline, (await kvGet('promptlib')).parts[0].text], [true, true, '2']);
+          ta('two offline library saves COALESCE into one op: newest document, oldest baseMtime',
+             [syncQueue.length, syncQueue[0].body.data.parts[0].text, syncQueue[0].body.baseMtime], [1, '2', 5]);
+          flushing = true;
+          await enqueueLibrarySave({ action: 'save_prompt_library', body: { data: d1, baseMtime: 6 } });
+          ta('…but a replay IN FLIGHT (flushing, index 0) is never replaced — a new op queues behind it',
+             [syncQueue.length, syncQueue[0].body.data.parts[0].text, syncQueue[1].body.data.parts[0].text], [2, '2', '1']);
+          await enqueueLibrarySave({ action: 'save_prompt_library', body: { data: d2, baseMtime: 6 } });
+          ta('…and a later save coalesces into THAT one', [syncQueue.length, syncQueue[1].body.data.parts[0].text], [2, '2']);
+          flushing = false; syncQueue.length = 0;
+
+          // 30. flushQueue's library conflict branch against a stubbed apiFetch
+          const local = { v: 1, parts: [{ id: 'p_l', slot: 'role', name: 'L', text: 'local', updatedAt: 5 }] };
+          const srv = { v: 1, parts: [{ id: 'p_s', slot: 'context', name: 'S', text: 'server', updatedAt: 1 }], _mtime: 77, _rev: 'rev77' };
+          const dlBefore = (await dlList()).length;
+          let calls = [], saveN = 0, mode = 'merge';
+          window.apiFetch = async (a, b) => {
+            calls.push([a, b ? JSON.parse(JSON.stringify(b)) : null]);
+            if (a === 'save_prompt_library') {
+              saveN++;
+              if (mode === 'always-conflict') return { conflict: true, mtime: 77 };
+              if (saveN === 1) return { conflict: true, mtime: 77 };
+              if (mode === 'terminal') return { error: 'invalid prompt library: part 1: slot' };
+              return { ok: true, mtime: 78 };
+            }
+            if (a === 'prompt_library') {
+              if (mode === 'throws' ) throw new Error('down');
+              if (mode === 'transient') return { error: 'malformed', _transient: true };
+              return JSON.parse(JSON.stringify(srv));
+            }
+            return { error: 'not a tree' };
+          };
+          const run = async (m) => { mode = m; saveN = 0; calls = []; syncQueue.length = 0; syncQueue.push({ action: 'save_prompt_library', body: { data: local, baseMtime: 10 } }); await flushQueue(); };
+          await run('merge');
+          ta('replay conflict → re-read, then resend the UNION MERGE against the server mtime',
+             calls[2], ['save_prompt_library', { data: mergePromptLibraries(local, srv), baseMtime: 77, baseRev: 'rev77' }]);
+          ta('…the op drains with no dead-letter', [syncQueue.length, (await dlList()).length - dlBefore], [0, 0]);
+          ta('…and the library is refreshed from the server afterwards', calls.map(c => c[0]).slice(-1), ['prompt_library']);
+          await run('always-conflict');
+          const dlx = (await dlList()).slice(dlBefore);
+          ta('three conflicts in a row PARK the op (retryable-exhausted), never drop it',
+             [syncQueue.length, dlx.length, dlx[0] && dlx[0].kind, dlx[0] && dlx[0].action], [0, 1, 'retryable-exhausted', 'save_prompt_library']);
+          await run('terminal');
+          const dly = (await dlList()).slice(dlBefore + 1);
+          ta('a terminal error on the resend parks the MERGED document (what we tried to write)',
+             [dly.length, dly[0] && dly[0].kind, dly[0] && JSON.stringify(dly[0].body.data)], [1, 'terminal', JSON.stringify(mergePromptLibraries(local, srv))]);
+          const offs = []; window.setOffline = (v) => offs.push(v);
+          await run('throws');
+          ta('an unreachable server mid-replay keeps the op queued and goes offline', [syncQueue.length, offs], [1, [true]]);
+          window.setOffline = () => {};
+          await run('transient');
+          ta('a transient body bumps attempts and leaves the op queued', [syncQueue.length, syncQueue[0] && syncQueue[0].attempts], [1, 1]);
+          syncQueue.length = 0;
+
+          // 31. offline block search: a prompt row carries its parts + matches on them
+          const outRows = [];
+          collectBlocksFromPage('Q.json', { sections: [{ title: 'S', blocks: [
+            { type: 'prompt', prompt: true, format: 'markdown', parts: [{ slot: 'task', text: 'zqpartword' }], varValues: [], code: 'stale mirror' },
+            { type: 'bash', code: 'zqpartword in code' } ] }] }, 'zqpartword', outRows);
+          ta('collectBlocksFromPage: a prompt row matches on PART text and carries prompt/parts/format/varValues',
+             [outRows.length, outRows[0].prompt, outRows[0].parts.length, outRows[0].format, outRows[0].varValues, 'prompt' in outRows[1]],
+             [2, true, 1, 'markdown', {}, false]);
+        } finally {
+          window.apiFetch = _fetch; window.toast = _toast; window.setOffline = _setOff; window.updateOfflineBadge = _badge;
+          window.renderTree = _render;
+          promptLibrary = _lib; promptLibMtime = _libM; flushing = false; syncQueue.length = 0;
+        }
+      }
+
+      // ---- 32. quick-paste copies a prompt's FILLED output, not its raw `code` --------
+      {
+        const _api = window.api, _copy = window.copyText, _toast = window.toast, _rec = window.recordCopy;
+        try {
+          const got = []; const toasts = [];
+          window.copyText = async (x) => { got.push(x); return true; };
+          window.toast = (m) => toasts.push(String(m));
+          window.recordCopy = () => {};
+          const row = { path: 'Q.json', page: 'Q', label: 'Rev', type: 'prompt', code: '<task>\nFix _V_F_V_.\n</task>', note: false,
+            prompt: true, format: 'xml', parts: [{ slot: 'task', text: 'Fix _V_F_V_.' }, { slot: 'role', text: 'You fix bugs.' }], varValues: {}, trail: 'S' };
+          window.api = async (a) => (a === 'search_blocks' ? [row] : []);
+          openBlockPalette();
+          const inp = document.querySelector('.cmdk-overlay .cmdk-input');
+          inp.value = 'fix'; inp.dispatchEvent(new Event('input'));
+          await new Promise(r => setTimeout(r, 260));
+          ta('quick-paste badges a prompt row "Prompt"', (document.querySelector('.cmdk-overlay .lang-badge') || {}).textContent, 'Prompt');
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+          await Promise.resolve(); await Promise.resolve();
+          ta('quick-paste Enter copies the assembled, FILLED prompt — not the stored code',
+             got, ['<role>\nYou fix bugs.\n</role>\n\n<task>\nFix MISSING VALUE.\n</task>']);
+          ta('…and says a variable is missing', toasts, ['Copied — 1 var missing']);
+        } finally {
+          document.querySelectorAll('.cmdk-overlay').forEach(o => o.remove());
+          window.api = _api; window.copyText = _copy; window.toast = _toast; window.recordCopy = _rec;
+        }
+      }
+
+      // ---- 33. the library-shape sidecar carries the prompt library ------------------
+      {
+        const lib = { v: 1, parts: [{ id: 'p_role00000001', slot: 'role', name: 'R', text: 'r' }] };
+        const m6 = buildLibraryMeta([], {}, new Set(), '1', 'now', lib);
+        const m5 = buildLibraryMeta([], {}, new Set(), '1', 'now');
+        ta('buildLibraryMeta carries promptLibrary only when given parts', [m6.promptLibrary, 'promptLibrary' in m5, 'promptLibrary' in buildLibraryMeta([], {}, new Set(), '1', 'now', { v: 1, parts: [] })],
+           [{ v: 1, parts: lib.parts }, false, false]);
+        ta('…without changing counts', m6.counts, m5.counts);
+        ta('readLibraryMeta passes the parts through, and omits the key when absent',
+           [readLibraryMeta({ __codeman_meta: m6 }).promptLibrary, 'promptLibrary' in readLibraryMeta({ __codeman_meta: m5 })], [lib.parts, false]);
+
+        const _create = document.createElement, _click = HTMLInputElement.prototype.click, _toast = window.toast,
+              _load = window.loadTree, _api = window.api, _tree = treeData, _save = window.saveFavorites,
+              _lib = promptLibrary, _libM = promptLibMtime;
+        try {
+          let lastInput = null; const toasts = []; let calls = [];
+          document.createElement = function (tag, ...rest) { const el = _create.call(document, tag, ...rest); if (String(tag).toLowerCase() === 'input') lastInput = el; return el; };
+          HTMLInputElement.prototype.click = function () {};
+          window.toast = (m) => toasts.push(String(m));
+          window.loadTree = async () => {}; window.saveFavorites = () => {};
+          let serverLib;
+          window.api = async (action, body) => {
+            calls.push([action, body ? JSON.parse(JSON.stringify(body)) : body]);
+            if (action === 'prompt_library') return Object.assign(JSON.parse(JSON.stringify(serverLib)), { _mtime: 40 });
+            if (action === 'save_prompt_library') { serverLib = JSON.parse(JSON.stringify(body.data)); return { ok: true, mtime: 41 }; }
+            return { ok: true, mtime: 1 };
+          };
+          const runImport = async (bundle) => {
+            toasts.length = 0; calls = []; setTreeData([]);
+            importPages();
+            Object.defineProperty(lastInput, 'files', { value: [new File([JSON.stringify(bundle)], 'b.json')], configurable: true });
+            await lastInput.onchange();
+          };
+          const meta = { format: 'codeman-library', v: 1, folders: [], colSort: {}, client: { favorites: [] },
+            promptLibrary: { v: 1, parts: [
+              { id: 'p_role00000001', slot: 'role', name: 'R', text: 'BUNDLE text' },
+              { id: 'p_ctx000000001', slot: 'context', name: 'C', text: 'new ctx' },
+              { id: 'bad id', slot: 'role', name: 'X', text: 'x' } ] } };
+          serverLib = { v: 1, parts: [{ id: 'p_role00000001', slot: 'role', name: 'R', text: 'SERVER text' }] };
+          promptLibrary = null; promptLibMtime = null;
+          await runImport({ 'A.json': { title: 'A', sections: [] }, __codeman_meta: meta });
+          ta('import adds only ABSENT library ids; a present id keeps the SERVER text',
+             serverLib.parts.map(p => p.id + '=' + p.text), ['p_role00000001=SERVER text', 'p_ctx000000001=new ctx']);
+          ta('…and reports it in the toast', toasts[0].includes(' · prompt library: 1 part added, 1 already present, 1 invalid'), true);
+          // The RACE: the id is absent when planned, but another device adds it before our
+          // save lands → conflict → savePromptLibrary REBASES (re-runs the mutator on the
+          // fresh server copy). The mutator must still never overwrite, and must RECOUNT.
+          serverLib = { v: 1, parts: [] }; promptLibrary = null; promptLibMtime = null;
+          let raced = false;
+          const _apiR = window.api;
+          window.api = async (action, body) => {
+            if (action === 'save_prompt_library' && !raced) {
+              raced = true;
+              serverLib = { v: 1, parts: [{ id: 'p_ctx000000001', slot: 'context', name: 'C', text: 'OTHER DEVICE' }] };
+              calls.push([action]); return { conflict: true, mtime: 50 };
+            }
+            return _apiR(action, body);
+          };
+          await runImport({ 'A.json': { title: 'A', sections: [] }, __codeman_meta: meta });
+          window.api = _apiR;
+          ta('import racing another device: the rebased save still never overwrites the id it now finds',
+             serverLib.parts.map(p => p.id + '=' + p.text), ['p_ctx000000001=OTHER DEVICE', 'p_role00000001=BUNDLE text']);
+          ta('…and the toast describes the REBASED run: 1 added, the raced id now present (L6), 1 invalid',
+             toasts[0].includes(' · prompt library: 1 part added, 1 already present, 1 invalid'), true);
+          await runImport({ 'A.json': { title: 'A', sections: [] }, __codeman_meta: Object.assign({}, meta, { promptLibrary: undefined }) });
+          ta('a sidecar WITHOUT promptLibrary makes no prompt-library call at all',
+             calls.filter(c => /prompt_library/.test(c[0])).length, 0);
+          ta('…and its toast has no prompt-library clause', toasts[0].includes('prompt library'), false);
+          promptLibrary = null;
+          window.api = async (action, body) => { calls.push([action]); if (action === 'prompt_library') return { v: 1, parts: [], _mtime: null, _unavailable: true }; return { ok: true, mtime: 1 }; };
+          await runImport({ 'A.json': { title: 'A', sections: [] }, __codeman_meta: meta });
+          ta('an unavailable library is reported, never overwritten', [toasts[0].includes('prompt library not imported (unavailable)'), calls.some(c => c[0] === 'save_prompt_library')], [true, false]);
+        } finally {
+          document.createElement = _create; HTMLInputElement.prototype.click = _click; window.toast = _toast;
+          window.loadTree = _load; window.api = _api; setTreeData(_tree); window.saveFavorites = _save;
+          promptLibrary = _lib; promptLibMtime = _libM;
+        }
+        // exportAll ships the library in the sidecar and SAYS so
+        const _api2 = window.api, _dl = window.download, _alert = window.showAlert, _cpp = window.collectPagePaths, _t2 = treeData, _lib2 = promptLibrary;
+        try {
+          let payload = null; const alerts = [];
+          window.api = async () => ({ title: 'P', sections: [], _mtime: 7 });
+          window.download = (n, txt) => { payload = txt; };
+          window.showAlert = async (m) => { alerts.push(String(m)); };
+          window.collectPagePaths = () => new Set(['A.json']);
+          setTreeData([{ type: 'page', name: 'A', path: 'A.json' }]);
+          promptLibrary = lib;
+          await exportAll();
+          ta('exportAll ships the prompt library in the sidecar', JSON.parse(payload).__codeman_meta.promptLibrary, { v: 1, parts: lib.parts });
+          ta('…and the scope note names the prompt-part library', (alerts[0] || '').includes('prompt-part library'), true);
+        } finally {
+          window.api = _api2; window.download = _dl; window.showAlert = _alert; window.collectPagePaths = _cpp; setTreeData(_t2); promptLibrary = _lib2;
+        }
+      }
+
+      // ---- 34. openPanel dialog mode: a real focus-trapping dialog, opt-in -----------
+      {
+        const before = document.activeElement;
+        const inv = document.createElement('button'); inv.textContent = 'invoker'; document.body.appendChild(inv); inv.focus();
+        let a, b;
+        const p = openPanel('Dlg', (body) => { a = document.createElement('button'); a.textContent = 'A'; b = document.createElement('button'); b.textContent = 'B'; body.append(a, b); },
+          { dialog: true, beforeClose: () => true });
+        const box = document.querySelector('.modal-overlay:last-of-type .panel-modal') || [...document.querySelectorAll('.panel-modal')].pop();
+        ta('openPanel dialog: role=dialog + aria-modal + named by its title',
+           [box.getAttribute('role'), box.getAttribute('aria-modal'), document.getElementById(box.getAttribute('aria-labelledby')).textContent], ['dialog', 'true', 'Dlg']);
+        b.focus();
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+        ta('openPanel dialog: Tab wraps from the last control to the first (the ✕)', document.activeElement === box.querySelector('.panel-head button'), true);
+        const conf = showConfirm('nested?');
+        await new Promise(r => setTimeout(r, 0));
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+        ta('openPanel dialog: with a nested confirm open, Escape closes ONLY the confirm', [await conf, document.contains(box)], [false, true]);
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+        await new Promise(r => setTimeout(r, 0));
+        ta('openPanel dialog: Escape then closes the panel and restores focus to the invoker', [document.contains(box), document.activeElement === inv], [false, true]);
+        let veto = true;
+        openPanel('Guard', () => {}, { dialog: true, beforeClose: () => !veto });
+        const g = [...document.querySelectorAll('.panel-modal')].pop();
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+        await new Promise(r => setTimeout(r, 0));
+        ta('openPanel dialog: beforeClose → false keeps the panel open', document.contains(g), true);
+        veto = false; g.querySelector('.panel-head button').click();
+        await new Promise(r => setTimeout(r, 0));
+        ta('…and the ✕ closes it once allowed (it carries aria-label "Close")', document.contains(g), false);
+        const plain = openPanel('Plain', () => {});
+        const pb = [...document.querySelectorAll('.panel-modal')].pop();
+        ta('openPanel WITHOUT dialog mode is unchanged (no role attribute)', pb.hasAttribute('role'), false);
+        plain.close(); inv.remove(); if (before && before.focus) before.focus();
+      }
+
+      // ==== PROMPT fix pass — wiring through the REAL entry points =====================
+      {
+        const _cpp = currentPagePath, _cpd = currentPageData, _api = window.api, _toast = window.toast,
+              _copy = window.copyText, _flash = window.flashCopied, _confirm = window.showConfirm, _alert = window.showAlert,
+              _lib = promptLibrary, _libM = promptLibMtime, _libR = promptLibRev, _rec = window.recordCopy,
+              _fetch = window.apiFetch, _setOff = window.setOffline, _badge = window.updateOfflineBadge, _rt = window.renderTree,
+              _sqr = syncQueueReady;
+        const pageEl = document.getElementById('page');
+        // #page sits in a display:none wrapper, where focus() is a no-op — and several
+        // fixes below are ABOUT where focus lands. Show it for this block only.
+        const hiddenWrap = pageEl.closest('[style*="display:none"]');
+        if (hiddenWrap) hiddenWrap.style.display = '';
+        const FP = RUN + 'fix/P.json';
+        const settle = async () => { for (let i = 0; i < 6; i++) await Promise.resolve(); await new Promise(r => setTimeout(r, 0)); };
+        const LIB = () => ({ v: 1, parts: [
+          { id: 'p_role00000001', slot: 'role', name: 'Senior reviewer', text: 'You are a senior reviewer.', updatedAt: 1 },
+          { id: 'p_cons00000001', slot: 'constraints', name: 'Cite lines', text: 'Cite file:line.', updatedAt: 1 } ] });
+        const seedBlock = (b, edit) => {
+          currentPagePath = FP;
+          currentPageData = { title: 'P', sections: [{ title: 's', collapsed: false, tags: [], blocks: [b], subsections: [] }] };
+          openPages.length = 0; openPages.push({ path: FP, title: 'P', data: currentPageData, filter: '', baseMtime: 1 });
+          pageEl.innerHTML = '';
+          if (edit) { blockBackups.set(b, b.code || ''); if (b.prompt) promptBackups.set(b, promptSnapshot(b)); }
+          const el = renderBlock(b, currentPageData.sections[0].blocks, 0);
+          pageEl.appendChild(el);
+          pageDirty.clear(); cleanPageSnapshot = null; sessionWrite = null;
+          if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+          return el;
+        };
+        const prompt = (parts, extra) => { const b = Object.assign({ type: 'prompt', label: '', prompt: true, format: 'xml', parts, varValues: {} }, extra || {}); b.code = promptMirror(b); return b; };
+        const menuItem = (label) => [...document.querySelectorAll('.mini-menu .mini-menu-opt')].find(o => o.textContent.includes(label));
+        const closeMenus = () => document.querySelectorAll('.mini-menu').forEach(m => m.remove());
+        try {
+          const toasts = []; window.toast = (m) => toasts.push(String(m));
+          let saves = []; window.api = async (a, b) => { if (a === 'save_page') saves.push(JSON.parse(JSON.stringify(b.data))); return { ok: true, mtime: 2 }; };
+
+          // ---- QA H2: a Revert AFTER a mid-session write must reach disk (code AND prompt)
+          for (const kind of ['code', 'prompt']) {
+            const b = kind === 'code' ? { type: 'bash', label: '', code: 'echo one' } : prompt([{ slot: 'task', ref: null, text: 'one', on: true }]);
+            const el = seedBlock(b, false);
+            saves = [];
+            el.querySelector('.block-edit').click();                         // real enterEdit
+            const edt = kind === 'code' ? el.querySelector('.code-edit') : el.querySelector('.prompt-slot[data-slot="task"] .prompt-text');
+            edt.value = kind === 'code' ? 'echo two' : 'two';
+            edt.dispatchEvent(new Event('input', { bubbles: true }));
+            await savePage(); await settle();                                // the mid-session flush (focus departure)
+            el.querySelector('.block-revert').click();                       // dirty Revert — the edit is undone in memory
+            await settle();
+            const dirtyAfterRevert = pageDirty.has(FP);
+            el.querySelector('.block-revert').click();                       // clean Cancel ends the session
+            await settle();
+            const armed = !!saveTimer;
+            if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+            edt.blur();
+            ta('QA-H2 (' + kind + '): after a mid-session write, Revert re-marks dirty and Cancel arms the write of the REVERTED state',
+               [saves.length, dirtyAfterRevert, armed], [1, true, true]);
+          }
+          // control: with NO mid-session write a full revert stays free (zero writes)
+          {
+            const b = prompt([{ slot: 'task', ref: null, text: 'one', on: true }]);
+            const el = seedBlock(b, false);
+            el.querySelector('.block-edit').click();
+            const tx = el.querySelector('.prompt-slot[data-slot="task"] .prompt-text');
+            tx.value = 'two'; tx.dispatchEvent(new Event('input', { bubbles: true }));
+            el.querySelector('.block-revert').click(); el.querySelector('.block-revert').click(); await settle();
+            ta('QA-H2 control: no mid-session write → a full revert stays clean and arms nothing', [pageDirty.has(FP), !!saveTimer], [false, false]);
+          }
+          // ---- UX H3: a MODAL opened from the block is not a departure (+ the control) ----
+          {
+            const b = { type: 'bash', label: '', code: 'x' };
+            const el = seedBlock(b, true);
+            let n = 0; window.api = async (a) => { if (a === 'save_page') n++; return { ok: true, mtime: 3 }; };
+            // quiesce REAL focus first: an edit-mode render focuses its textarea on a later
+            // frame, and a real blur during the steps would be an (unrelated) departure.
+            await new Promise(r => requestAnimationFrame(r)); await settle();
+            if (el.contains(document.activeElement)) { document.activeElement.blur(); await settle(); }
+            n = 0; pageDirty.add(FP);
+            const ov = document.createElement('div'); ov.className = 'modal-overlay'; const inner = document.createElement('button'); ov.appendChild(inner);
+            document.body.appendChild(ov);
+            el.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: inner })); await settle();
+            el.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null })); await settle();
+            const whileOpen = n;
+            ov.remove();
+            // deferred re-check: focus went to <body> first, the overlay appears a task later
+            el.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
+            document.body.appendChild(ov); await settle(); ov.remove();
+            const deferred = n;
+            // SYNC half only: focus moves INTO a modal that is gone again by the deferred
+            // re-check (opened and closed in one task) — only the relatedTarget guard sees it.
+            document.body.appendChild(ov);
+            el.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: inner }));
+            ov.remove(); await settle();
+            const syncOnly = n;
+            el.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null })); await settle();
+            ta('UX-H3: focus into a modal (sync, sync-only, deferred) writes nothing; the same departure with no modal flushes once',
+               [whileOpen, deferred, syncOnly, n], [0, 0, 0, 1]);
+            blockBackups.delete(b);
+            window.api = async (a, bd) => { if (a === 'save_page') saves.push(JSON.parse(JSON.stringify(bd.data))); return { ok: true, mtime: 2 }; };
+          }
+          // ---- a pane rebuild mid-edit (add part) is NOT a departure: no autosave ----------
+          {
+            const b = prompt([{ slot: 'task', ref: null, text: 't', on: true }]);
+            const el = seedBlock(b, false);
+            let n = 0; const _a = window.api; window.api = async (a) => { if (a === 'save_page') n++; return { ok: true, mtime: 3 }; };
+            el.querySelector('.block-edit').click();
+            const tx = el.querySelector('.prompt-text'); tx.focus();
+            el.querySelector('.prompt-slot[data-slot="task"] .prompt-add').click();   // structural: rebuilds the pane
+            await settle(); await new Promise(r => requestAnimationFrame(r)); await settle();
+            ta('a structural rebuild while editing keeps focus in the block and autosaves NOTHING',
+               [n, el.contains(document.activeElement), pageDirty.has(FP)], [0, true, true]);
+            window.api = _a;
+            el.querySelector('.block-revert').click(); el.querySelector('.block-revert').click(); await settle();
+            if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+          }
+          // ---- QA M4: Esc-revert keeps focus in the SAME part; a second Esc exits ---------
+          {
+            const b = prompt([{ slot: 'role', ref: null, text: 'r', on: true }, { slot: 'task', ref: null, text: 't', on: true }]);
+            const el = seedBlock(b, false);
+            el.querySelector('.block-edit').click();
+            const tx = el.querySelector('.prompt-slot[data-slot="task"] .prompt-text');
+            tx.focus(); tx.value = 't2'; tx.dispatchEvent(new Event('input', { bubbles: true }));
+            tx.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            const ae = document.activeElement;
+            const sameSlot = !!(ae && ae.matches('.prompt-text') && ae.closest('.prompt-slot').dataset.slot === 'task');
+            ae.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            ta('QA-M4: Esc reverts and focus returns to the same part\'s textarea; the 2nd Esc exits', [b.parts[1].text, sameSlot, el.classList.contains('viewing')], ['t', true, true]);
+            await settle(); if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+          }
+          // ---- UX M4 / M1 / M3 / P3 / P4: pane structure -----------------------------------
+          promptLibrary = LIB();
+          {
+            const b = newPromptBlock();
+            const el = seedBlock(b, true);
+            ta('UX-M4: a fresh prompt shows ONLY the Task card + one "Add:" row of the 4 other slots',
+               [[...el.querySelectorAll('.prompt-slot')].map(c => c.dataset.slot), [...el.querySelectorAll('.prompt-add-slot')].map(x => x.dataset.slot)],
+               [['task'], ['role', 'context', 'constraints', 'output']]);
+            const n = b.parts.length;
+            el.querySelector('.prompt-add-slot[data-slot="role"]').click();
+            ta('UX-M4: "+ Role" expands the slot\'s existing blank part (no new part, no dirty) and focuses it',
+               [b.parts.length === n, !!el.querySelector('.prompt-slot[data-slot="role"]'), document.activeElement && document.activeElement.closest('.prompt-slot') && document.activeElement.closest('.prompt-slot').dataset.slot, pageDirty.has(FP)],
+               [true, true, 'role', false]);
+            const role = el.querySelector('.prompt-slot[data-slot="role"]');
+            ta('UX-M1: an EMPTY library-slot part with library entries gets an inline "Choose from library…" + an inviting placeholder',
+               [!!role.querySelector('.prompt-pick-inline'), role.querySelector('.prompt-text').placeholder], [true, 'Type a role, or choose one from the library']);
+            const task = el.querySelector('.prompt-slot[data-slot="task"]');
+            ta('UX-M1: Task shows a static "Custom" tag + a ⋯, not a fake source picker',
+               [!!task.querySelector('.prompt-tag'), !!task.querySelector('.prompt-part-more'), !!task.querySelector('.prompt-source')], [true, true, false]);
+            ta('UX-M3 + P4: a single-part slot has no ↑/↓; remove is a danger button',
+               [!!role.querySelector('.prompt-part-up'), role.querySelector('.prompt-part-del').classList.contains('danger')], [false, true]);
+            blockBackups.delete(b); promptBackups.delete(b);
+          }
+          {
+            const b = prompt([{ slot: 'constraints', ref: null, text: 'c1', on: true }, { slot: 'constraints', ref: 'p_cons00000001', text: 'Cite file:line.', on: true }]);
+            const el = seedBlock(b, true);
+            const ups = [...el.querySelectorAll('.prompt-slot[data-slot="constraints"] .prompt-part-up')].map(x => x.disabled);
+            const dns = [...el.querySelectorAll('.prompt-slot[data-slot="constraints"] .prompt-part-down')].map(x => x.disabled);
+            ta('UX-M3: edge arrows are disabled (first ↑, last ↓)', [ups, dns], [[true, false], [false, true]]);
+            el.querySelector('.prompt-part[data-pi="0"] .prompt-source').click();
+            ta('UX-M3: the source menu no longer duplicates Move up/down', [!!menuItem('Move up'), !!menuItem('Remove part')], [false, true]);
+            closeMenus();
+            ta('UX-M1: source labels by state (Custom / linked name)',
+               [...el.querySelectorAll('.prompt-source')].map(x => x.textContent), ['✎ Custom ▾', '✦ Cite lines ▾']);
+            ta('UX-H1: the linked part carries .linked (styled full-contrast) and stays readOnly',
+               [el.querySelector('.prompt-part[data-pi="1"]').classList.contains('linked'), el.querySelector('.prompt-part[data-pi="1"] .prompt-text').readOnly], [true, true]);
+            const cb = el.querySelector('.prompt-part[data-pi="0"] .prompt-part-on');
+            const ex = el.querySelector('.prompt-part[data-pi="0"] .prompt-excluded');
+            const before = ex.hidden;
+            cb.checked = false; cb.dispatchEvent(new Event('change'));
+            ta('UX-P3: the include box is titled and an "Excluded" label appears when off', [cb.title, before, ex.hidden], ['Include in prompt', true, false]);
+            blockBackups.delete(b); promptBackups.delete(b);
+          }
+          // ---- UX M7: chip wording + Compare (lineDiff in a showAlert) + "(edited)" ---------
+          {
+            const alerts = []; window.showAlert = async (m) => { alerts.push(String(m)); };
+            const b = prompt([{ slot: 'role', ref: 'p_role00000001', text: 'You are a strict reviewer.', on: true }]);
+            const el = seedBlock(b, true);
+            ta('UX-M7: drift chip wording + actions',
+               el.querySelector('.prompt-chip.drift').textContent, 'Library version changedUse library versionKeep my textCompare');
+            el.querySelector('.prompt-compare').click(); await settle();
+            ta('UX-M7: Compare shows a line diff (− mine, + library)', [alerts.length, /− You are a strict reviewer\./.test(alerts[0] || ''), /\+ You are a senior reviewer\./.test(alerts[0] || '')], [1, true, true]);
+            el.querySelector('.prompt-keep').click(); await settle();
+            ta('UX-M7: after Keep my text the source says "(edited)"', el.querySelector('.prompt-source').textContent, '✦ Senior reviewer (edited) ▾');
+            blockBackups.delete(b); promptBackups.delete(b);
+            const b2 = prompt([{ slot: 'role', ref: 'p_gone00000001', text: 'x', on: true }]);
+            const el2 = seedBlock(b2, true);
+            ta('UX-M7: orphan chip wording', el2.querySelector('.prompt-chip.orphan').textContent, 'Library part deleted' + 'Make Custom' + 'Restore to library');
+            blockBackups.delete(b2); promptBackups.delete(b2);
+          }
+          // ---- UX P5: the detach keystroke is applied, not swallowed --------------------------
+          {
+            window.showConfirm = async () => true;
+            const b = prompt([{ slot: 'role', ref: 'p_role00000001', text: 'You are a senior reviewer.', on: true }]);
+            const el = seedBlock(b, true);
+            const tx = el.querySelector('.prompt-text');
+            tx.setSelectionRange(tx.value.length, tx.value.length);
+            tx.dispatchEvent(new KeyboardEvent('keydown', { key: '!', bubbles: true, cancelable: true })); await settle();
+            ta('UX-P5: "Edit as Custom" then inserts the key that triggered it (mirror follows)',
+               [b.parts[0].ref, b.parts[0].text, b.code], [null, 'You are a senior reviewer.!', '<role>\nYou are a senior reviewer.!\n</role>']);
+            blockBackups.delete(b); promptBackups.delete(b);
+            window.showConfirm = _confirm;
+          }
+          // ---- UX H2 / M6 / P6: Copy & Copy-as warn on missing vars; format button ------------
+          {
+            const flashes = []; window.flashCopied = (anchor, m, o) => flashes.push([anchor.className.split(' ').pop(), m, !!(o && o.warn)]);
+            window.copyText = async () => true; window.recordCopy = () => {};
+            const b = prompt([{ slot: 'task', ref: null, text: 'Fix _V_FILE_V_ in _V_LANG_V_', on: true }], { varValues: { LANG: 'Go' } });
+            const el = seedBlock(b, false);
+            el.querySelector('.block-copy').click(); await settle();
+            ta('UX-H2: Copy with a missing var → the WARN bubble, and focus lands on that empty field (pulsed)',
+               [flashes[0], document.activeElement && document.activeElement.dataset.name, document.activeElement.classList.contains('pulse')],
+               [['block-copy', 'Copied — 1 var missing', true], 'FILE', true]);
+            el.querySelector('.block-overflow').click(); menuItem('Copy as Markdown').click(); await settle();
+            ta('UX-H2 + P6: Copy-as runs the same check, through flashCopied (not a toast)', flashes[1], ['block-overflow', 'Copied Markdown — 1 var missing', true]);
+            closeMenus();
+            ta('UX-H2: the preview marks each unfilled var', el.querySelectorAll('.prompt-view .prompt-missing').length, 1);
+            const fb = el.querySelector('.prompt-format-btn');
+            fb.click();
+            ta('UX-M6: the meta line\'s format is a menu button with checked formats', [fb.textContent, menuItem('XML tags').getAttribute('aria-checked')], ['XML tags ▾', 'true']);
+            menuItem('Plain').click(); closeMenus();
+            ta('UX-M6: …which changes the format', [b.format, el.querySelector('.prompt-format-btn').textContent], ['plain', 'Plain ▾']);
+            window.flashCopied = _flash; window.copyText = _copy; window.recordCopy = _rec;
+          }
+          // ---- section vars: an only-prompt-vars section shows NO empty panel ------------------
+          {
+            const sec = { title: 'S', collapsed: false, tags: [], varsOn: true, varValues: {},
+              blocks: [prompt([{ slot: 'task', text: 'Use _V_PX_V_.' }]), { type: 'bash', label: '', code: 'echo plain' }], subsections: [] };
+            currentPageData = { title: 'P', sections: [sec] };
+            const sel = renderSection(sec, currentPageData.sections, 0);
+            ta('QA: a varsOn section whose ONLY markers sit in a prompt shows no (empty) section-vars panel', !!sel.querySelector('.section-vars'), false);
+            sec.blocks.pop(); sec.blocks.push({ type: 'bash', label: '', code: 'echo plain' });
+            const sec2 = { title: 'S2', collapsed: false, tags: [], varsOn: true, varValues: {}, blocks: [{ type: 'bash', label: '', code: 'echo plain' }], subsections: [] };
+            ta('…control: with no prompt vars the "no variables" hint still shows', !!renderSection(sec2, [sec2], 0).querySelector('.section-vars .block-vars-empty'), true);
+          }
+          pageEl.innerHTML = '';
+
+          // ---- QA H1: a transient library failure applies the edit LOCALLY; nothing lost --------
+          {
+            window.setOffline = () => {}; window.updateOfflineBadge = () => {}; window.renderTree = () => {};
+            promptLibrary = { v: 1, parts: [{ id: 'p_a0000000001', slot: 'role', name: 'A', text: 'a' }] }; promptLibMtime = 5; promptLibRev = 'r5';
+            syncQueue.length = 0;
+            window.api = async (a) => (a === 'save_prompt_library' ? { error: 'malformed', _transient: true } : { error: 'x' });
+            const e1 = { id: 'p_e1000000001', slot: 'role', name: 'E1', text: 'e1' }, e2 = { id: 'p_e2000000001', slot: 'role', name: 'E2', text: 'e2' };
+            const r1 = await savePromptLibrary(d => libUpsert(d, e1));
+            const r2 = await savePromptLibrary(d => libUpsert(d, e2));
+            const q = syncQueue.filter(o => o.action === 'save_prompt_library');
+            ta('QA-H1: two transient failures → the edits become LOCAL state and coalesce into ONE op holding BOTH',
+               [r1.queued, promptLibrary.parts.map(p => p.id), q.length, q[0] && q[0].body.data.parts.map(p => p.id), (await kvGet('promptlib')).parts.length],
+               [true, ['p_a0000000001', 'p_e1000000001', 'p_e2000000001'], 1, ['p_a0000000001', 'p_e1000000001', 'p_e2000000001'], 3]);
+            // …and on recovery the server receives both
+            let sent = null;
+            window.apiFetch = async (a, b) => { if (a === 'save_prompt_library') { sent = b; return { ok: true, mtime: 9, rev: 'r9' }; } if (a === 'prompt_library') return Object.assign({ _mtime: 9, _rev: 'r9' }, sent ? sent.data : {}); return { error: 'no tree' }; };
+            await flushQueue();
+            ta('QA-H1: on recovery the server receives A + E1 + E2 against the original rev', [sent && sent.data.parts.map(p => p.id), sent && sent.baseRev], [['p_a0000000001', 'p_e1000000001', 'p_e2000000001'], 'r5']);
+          }
+          // ---- QA re-coalesce: a save queued behind an in-flight op adopts its new rev ---------
+          {
+            syncQueue.length = 0;
+            const d1 = { v: 1, parts: [{ id: 'p_k0000000001', slot: 'role', name: 'K', text: 'k' }, { id: 'p_del00000001', slot: 'role', name: 'D', text: 'd' }] };
+            const d2 = { v: 1, parts: [{ id: 'p_k0000000001', slot: 'role', name: 'K', text: 'k' }] };   // deleted D meanwhile
+            syncQueue.push({ action: 'save_prompt_library', body: { data: d1, baseMtime: 1, baseRev: 'r1' } },
+                           { action: 'save_prompt_library', body: { data: d2, baseMtime: 1, baseRev: 'r1' } });
+            const sends = [];
+            window.apiFetch = async (a, b) => {
+              if (a === 'save_prompt_library') { sends.push(JSON.parse(JSON.stringify(b))); return b.baseRev === (sends.length === 1 ? 'r1' : 'r2') ? { ok: true, mtime: sends.length + 1, rev: 'r' + (sends.length + 1) } : { conflict: true, mtime: 9, rev: 'rX' }; }
+              if (a === 'prompt_library') return { v: 1, parts: [], _mtime: 3, _rev: 'r3' };
+              return { error: 'no tree' };
+            };
+            await flushQueue();
+            ta('QA: the second queued save is re-based on the first one\'s NEW rev → no self-conflict, D stays deleted',
+               [sends.length, sends[1] && sends[1].baseRev, sends[1] && sends[1].data.parts.map(p => p.id), syncQueue.length], [2, 'r2', ['p_k0000000001'], 0]);
+          }
+          // ---- QA M3 (client): baseRev is sent and the returned rev tracked ------------------
+          {
+            promptLibrary = { v: 1, parts: [] }; promptLibMtime = 4; promptLibRev = 'r4';
+            const bodies = [];
+            window.api = async (a, b) => {
+              if (a === 'save_prompt_library') { bodies.push(JSON.parse(JSON.stringify(b))); return bodies.length === 1 ? { conflict: true, mtime: 6, rev: 'r6' } : { ok: true, mtime: 7, rev: 'r7' }; }
+              if (a === 'prompt_library') return { v: 1, parts: [], _mtime: 6, _rev: 'r6' };
+              return {};
+            };
+            await savePromptLibrary(d => libUpsert(d, { id: 'p_m3000000001', slot: 'role', name: 'M', text: 'm' }), { announce: false });
+            ta('QA-M3: the save sends baseRev, a conflict re-reads _rev for the rebase, and the new rev is tracked',
+               [bodies.map(b => b.baseRev), promptLibRev, promptLibMtime], [['r4', 'r6'], 'r7', 7]);
+          }
+          // ---- QA M2: never let a server read overwrite a QUEUED offline library edit ---------
+          {
+            const localDoc = { v: 1, parts: [{ id: 'p_local000001', slot: 'role', name: 'L', text: 'local' }], _mtime: 1, _rev: 'rL' };
+            await kvSet('promptlib', localDoc);
+            syncQueue.length = 0; syncQueue.push({ action: 'save_prompt_library', body: { data: localDoc, baseMtime: 1, baseRev: 'rL' } });
+            await cacheOnSuccess('prompt_library', undefined, undefined, { v: 1, parts: [], _mtime: 2, _rev: 'rS' });
+            ta('QA-M2: cacheOnSuccess leaves the mirror alone while a library save is queued', (await kvGet('promptlib'))._rev, 'rL');
+            syncQueue.length = 0;
+            await cacheOnSuccess('prompt_library', undefined, undefined, { v: 1, parts: [], _mtime: 2, _rev: 'rS' });
+            ta('…control: with nothing queued it mirrors the read', (await kvGet('promptlib'))._rev, 'rS');
+            // boot order: loadPromptLibrary must WAIT for the queue restore before deciding
+            await kvSet('promptlib', localDoc);
+            let release; syncQueueReady = new Promise(r => { release = r; });
+            let apiCalls = 0; window.api = async () => { apiCalls++; return { v: 1, parts: [], _mtime: 2, _rev: 'rS' }; };
+            promptLibrary = null;
+            const p = loadPromptLibrary();
+            await settle();
+            syncQueue.push({ action: 'save_prompt_library', body: { data: localDoc, baseMtime: 1, baseRev: 'rL' } });   // the queue "arrives"
+            release(); await p;
+            ta('QA-M2: loadPromptLibrary waits for the queue restore → takes the QUEUED branch (local doc, no server read)',
+               [apiCalls, promptLibrary && promptLibrary.parts[0].id, promptLibRev], [0, 'p_local000001', 'rL']);
+            syncQueueReady = _sqr; syncQueue.length = 0;
+          }
+          // ---- QA L1 (client): a 200 that isn't a library is SAID, once --------------------------
+          {
+            _promptLibErrToasted = false; toasts.length = 0; promptLibrary = null;
+            window.api = async () => ({ hello: 'world' });
+            await loadPromptLibrary();
+            ta('QA-L1: an invalid library body toasts "could not be read" and leaves it unknown', [toasts, promptLibrary], [['Prompt library could not be read'], null]);
+          }
+          // ---- the library panel opens with focus on the SELECTED slot tab ------------------
+          {
+            promptLibrary = LIB();
+            openPromptLibrary('constraints'); await settle(); await settle();
+            const ae = document.activeElement;
+            ta('the Prompt library opens focused on the selected tab (not the dialog box)',
+               [ae && ae.classList.contains('plib-tab'), ae && ae.dataset.slot], [true, 'constraints']);
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); await settle();
+          }
+          // ---- UX P8: the picker has a visible Cancel ----------------------------------------
+          {
+            promptLibrary = LIB();
+            const pr = pickLibraryPart('role'); await settle();
+            const cancel = [...document.querySelectorAll('.modal-overlay .modal button')].find(b => b.textContent === 'Cancel');
+            ta('UX-P8: the library picker has a visible Cancel that resolves null', !!cancel, true);
+            if (cancel) cancel.click();
+            ta('…resolving null', await pr, null);
+          }
+        } finally {
+          pageEl.innerHTML = '';
+          document.querySelectorAll('.mini-menu, .modal-overlay').forEach(m => m.remove());
+          currentPagePath = _cpp; currentPageData = _cpd; window.api = _api; window.toast = _toast;
+          window.copyText = _copy; window.flashCopied = _flash; window.showConfirm = _confirm; window.showAlert = _alert;
+          window.recordCopy = _rec; window.apiFetch = _fetch; window.setOffline = _setOff; window.updateOfflineBadge = _badge; window.renderTree = _rt;
+          promptLibrary = _lib; promptLibMtime = _libM; promptLibRev = _libR; syncQueueReady = _sqr;
+          if (hiddenWrap) hiddenWrap.style.display = 'none';
+          syncQueue.length = 0; openPages.length = 0; sessionWrite = null;
+          pageDirty.clear(); cleanPageSnapshot = null;
+          if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+        }
+      }
+
       // openPage dedups concurrent/rapid opens of the SAME path (no duplicate tabs).
       // (Own try/catch so a render hiccup here can't mislabel the offline tests.)
       try {
@@ -4214,7 +5266,7 @@
       out.appendChild(d);
     } finally {
       // restore the real cache exactly as it was
-      for (const k of ['tree', 'queue', 'trash', 'history', '__history_migrated']) {
+      for (const k of ['tree', 'queue', 'trash', 'history', '__history_migrated', 'promptlib']) {
         if (snap[k] !== undefined) await kvSet(k, snap[k]); else await kvDel(k);
       }
       // remove any dl: entries this run created, then restore the snapshotted originals

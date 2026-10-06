@@ -15,10 +15,10 @@ and reports against this matrix); UI/usability passes are run by the
 
 1. **Automated suites first** (fast, deterministic):
    - **Client units** — open `codeman/tests.html` in a browser. Expect the summary
-     **"N passed, 0 failed"** (currently **912**). `window.__testResult = {pass, fail, done}` for
+     **"N passed, 0 failed"** (currently **1105**). `window.__testResult = {pass, fail, done}` for
      scripting (`done` flips true after the async offline tests finish).
    - **Server API** — `bash codeman/tests-api.sh` (spins a throwaway `php -S` against a temp data
-     dir; exit 0 = all green; currently **194**). Override port: `bash codeman/tests-api.sh 8099` —
+     dir; exit 0 = all green; currently **289**). Override port: `bash codeman/tests-api.sh 8099` —
      a taken port is skipped automatically (bounded upward hunt), so parallel runs stay green.
    - **CI enforces both** on every push/PR: `.github/workflows/tests.yml` runs `tests-api.sh`
      (`api-tests` job), tests.html headless via Playwright + `php -S`
@@ -42,14 +42,18 @@ and reports against this matrix); UI/usability passes are run by the
      7. The rich sanitizer keeps its three declared tables: `RICH_ALLOWED` never names a
         script-bearing tag, and the scriptable vector format is never reachable from `richImgSrc`.
      8. The CSRF read-only allowlist matches between `api.php` (`$csrfReadOnly`) and the desktop
-        proxy (`READ_ONLY_ACTIONS`).
-     9. The edit-session wiring census — EXACT call-site counts in `editor.js`:
-        `beforeEditSession()`=5, `afterEditSession()`=10, `wireEscapeRevert(`=`wireFocusFlush(`=6.
+        proxy (`READ_ONLY_ACTIONS`) — and `save_prompt_library` (a whole-document write) is on
+        NEITHER list (parity alone would stay green if both gained it).
+     9. The edit-session wiring census — EXACT call-site counts in `editor.js` (six session-bearing
+        render paths): `beforeEditSession()`=6, `afterEditSession()`=12,
+        `wireEscapeRevert(`=`wireFocusFlush(`=7.
      10. `afterEditSession` never calls `scheduleSave(` (it would re-mark the page dirty).
      11. The default-child-order oracle (`SORT_ORACLE_JSON`) is byte-identical in `tests.html`
          and `tests-api.sh` — editing one copy alone leaves both suites self-consistently green.
-     12. No `renderPage()` inside `renderHtmlBlock` outside the convert/delete teardowns (it
-         would silently kill a live iframe).
+     12. No `renderPage()` inside `renderHtmlBlock` **or `renderPromptBlock`** outside the
+         convert/delete teardowns (it would silently kill a live iframe / drop the caret
+         mid-typing), with an existence guard on each function name so a rename can't make the
+         scan vacuous.
 2. **Then the manual/driven Core suite below**, against a running dev server
    (`cd codeman && php -S localhost:8090`, data falls back to `structures/`). Drive via the
    browser-preview MCP and/or Chrome MCP. Test **both layouts** (single + double/Miller) and
@@ -652,6 +656,111 @@ assistive tech; low-contrast text and micro-type meet WCAG AA.
 - TC-html-L2: **quick-paste / block palette yields a plain code block** of the entry HTML —
   `search_blocks` doesn't return the `html:true` flag, so the project doesn't come with it.
 
+### TC-prompt — Prompt block (parts → one prompt) + the Prompt library
+Run against a **throwaway** `CODEMAN_DATA`. The library lives in `<root>/.prompt-library.json`.
+- TC-prompt-01 (P): `+ Add ▾ → ✦ Prompt` (and the block `⋯` / `type-menu`) creates a block whose
+  edit pane shows the **Task** card plus ONE row *"Add: + Role + Context + Constraints + Output
+  format"* (empty slots fold into it; "+ Role" opens that slot and focuses it, adding no data). View
+  mode shows *"Empty prompt — Edit to add a role, context, task…"*. No `varsOn`, format **XML tags**.
+  At ≥1200px the edit pane and a sticky preview sit side by side. **[auto: newBlockOfKind + UX-M4]**
+- TC-prompt-02 (P): fill Role + Task + two Constraints; the preview shows `<role>…</role>`,
+  `<task>…</task>`, one `<constraints>` holding both items separated by a blank line; the meta line
+  reads `XML tags · N chars · ≈M tokens`. ⋯ → **Format: Markdown headings** / **Plain** re-assembles
+  (`## Role` … / bare paragraphs) and the radio follows; the same choice is on the meta line's
+  format button (`XML tags ▾`). Unchecking a part's include box drops it;
+  a whitespace-only part is never emitted; an empty slot emits no tag. **[auto: goldens G]**
+- TC-prompt-03 (P/E): variables — `_V_LANG_V_` in any INCLUDED part shows a **Variables** field
+  (both modes); the preview fills it live and highlights each unfilled `MISSING VALUE`; **Copy** and
+  **Copy as…** copy the filled text and, when any are empty, show an AMBER *"Copied — N var(s)
+  missing"* bubble and focus (pulse) the first empty field. `_V_constructor_V_` / `_V_toString_V_`
+  are ordinary missing variables (never JavaScript source) — in code blocks too. A marker in an
+  off part asks for nothing. ⋯ **Copy as XML / Markdown / Plain / raw template** each copy the right
+  text. The **section** `$` variables panel never lists a prompt's markers. **[auto]**
+- TC-prompt-04 (P): **library picker** — a part's source button (`Custom ▾`) → *Choose from
+  library…* opens a filterable picker (type to filter name+text, ↑/↓, Enter picks); picking over
+  non-blank text asks *"Replace this part's text with "X"?"*. The part shows the library name and a
+  dashed, read-only textarea. Task has no picker (Phase 1).
+- TC-prompt-05 (P/E): **drift** — edit the library part's text in the Library panel → the linked
+  part shows, on its own row, **"Library version changed"** [Use library version] [Keep my text]
+  [Compare], and view mode shows the *"1 part has a newer library version — Edit to review"* link.
+  **Compare** shows a −/+ line diff. **Use library version** takes the new text (mirror updates,
+  chip gone). **Keep my text** silences it and the source reads *"✦ Name (edited)"* — until the
+  library text changes AGAIN, when it comes back. **[auto]**
+- TC-prompt-06 (P/E): **orphan** — delete the library part → source reads **⚠ Missing** and the
+  chip **"Library part deleted"** [Make Custom] [Restore to library]; the text is untouched. Make
+  Custom detaches; Restore re-adds under the SAME id (or relinks to a new one). **[auto]**
+- TC-prompt-06b (P): source labels — **✦ Name** linked (full-contrast text on a raised, accent-barred
+  field), **✎ Custom**; an EMPTY library-slot part with library entries shows an inline *Choose from
+  library…* and the placeholder *"Type a role, or choose one from the library"*. Task shows a static
+  *Custom* tag + ⋯ (no fake picker). ↑/↓ only appear when a slot has 2+ parts, edge arrows disabled;
+  the source menu carries no Move items. Unchecking *Include in prompt* shows *Excluded*. **[auto]**
+- TC-prompt-07 (P/A): **detach-on-typing** — typing a character, Backspace/Delete/Enter, paste, cut
+  or drop on a linked part asks *"…Edit it as a Custom copy? The library part is not changed."*;
+  Cancel leaves it linked and unchanged; OK makes it Custom AND applies the keystroke/paste that
+  triggered it (not swallowed). Arrow keys/Tab/Esc
+  never ask. **Enter must not auto-confirm the dialog.** On touch (iOS opens no keyboard on a
+  readOnly field) a tap asks. **[auto: keydown + Enter]**
+- TC-prompt-08 (P): **Save to library…** on a non-blank Custom part asks for a name, writes the
+  part (toast *"Prompt library saved"*) and links the block's part to it. Revert of the page edit
+  afterwards leaves the library part in place (documented, harmless).
+- TC-prompt-09 (P/N/A): **Library panel** (sidebar `⋯` → ✦ Prompt library, or ⌘K →
+  *Prompt library…*) — tabs Role / Context / Constraints / Output (←/→/Home/End move between them),
+  search, **+ New**, Edit (name required, ≤200 bytes; tags comma-separated), Duplicate, Delete.
+  Delete **online** of an in-use part says *"Used in N page(s)… will show "Not in library""*;
+  **offline** says usage can't be checked. Focus is trapped (Tab wraps); **Escape with a nested
+  confirm open closes only the confirm**; closing with an unsaved edit asks to discard; focus
+  returns to the opener. **[auto: openPanel dialog]**
+- TC-prompt-10 (A): **out-of-sync notice** — change a prompt block's `code` only (via the API, or an
+  older CodeMan): the block shows the notice (a left-barred `role=note`), **Edit is disabled**, part/format changes are
+  refused with a toast, Copy + variables still work. *Show stored text* reveals it (+ copy);
+  *Keep it as a Task part* adds it as an OFF Task part; *Rebuild from parts* (confirmed) discards
+  it. The text is never discarded unseen. **[auto]**
+- TC-prompt-11 (P/E): **Find & Replace** — a term inside a prompt PART is counted once and replaced
+  in the part; the server flags the block `mirrorStale` (it never regexes the stored text) and on
+  open the client silently re-assembles it — **no out-of-sync lock** after a replace (even of a word
+  like `task` that also appears in the wrappers, which counts 0 and changes no page). Tag rename
+  never alters a prompt block. **[auto: tests-api + normalize]**
+- TC-prompt-12 (P): **quick-paste** (⌘⇧K) finds a prompt by label or part text, badges it
+  *Prompt*, and Enter copies the **filled, assembled** prompt (not the stored text) — online and
+  offline (cached pages). **[auto]**
+- TC-prompt-13 (P/E): convert prompt → note/code keeps the assembled text (a confirm first when it
+  has >1 non-blank part or any link); note/code → prompt puts the text in the Task part; Duplicate
+  copies parts + links; a block merge including a prompt is refused (*convert first*); moving it into
+  a subsection works. **[auto]**
+- TC-prompt-14 (A): exports — Markdown fences the filled prompt (the fence grows past any backtick
+  run inside it); the HTML export shows it in an escaped `pre.prompt` (a `<script>` in a part is
+  inert text). **[auto]**
+- TC-prompt-15 (P/E): **backup** — `All pages → JSON` carries `promptLibrary` in the sidecar (the
+  export alert names *the prompt-part library*); importing into another library adds only the
+  absent ids, keeps existing parts' text, and reports *"prompt library: N part(s) added, M already
+  present"*. An old bundle makes no library call. **[auto]**
+- TC-prompt-16 (P/E): **offline** — with a primed library, go offline: edit/create parts (toast
+  *"…saved offline — will sync"*), several edits collapse into ONE queued op; reconnect → it syncs.
+  With a concurrent edit made on another device meanwhile, reconnect **merges by id** (toast
+  *"Synced — prompt library merged…"*). With NO mirror, the library shows as unavailable (no false
+  "Not in library" chips). A save that hits a passing server error (malformed 200) becomes the local
+  state and is retried — a second edit coalesces ON TOP of it and BOTH reach the server. A save queued
+  behind one in flight re-bases on that op's new rev (a part deleted in between stays deleted).
+  Reload with a library save still queued → the library shows the LOCAL version (a server read never
+  overwrites it). **[auto: coalescing + replay + QA-H1/M2]**
+- TC-prompt-17 (N): a library save the server rejects (e.g. an invalid/oversized document) shows
+  *"Library save failed: … — kept in unsynced changes"* and appears in **Review unsynced changes**
+  as *Save prompt library*; Retry re-sends it. Never reported as saved. **[auto: replay park]**
+- TC-prompt-17b (A): **same-second conflict** — two library saves from the same read, within one
+  second, from two tabs: the second gets a conflict and rebases (the content-hash `_rev` token; an
+  mtime-only check let both write). **[auto: tests-api]**
+- TC-prompt-17c (P/E): **Revert after a mid-edit autosave** (any block kind): Edit, type, switch to
+  another app (visibility flush), come back, Revert → reload the page: the ORIGINAL text is on disk.
+  **[auto: QA-H2, code + prompt]**
+- TC-prompt-17d (P): opening the picker or the detach confirm mid-edit does NOT autosave / toast
+  "Saved"; leaving the block for elsewhere still does. **[auto: UX-H3 + control]**
+- TC-prompt-17e (E): Esc in a dirty prompt reverts and keeps focus in the same part; a second Esc
+  exits edit mode. **[auto: QA-M4]**
+- TC-prompt-18 (P): **375px mobile** — slot cards stack, part heads wrap, chips get their own row,
+  ↑ ↓ ✕ are 34×32, source/+Add/chip buttons ≥32px tall, inputs are 16px (no iOS zoom), the toolbar
+  shows `✎ ⧉ ⋯ ✕`, the Library panel's tabs (always showing a count) scroll horizontally with a
+  fade at the edge.
+
 ### TC-convert — Block-kind conversion
 - TC-convert-01 (P): code→note→rich→checklist→csv→json→html→code carries text; rich→other **preserves
   line breaks** (regression: detached-innerText newline loss); entities decode; code↔csv, code↔json
@@ -1220,6 +1329,21 @@ say so in the report rather than implying full coverage.**
 - TC-ext-html-desktop (packaged desktop build): the same `.mini-menu` internal scrolling +
   keyboard nav, and the `⋯ → Preview height…` presets, behave identically in the packaged
   Electron app. *Why:* needs a packaged build.
+- TC-ext-prompt-mixed (mixed client versions): open a prompt page in a CodeMan from BEFORE this
+  release — it shows the assembled text as a plain-text code block; edit + save it there, then open
+  it in this release → the out-of-sync notice (TC-prompt-10). A pre-release client converting it
+  leaves `prompt` beside its own flag → this release renders the OTHER kind. *Why:* needs two
+  client versions side by side.
+- TC-ext-prompt-oldserver (new client, old `api.php`): the library reads as unavailable with NO
+  toast ("unknown action"); a library save is parked as a reviewable dead-letter, never lost.
+  Deploy the server first. *Why:* needs an old server build.
+- TC-ext-prompt-size (library ≈1 MB): the panel stays responsive at a few thousand parts; a save over
+  1 MB is refused (413) and parked, the file untouched. *Why:* needs a large fixture.
+- TC-ext-prompt-ios (real iOS): tapping a linked (readOnly) part asks to detach (no keyboard would
+  otherwise open). *Why:* real touch device.
+- TC-ext-prompt-desktop (packaged desktop app): `prompt_library` passes the proxy header-less (on
+  `READ_ONLY_ACTIONS`), `save_prompt_library` without the header is 403'd by the proxy. *Why:*
+  needs a packaged build.
 - TC-ext-mobile (real device): iOS/Android touch, drag, pinch/zoom-lock, standalone-PWA top inset,
   `manifest.webmanifest` install. *Why:* emulated viewport ≠ a real device.
 - TC-ext-perf (scale): seed ~1200+ pages; measure tree/search/page-render + the deep-search cap.

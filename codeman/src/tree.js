@@ -149,6 +149,54 @@ async function loadTree() {
   renderTree();
 }
 
+// Load the prompt-part library into the promptLibrary/promptLibMtime globals. Runs in
+// PARALLEL with loadTree at boot (never awaited by it — the tree must not wait for the
+// library). Returns true when a library was loaded. NEVER THROWS.
+// A result marked `_unavailable` (offline with no mirror) or an error leaves the global
+// null = "unknown", which is what keeps linked parts from all showing "Not in library".
+let _promptLibErrToasted = false;
+function adoptPromptLibrary(d) {
+  promptLibMtime = d._mtime == null ? null : d._mtime;
+  promptLibRev = d._rev == null ? null : d._rev;
+  const copy = Object.assign({}, d); delete copy._mtime; delete copy._rev; delete copy._unavailable;
+  promptLibrary = copy;
+  onPromptLibraryChanged();
+}
+async function loadPromptLibrary() {
+  try {
+    // The queue is restored asynchronously at boot (offline.js) — decide only once it is
+    // there, or a queued offline library edit looks absent.
+    if (typeof syncQueueReady !== 'undefined') await syncQueueReady;
+    // A library save is still queued ⇒ the server copy is OLDER than ours; the flush
+    // refreshes from the server once that op lands. Until then, if nothing is loaded
+    // yet, seed from the local mirror (which holds the queued edit) so the library stays
+    // usable across a reload.
+    if (libSaveQueued()) {
+      if (promptLibrary == null) {
+        const d = await kvGet('promptlib');
+        if (isPromptLibraryDoc(d)) adoptPromptLibrary(d);
+      }
+      return false;
+    }
+    const res = await api('prompt_library');
+    if (isPromptLibraryDoc(res) && !res._unavailable) { adoptPromptLibrary(res); return true; }
+    // An OLD api.php answers "unknown action" — that's a deploy-order state, not a fault
+    // worth a toast (writes would dead-letter visibly anyway). Offline with no saved copy
+    // (_unavailable) is said where it matters (picker/panel), not at boot. Anything else —
+    // an error body, or a 200 that isn't a library — is said ONCE.
+    const bad = res && !res._unavailable && (res.error ? !/unknown action/i.test(String(res.error)) : !isPromptLibraryDoc(res));
+    if (bad && !_promptLibErrToasted) {
+      _promptLibErrToasted = true;
+      toast('Prompt library could not be read' + (res.error ? ' (' + res.error + ')' : ''));
+    }
+    return false;
+  } catch (e) { return false; }
+}
+async function ensurePromptLibrary() {
+  if (!promptLibrary) await loadPromptLibrary();
+  return promptLibrary;
+}
+
 async function moveItem(srcPath, targetFolder) {
   if (!srcPath) return;
   // Ignore drop onto the folder it already lives in.

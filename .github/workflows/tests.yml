@@ -176,11 +176,18 @@ jobs:
             exit 1
           fi
           echo "CSRF read-only allowlists match ($(echo "$php_tokens" | grep -c .) actions)"
-      - name: edit-session wiring census (all five session-bearing render paths)
+          # A WHOLE-DOCUMENT write must never be allowlisted on either side: the prompt
+          # library save is the newest write, and parity alone would stay green if BOTH
+          # lists gained it (they would still "match"). Fail-closed is the point.
+          if echo "$php_tokens $js_tokens" | grep -qw 'save_prompt_library'; then
+            echo 'save_prompt_library is on a CSRF read-only allowlist — it is a WRITE and must need the header'
+            exit 1
+          fi
+      - name: edit-session wiring census (all six session-bearing render paths)
         run: |
           # The autosave-deferral contract lives in FOUR hooks that must be wired once per
           # session-bearing render path (code+note share renderBlock; rich, csv, json,
-          # html-entry): beforeEditSession (the clean-page snapshot — what makes Cancel
+          # html-entry, prompt): beforeEditSession (the clean-page snapshot — what makes Cancel
           # free), afterEditSession (the session end), wireEscapeRevert (Esc → the Cancel
           # BUTTON) and wireFocusFlush (the crash-safety flush while autosave is deferred).
           # Dropping ONE call from ONE path is invisible to any single behavioural
@@ -196,16 +203,18 @@ jobs:
           n_esc=$(nocomment | grep -oE 'wireEscapeRevert\(' | wc -l | tr -d ' ' || true)
           n_flush=$(nocomment | grep -oE 'wireFocusFlush\(' | wc -l | tr -d ' ' || true)
           fails=0
-          # 5 call sites (the definition line is `function beforeEditSession() {`, unmatched)
-          [ "$n_before" = 5 ] || { echo "beforeEditSession() call sites: $n_before, expected 5"; fails=1; }
-          # 10 = 2 per path: each Revert button has BOTH branches (clean-exit and
+          # 6 call sites (the definition line is `function beforeEditSession() {`, unmatched)
+          [ "$n_before" = 6 ] || { echo "beforeEditSession() call sites: $n_before, expected 6"; fails=1; }
+          # 12 = 2 per path: each Revert button has BOTH branches (clean-exit and
           # restore-backup), and both end the session. EXACT, not >=8 — a floor is silent
           # when one path loses its restore-backup call (the same reason the tests.html
           # FLOOR is an equality). If a path is legitimately added, bump this to 2*paths.
-          [ "$n_after" = 10 ] || { echo "afterEditSession() calls: $n_after, expected 10 (2 per render path)"; fails=1; }
-          # 5 call sites + 1 definition each
-          [ "$n_esc" = 6 ] || { echo "wireEscapeRevert( occurrences: $n_esc, expected 6 (5 calls + 1 definition)"; fails=1; }
-          [ "$n_flush" = 6 ] || { echo "wireFocusFlush( occurrences: $n_flush, expected 6 (5 calls + 1 definition)"; fails=1; }
+          [ "$n_after" = 12 ] || { echo "afterEditSession() calls: $n_after, expected 12 (2 per render path)"; fails=1; }
+          # 6 call sites + 1 definition each. NB: the count is of non-comment LINES' tokens,
+          # so an inline trailing comment naming a hook would break it — keep hook names
+          # out of trailing comments.
+          [ "$n_esc" = 7 ] || { echo "wireEscapeRevert( occurrences: $n_esc, expected 7 (6 calls + 1 definition)"; fails=1; }
+          [ "$n_flush" = 7 ] || { echo "wireFocusFlush( occurrences: $n_flush, expected 7 (6 calls + 1 definition)"; fails=1; }
           if [ "$fails" = 1 ]; then
             echo 'An edit-session hook lost (or gained) a call site — see the autosave-deferral gotcha in CLAUDE.md.'
             echo 'If a render path was legitimately added/removed, update BOTH these counts and the tests.html census.'
@@ -253,7 +262,7 @@ jobs:
             exit 1
           fi
           echo "default-child-order oracle matches in both suites: $html_oracle"
-      - name: no html-block mutation calls renderPage (it would kill the live iframe)
+      - name: no html-block / prompt-block mutation calls renderPage
         run: |
           # renderPage() rewrites #page wholesale (`#page.innerHTML = ''`), which destroys a
           # running html-project iframe. Every in-block mutation (upload, file remove, entry
@@ -262,11 +271,18 @@ jobs:
           # renderHtmlBlock are the ones that intentionally tear the block down: the
           # block-kind CONVERT and the DELETE. Same shape as the writeJsonAtomic primitive
           # ban: scope to the function body, allowlist by what the line does.
-          if awk '/^function renderHtmlBlock\(/{f=1} f{print} f&&/^}/{exit}' codeman/src/editor.js \
-             | grep -vE '^[[:space:]]*(//|\*)' \
-             | grep -n 'renderPage()' \
-             | grep -vE 'convertBlock|parentArray\.splice'; then
-            echo 'renderHtmlBlock has a renderPage() call outside convert/delete — it would kill the live iframe.'
-            echo '(see the html-block rule (5) in CLAUDE.md: mutate the subtree + remountFrame() + scheduleSave())'
-            exit 1
-          fi
+          # renderPromptBlock is held to the SAME rule: a page re-render on every part
+          # edit would drop the caret/focus mid-typing and re-render the whole page, so its
+          # in-block changes rebuild only its own pane. Each function must EXIST first —
+          # an awk over a renamed function prints nothing and the grep would pass silently.
+          for fn in renderHtmlBlock renderPromptBlock; do
+            grep -q "^function $fn(" codeman/src/editor.js || { echo "function $fn not found in editor.js — update this invariant"; exit 1; }
+            if awk "/^function $fn\\(/{f=1} f{print} f&&/^}/{exit}" codeman/src/editor.js \
+               | grep -vE '^[[:space:]]*(//|\*)' \
+               | grep -n 'renderPage()' \
+               | grep -vE 'convertBlock|parentArray\.splice'; then
+              echo "$fn has a renderPage() call outside convert/delete."
+              echo '(see the html-block rule (5) / the prompt-block rules in CLAUDE.md: mutate the subtree + scheduleSave())'
+              exit 1
+            fi
+          done
